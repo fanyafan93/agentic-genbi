@@ -124,6 +124,7 @@ class AnalysisTaskStatus(StrictModel):
     error: "ApiError | None" = None
     created_at: datetime
     updated_at: datetime
+    completed_at: datetime | None = None
 
 
 class SqlErrorCategory(StrEnum):
@@ -203,9 +204,9 @@ class ApiError(StrictModel):
 ### 模型不变量
 
 - `SqlExecutionResult.success` 为 `true` 时 `error` 必须为空；为 `false` 时 `error` 必须存在，且结果行必须为空。
-- `AnalysisTaskStatus.status` 为 `succeeded` 时 `report` 必须存在且 `error` 为空。
-- `failed` 或 `requires_input` 时 `error` 必须存在且 `report` 为空。
-- `queued` 和 `running` 时 `report` 与终态错误都为空。
+- `AnalysisTaskStatus.status` 为 `succeeded` 时 `report` 与 `completed_at` 必须存在且 `error` 为空。
+- `failed` 或 `requires_input` 时 `error` 与 `completed_at` 必须存在且 `report` 为空。
+- `queued` 和 `running` 时 `report`、终态错误与 `completed_at` 都为空。
 - `ChartSpec` 的 `x_field`、`y_fields` 和 `series_field` 必须引用 `table.columns` 中存在的字段。
 - `sql_attempts` 包含首次执行，因此取值为 1 到 3；“最多重试两次”对应最大值 3。
 - `raw_message` 只供内部审计，不进入 API JSON 或模型上下文。

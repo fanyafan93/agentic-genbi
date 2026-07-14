@@ -2,97 +2,55 @@
 
 更新时间：2026-07-14
 
-> 每次会话结束前更新本文件。只写已验证事实；不确定内容标记为“待验证假设”。后续会话应覆盖各节内容，而不是无限追加流水账。
-
 ## 当前任务
 
-完成任务 1：项目骨架和健康检查。仅交付可运行的前后端骨架、配置校验、Docker Compose、锁文件与健康检查；不开发分析业务功能。
+已完成任务 2：固定任务生命周期和报告 JSON API。实现仅验证 API 契约与进程内状态流转，不接入模型、数据库或 SQL 执行。
 
 ## 已完成内容
 
-- 已检查仓库与 Git 状态：`Agentic-GenBI-MVP` 分支开始时为空且工作区干净。
-- 已确认使用方案 B：FastAPI 进程内后台任务，前端创建任务后轮询状态。
-- 已完成产品范围、总体架构、接口契约和两份 ADR 的中文设计稿。
-- 已将 `docs/plans/current.md` 重写为中文实施计划，并将 API 路径、任务状态和约束统一到最新架构。
-- 已决定不将 `build_report` 注册为 Agent 工具，改用 Agent 结构化输出与服务层确定性组装/校验。
-- 已对照 OpenAI Agents SDK 官方文档核对 function tools、结构化输出与 tracing 能力。
-- 已建立 FastAPI 骨架：`GET /health` 返回 `{"status":"ok"}`，缺少 `APP_ENV` 会产生不含密钥的清晰 Pydantic 校验错误。
-- 已建立 Next.js 骨架页，明确显示“项目骨架阶段”。
-- 已新增 `docker-compose.yml`，其中包含 frontend、backend 和 mysql 服务；前后端镜像可构建并启动。
-- 已生成 `backend/uv.lock` 与 `frontend/package-lock.json`，并通过本机和 Compose 容器测试验证。
+- 新建严格的 Pydantic API 契约：拒绝未知字段，问题去除首尾空白并拒绝空白/超过 4000 字符的输入。
+- 实现单 FastAPI 进程内的任务注册表；任何未完成任务都会占用唯一 worker 槽位，因此第二个创建请求会得到容量不足语义。
+- `POST /api/v1/analysis-tasks` 返回 `202` 和 `queued` 快照，后台固定报告依次执行 `queued -> running -> succeeded`。
+- `GET /api/v1/analysis-tasks/{task_id}` 返回最新快照；未知 UUID 或进程重启导致的内存状态丢失均返回 `404 TASK_NOT_FOUND`。
+- 终态包含 `report` 和 `completed_at`；非终态不包含报告、错误或完成时间。
+- 请求级 `422`、容量 `429` 与未知任务 `404` 使用统一的 `{ "error": ... }` 错误外壳。
 
 ## 修改文件
 
-- `AGENTS.md`
-- `CLAUDE.md`
-- `README.md`
-- `docs/product/mvp-scope.md`
-- `docs/architecture/overview.md`
+- `backend/app/api/analysis_tasks.py`
+- `backend/app/schemas/analysis.py`
+- `backend/app/services/task_service.py`
+- `backend/app/main.py`
+- `backend/tests/api/test_analysis_tasks.py`
+- `backend/tests/services/test_task_service.py`
+- `backend/tests/fixtures/fixed_report.py`
 - `docs/architecture/interfaces.md`
-- `docs/architecture/decisions/ADR-001-agent-runtime.md`
-- `docs/architecture/decisions/ADR-002-mvp-boundaries.md`
 - `docs/plans/current.md`
-- `docs/handoffs/latest.md`
-- `.gitignore`
-- `.env.example`
-- `docker-compose.yml`
-- `backend/`
-- `frontend/`
 
 ## 测试结果
 
-- 本机后端：`uv run --no-sync pytest tests/test_health.py -v`，2 项通过。
-- 本机前端：`npm run test -- --run tests/health.test.tsx`，1 项通过；`npm run build` 通过。
-- npm 运行时审计：通过 `postcss@8.5.10` override 后，`npm audit --omit=dev --json` 报告 0 个漏洞。
-- Compose：`docker compose config` 成功；容器内后端 2 项 pytest 和前端 1 项 Vitest 测试通过。
-- 运行时：Compose 启动后，`http://127.0.0.1:8000/health` 返回 `{"status":"ok"}`，前端响应包含“项目骨架阶段”。
+- `uv run --frozen pytest tests/api/test_analysis_tasks.py tests/services/test_task_service.py -v`：6 项通过。
+- `uv run --frozen pytest -v`（在 `backend/` 目录）：8 项通过，包括任务 1 健康检查回归。
+- `docker compose config`：通过。
 
 ## 架构决定
 
-- 单仓库、Next.js 前端、FastAPI 后端、单 Agent、单 MySQL。
-- FastAPI 是任务编排和安全预算边界；Agent SDK 不承担授权。
-- 只注册 `list_tables`、`get_table_schema`、`execute_sql`。
-- SQL 初次执行后最多修复重试两次，即最多三次 SQL 尝试。
-- 安全违规、权限、连接、超时和资源错误不进入 Agent 自动重试。
-- 任务状态只在单进程内存中保存，服务重启后丢失。
+- 任务注册表故意不持久化；服务重启后状态不可恢复，这是 MVP 的明确边界。
+- 任务 2 只有一个 worker 槽位，不提供队列、取消、恢复或并行执行。
+- 固定报告只是契约测试替身；任务 5 才会以固定只读 MySQL 查询替换它，任务 8 才接入 Agent 结构化输出。
 
 ## 未完成事项
 
-- 实施任务 2：固定任务生命周期和报告 JSON API。
-- 实施任务 4：只读 MySQL 连接；MySQL 骨架服务尚未创建只读账号或测试 schema。
+- 任务 3：使用当前创建/轮询 API 渲染前端固定报告。
+- 任务 4：创建 MySQL 测试 schema 与只读连接。
+- 任务 5：以固定只读 SQL 替换本任务的内存固定报告。
 
 ## 已知问题
 
-- MySQL 8.4 服务仅用于 Compose 骨架；测试 schema、只读账号、表白名单和字段备注尚未实现。
-- OpenAI 模型与 Agents SDK 尚未接入，相关版本将在任务 8 锁定。
-- 最大行数、查询超时、总任务超时、工具调用上限、并发上限和轮询间隔尚需基线测试。
-- 金额和日期的 JSON 序列化策略尚需通过前后端契约测试确认。
-- OpenAI tracing 是否允许接收脱敏后的问题、SQL 和工具结果尚需人工确认；默认方案是不包含敏感数据。
+- 单进程内存状态不支持重启恢复、可靠排队、多 worker 或多实例。
+- 后台固定任务很快完成；前端任务应根据 API 契约轮询非终态，而不能假设能在网络层观察到每一个中间状态。
+- MySQL、OpenAI Agents SDK 和 SQL 自动修复均尚未接入。
 
 ## 下一步建议
 
-按已批准边界继续任务 2，先实现固定任务生命周期和报告 JSON API，再接入真实数据库与 Agent。
-
-## 后续会话更新模板
-
-```markdown
-# 最新交接
-
-更新时间：YYYY-MM-DD
-
-## 当前任务
-
-## 已完成内容
-
-## 修改文件
-
-## 测试结果
-
-## 架构决定
-
-## 未完成事项
-
-## 已知问题
-
-## 下一步建议
-```
+按依赖顺序继续任务 3，先让前端提交问题、轮询当前 API 并安全渲染固定报告。

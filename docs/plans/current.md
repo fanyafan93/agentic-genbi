@@ -81,7 +81,7 @@ flowchart LR
 
 ## 任务 2：固定任务生命周期和报告 JSON API
 
-**状态：** 待办
+**状态：** 已完成（2026-07-14）
 **目标：** 实现进程内任务注册表和 API 契约，先用一个确定性的固定报告验证状态流转，再引入模型和数据库。
 
 **文件：**
@@ -100,7 +100,8 @@ flowchart LR
 - 终态任务包含报告/完成时间；非终态任务不包含这些字段。
 - 注册表丢失语义和单 worker 限制必须写入代码和测试说明。
 
-**测试：** `pytest backend/tests/api/test_analysis_tasks.py backend/tests/services/test_task_service.py -v`。
+**验证结果：** 已实现严格 Pydantic 请求/响应契约、单进程内存注册表及单 worker 槽位。创建请求返回 `queued` 快照，后台固定分析按 `queued -> running -> succeeded` 转换；服务重启或未知 UUID 统一返回 `TASK_NOT_FOUND`。终态包含固定报告和 `completed_at`，非终态不包含终态字段。
+**测试：** `uv run --frozen pytest tests/api/test_analysis_tasks.py tests/services/test_task_service.py -v`，6 项通过。
 **依赖：** 任务 1。
 **推荐提交：** `feat: add in-process analysis task contract`
 
