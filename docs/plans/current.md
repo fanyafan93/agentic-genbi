@@ -26,8 +26,8 @@
 | 产品范围 | 已完成文档 |
 | 架构和 ADR | 已完成文档 |
 | 接口契约 | 已完成文档 |
-| 应用实现 | 尚未开始 |
-| 测试套件 | 尚未开始 |
+| 应用实现 | 已完成任务 1 骨架；分析功能尚未开始 |
+| 测试套件 | 已完成任务 1 健康检查；其余测试尚未开始 |
 
 ## 依赖关系图和推荐顺序
 
@@ -54,7 +54,7 @@ flowchart LR
 
 ## 任务 1：项目骨架和健康检查
 
-**状态：** 待办
+**状态：** 已完成（2026-07-14）
 **目标：** 建立最小的前后端包、已验证并锁定的依赖、配置校验、Docker Compose 和健康检查，不包含分析行为。
 
 **文件：**
@@ -74,13 +74,14 @@ flowchart LR
 - 缺失必需配置时返回清晰的配置错误，且不泄露秘密值。
 - 依赖版本经过兼容性检查并锁定，没有引入禁止依赖。
 
-**测试：** 运行 `docker compose config`、`docker compose run --rm backend pytest backend/tests/test_health.py -v`、`docker compose run --rm frontend npm run test -- --run`。
+**验证结果：** 已生成并验证 `backend/uv.lock` 与 `frontend/package-lock.json`；`docker compose config` 成功，Compose 容器内后端 2 项 pytest 和前端 1 项 Vitest 测试均通过，运行中的 `GET /health` 返回 `200` 与 `{"status":"ok"}`。
+**测试：** `docker compose config`、`docker compose run --rm --no-deps backend uv run pytest tests/test_health.py -v`、`docker compose run --rm --no-deps frontend npm run test -- --run tests/health.test.tsx`。
 **依赖：** 仅依赖已批准的架构文档。
 **推荐提交：** `chore: scaffold MVP services and health checks`
 
 ## 任务 2：固定任务生命周期和报告 JSON API
 
-**状态：** 待办
+**状态：** 已完成（2026-07-14）
 **目标：** 实现进程内任务注册表和 API 契约，先用一个确定性的固定报告验证状态流转，再引入模型和数据库。
 
 **文件：**
@@ -99,13 +100,14 @@ flowchart LR
 - 终态任务包含报告/完成时间；非终态任务不包含这些字段。
 - 注册表丢失语义和单 worker 限制必须写入代码和测试说明。
 
-**测试：** `pytest backend/tests/api/test_analysis_tasks.py backend/tests/services/test_task_service.py -v`。
+**验证结果：** 已实现严格 Pydantic 请求/响应契约、单进程内存注册表及单 worker 槽位。创建请求返回 `queued` 快照，后台固定分析按 `queued -> running -> succeeded` 转换；服务重启或未知 UUID 统一返回 `TASK_NOT_FOUND`。终态包含固定报告和 `completed_at`，非终态不包含终态字段。
+**测试：** `uv run --frozen pytest tests/api/test_analysis_tasks.py tests/services/test_task_service.py -v`，6 项通过。
 **依赖：** 任务 1。
 **推荐提交：** `feat: add in-process analysis task contract`
 
 ## 任务 3：固定前端报告展示
 
-**状态：** 待办
+**状态：** 已完成（2026-07-14）
 **目标：** 使用任务 2 的固定响应，证明浏览器侧完整呈现契约。
 
 **文件：**

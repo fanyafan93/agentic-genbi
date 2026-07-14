@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling==1.28.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentic-genbi-backend"
+version = "0.1.0"
+description = "Agentic GenBI MVP FastAPI service"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.139.0",
+    "pydantic-settings==2.14.2",
+    "uvicorn==0.51.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx==0.28.1",
+    "pytest==9.1.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
