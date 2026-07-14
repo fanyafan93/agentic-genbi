@@ -123,3 +123,51 @@ def test_coordinator_stops_after_the_third_failed_query() -> None:
 
     assert error.value.code == "SQL_RETRY_EXHAUSTED"
     assert executor.calls == 3
+
+
+def test_coordinator_stops_a_non_repairable_error_without_another_sql_attempt() -> None:
+    class UnsafeExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, _: str) -> SqlToolResult:
+            self.calls += 1
+            return SqlToolResult(
+                success=False,
+                error=SqlToolError(SqlErrorCode.SQL_SAFETY_VIOLATION, "safe", False),
+            )
+
+    executor = UnsafeExecutor()
+
+    def scripted_agent(_: str, tools) -> dict[str, object]:
+        tools.execute_sql("DELETE FROM sales_channel_monthly")
+        tools.execute_sql("SELECT channel FROM sales_channel_monthly")
+        return {"title": "unused", "summary": ["unused"], "chart": None, "assumptions": [], "warnings": []}
+
+    coordinator = DynamicAnalysisCoordinator(settings(), executor=executor, agent_runner=scripted_agent)
+
+    from app.agents.coordinator import DynamicAnalysisError
+    import pytest
+
+    with pytest.raises(DynamicAnalysisError) as error:
+        coordinator.run("unsafe query")
+
+    assert error.value.code == "SQL_SAFETY_VIOLATION"
+    assert executor.calls == 1
+
+
+def test_approved_agent_tool_registry_contains_exactly_three_tools() -> None:
+    from app.agents.coordinator import ApprovedAnalysisTools
+
+    tools = ApprovedAnalysisTools(
+        settings(),
+        executor=SequencedExecutor(),
+        list_tables_fn=lambda _: ListTablesResult(),
+        get_schema_fn=lambda table_name, _: TableSchema(table_name=table_name, columns=[]),
+    )
+
+    assert [tool.name for tool in tools.as_agent_tools()] == [
+        "list_tables",
+        "get_table_schema",
+        "execute_sql",
+    ]

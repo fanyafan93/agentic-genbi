@@ -9,6 +9,10 @@ services:
       MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
       MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/v1}
       MINIMAX_MODEL: ${MINIMAX_MODEL:-MiniMax-M3}
+      MAX_QUERY_ROWS: ${MAX_QUERY_ROWS:-500}
+      QUERY_TIMEOUT_MS: ${QUERY_TIMEOUT_MS:-5000}
+      MAX_TOOL_CALLS: ${MAX_TOOL_CALLS:-12}
+      MAX_SQL_RETRIES: ${MAX_SQL_RETRIES:-2}
     ports:
       - "8000:8000"
     healthcheck:
