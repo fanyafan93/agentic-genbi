@@ -1,0 +1,16 @@
+# Local worktrees and environment-specific secrets
+.worktrees/
+.env
+.env.*
+!.env.example
+
+# Python tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Node.js tooling
+node_modules/
+.next/
+coverage/
