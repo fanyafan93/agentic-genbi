@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-当前处于 **MVP 架构与项目文档阶段**。仓库尚未包含可运行的前后端业务代码、Docker Compose 配置或依赖锁文件。本文中的启动、环境变量和测试命令是已批准的目标约定，将在对应实施任务完成后变为可执行命令。
+项目已完成 **任务 1：项目骨架和健康检查**。仓库现在包含可运行的 FastAPI 与 Next.js 骨架、Docker Compose、`.env.example`、`uv.lock` 和 `package-lock.json`；分析任务、数据库连接、SQL 安全、Agent 和报表功能仍在后续任务中实现。
 
 ## 规划中的 MVP 能力
 
@@ -23,7 +23,7 @@
 ├── AGENTS.md                         # Agent 协作与安全规则
 ├── CLAUDE.md                         # 引用 AGENTS.md
 ├── README.md                         # 项目入口
-├── docker-compose.yml                # 规划：本地前后端编排
+├── docker-compose.yml                # 本地前后端与 MySQL 编排
 ├── docs/
 │   ├── product/mvp-scope.md          # 产品范围与验收标准
 │   ├── architecture/overview.md      # 架构、流程与安全边界
@@ -52,22 +52,23 @@
     └── tests/                        # Vitest 测试
 ```
 
-目录在首次骨架任务中按需创建，不提前建立空目录。
+任务 1 只创建了启动骨架实际需要的目录和文件；其余业务目录会在对应任务中按需创建。
 
 ## 本地启动方式
 
-待项目骨架实现后，目标命令为：
+从仓库根目录运行：
 
 ```bash
 docker compose up --build
 ```
 
-计划访问地址：前端 `http://localhost:3000`，后端健康检查 `http://localhost:8000/health`。端口仍是待验证假设，以首次骨架提交为准。
+前端地址为 `http://localhost:3000`，后端健康检查为 `http://localhost:8000/health`。两者已在 Docker Compose 中验证。
 
 ## 规划环境变量
 
 | 变量 | 用途 | 是否敏感 |
 | --- | --- | --- |
+| `APP_ENV` | 当前骨架必须提供，取值为 `development`、`test` 或 `production` | 否 |
 | `OPENAI_API_KEY` | OpenAI API 身份凭据 | 是 |
 | `OPENAI_MODEL` | Agent 使用的模型，由部署环境显式配置 | 否 |
 | `DATABASE_URL` | MySQL 只读连接串 | 是 |
@@ -78,20 +79,21 @@ docker compose up --build
 | `MAX_SQL_RETRIES` | SQL 修复重试上限，MVP 必须为 `2` | 否 |
 | `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` | 是否在 SDK trace 中包含敏感输入输出，默认应关闭 | 否 |
 
-密钥只通过本地 `.env` 或部署环境注入，禁止提交到 Git。默认值和示例将在项目骨架任务中验证后写入 `.env.example`。
+密钥只通过本地 `.env` 或部署环境注入，禁止提交到 Git。`.env.example` 只包含占位值；任务 1 仅校验 `APP_ENV`，其余配置将在对应功能接入时启用。
 
-## 规划测试命令
+## 骨架测试命令
 
 ```bash
-cd backend && pytest
-cd frontend && npm run test
+docker compose config
+docker compose run --rm --no-deps backend uv run pytest tests/test_health.py -v
+docker compose run --rm --no-deps frontend npm run test -- --run tests/health.test.tsx
 ```
 
-这些命令在依赖和测试骨架尚未创建前不可运行。
+也可在本机分别运行 `cd backend && uv sync --all-groups && uv run pytest tests/test_health.py -v` 和 `cd frontend && npm ci && npm run test -- --run tests/health.test.tsx`。
 
 ## 当前尚未实现
 
-除本仓库文档外，前端页面、FastAPI 应用、任务状态存储、数据库连接、SQL 安全检查、Agent、工具、报告生成、Docker Compose 和自动化测试均尚未实现。WrenAI、LangGraph、多 Agent、多租户、Redis、Celery、多数据库、PDF、仪表板编辑器和任意代码执行明确不在 MVP 范围内。
+已实现 FastAPI `/health`、严格的骨架配置校验、Next.js 骨架页、Docker Compose 与健康检查自动化测试。任务状态存储、数据库连接、SQL 安全检查、Agent、工具和报告生成仍未实现。WrenAI、LangGraph、多 Agent、多租户、Redis、Celery、多数据库、PDF、仪表板编辑器和任意代码执行明确不在 MVP 范围内。
 
 ## 文档导航
 

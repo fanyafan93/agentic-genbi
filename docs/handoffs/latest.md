@@ -6,7 +6,7 @@
 
 ## 当前任务
 
-完成 Web 数据分析 Agent MVP 的中文架构设计、接口契约、实施计划和项目协作文档。本次不开发正式业务功能。
+完成任务 1：项目骨架和健康检查。仅交付可运行的前后端骨架、配置校验、Docker Compose、锁文件与健康检查；不开发分析业务功能。
 
 ## 已完成内容
 
@@ -16,6 +16,10 @@
 - 已将 `docs/plans/current.md` 重写为中文实施计划，并将 API 路径、任务状态和约束统一到最新架构。
 - 已决定不将 `build_report` 注册为 Agent 工具，改用 Agent 结构化输出与服务层确定性组装/校验。
 - 已对照 OpenAI Agents SDK 官方文档核对 function tools、结构化输出与 tracing 能力。
+- 已建立 FastAPI 骨架：`GET /health` 返回 `{"status":"ok"}`，缺少 `APP_ENV` 会产生不含密钥的清晰 Pydantic 校验错误。
+- 已建立 Next.js 骨架页，明确显示“项目骨架阶段”。
+- 已新增 `docker-compose.yml`，其中包含 frontend、backend 和 mysql 服务；前后端镜像可构建并启动。
+- 已生成 `backend/uv.lock` 与 `frontend/package-lock.json`，并通过本机和 Compose 容器测试验证。
 
 ## 修改文件
 
@@ -29,12 +33,19 @@
 - `docs/architecture/decisions/ADR-002-mvp-boundaries.md`
 - `docs/plans/current.md`
 - `docs/handoffs/latest.md`
+- `.gitignore`
+- `.env.example`
+- `docker-compose.yml`
+- `backend/`
+- `frontend/`
 
 ## 测试结果
 
-- 本次只修改 Markdown 文档，没有业务代码或自动化测试可运行。
-- 已运行 `git diff --check`；除 Windows 环境的 LF/CRLF 提示外无格式错误。
-- 已扫描设计文档中的占位词、API 路径、任务状态、重试次数、`build_report` 和范围外技术；设计文档内部已统一。
+- 本机后端：`uv run --no-sync pytest tests/test_health.py -v`，2 项通过。
+- 本机前端：`npm run test -- --run tests/health.test.tsx`，1 项通过；`npm run build` 通过。
+- npm 运行时审计：通过 `postcss@8.5.10` override 后，`npm audit --omit=dev --json` 报告 0 个漏洞。
+- Compose：`docker compose config` 成功；容器内后端 2 项 pytest 和前端 1 项 Vitest 测试通过。
+- 运行时：Compose 启动后，`http://127.0.0.1:8000/health` 返回 `{"status":"ok"}`，前端响应包含“项目骨架阶段”。
 
 ## 架构决定
 
@@ -47,22 +58,20 @@
 
 ## 未完成事项
 
-- 对全部文档进行最终交叉检查。
-- 创建独立 Git 提交 `docs: define agentic analytics MVP architecture`。
-- 将该提交推送到远端仓库。
+- 实施任务 2：固定任务生命周期和报告 JSON API。
+- 实施任务 4：只读 MySQL 连接；MySQL 骨架服务尚未创建只读账号或测试 schema。
 
 ## 已知问题
 
-- MySQL 版本、测试 schema、只读账号、表白名单和字段备注质量尚未提供。
-- OpenAI 模型与 SDK 版本尚未锁定。
+- MySQL 8.4 服务仅用于 Compose 骨架；测试 schema、只读账号、表白名单和字段备注尚未实现。
+- OpenAI 模型与 Agents SDK 尚未接入，相关版本将在任务 8 锁定。
 - 最大行数、查询超时、总任务超时、工具调用上限、并发上限和轮询间隔尚需基线测试。
 - 金额和日期的 JSON 序列化策略尚需通过前后端契约测试确认。
-- `docs/plans/current.md` 已完成中文重写，并与最新 API 路径和状态名称对齐。
 - OpenAI tracing 是否允许接收脱敏后的问题、SQL 和工具结果尚需人工确认；默认方案是不包含敏感数据。
 
 ## 下一步建议
 
-人工审阅 `docs/product/mvp-scope.md`、`docs/architecture/overview.md` 和 `docs/architecture/interfaces.md`。确认后，按已批准的边界编写中文实施计划，再完成一致性检查和文档提交。
+按已批准边界继续任务 2，先实现固定任务生命周期和报告 JSON API，再接入真实数据库与 Agent。
 
 ## 后续会话更新模板
 

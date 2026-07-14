@@ -26,8 +26,8 @@
 | 产品范围 | 已完成文档 |
 | 架构和 ADR | 已完成文档 |
 | 接口契约 | 已完成文档 |
-| 应用实现 | 尚未开始 |
-| 测试套件 | 尚未开始 |
+| 应用实现 | 已完成任务 1 骨架；分析功能尚未开始 |
+| 测试套件 | 已完成任务 1 健康检查；其余测试尚未开始 |
 
 ## 依赖关系图和推荐顺序
 
@@ -54,7 +54,7 @@ flowchart LR
 
 ## 任务 1：项目骨架和健康检查
 
-**状态：** 待办
+**状态：** 已完成（2026-07-14）
 **目标：** 建立最小的前后端包、已验证并锁定的依赖、配置校验、Docker Compose 和健康检查，不包含分析行为。
 
 **文件：**
@@ -74,7 +74,8 @@ flowchart LR
 - 缺失必需配置时返回清晰的配置错误，且不泄露秘密值。
 - 依赖版本经过兼容性检查并锁定，没有引入禁止依赖。
 
-**测试：** 运行 `docker compose config`、`docker compose run --rm backend pytest backend/tests/test_health.py -v`、`docker compose run --rm frontend npm run test -- --run`。
+**验证结果：** 已生成并验证 `backend/uv.lock` 与 `frontend/package-lock.json`；`docker compose config` 成功，Compose 容器内后端 2 项 pytest 和前端 1 项 Vitest 测试均通过，运行中的 `GET /health` 返回 `200` 与 `{"status":"ok"}`。
+**测试：** `docker compose config`、`docker compose run --rm --no-deps backend uv run pytest tests/test_health.py -v`、`docker compose run --rm --no-deps frontend npm run test -- --run tests/health.test.tsx`。
 **依赖：** 仅依赖已批准的架构文档。
 **推荐提交：** `chore: scaffold MVP services and health checks`
 
