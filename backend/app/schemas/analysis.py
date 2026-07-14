@@ -76,6 +76,16 @@ class ChartSpec(StrictModel):
     series_field: str | None = None
 
 
+class ReportNarrative(StrictModel):
+    """The only report fields the model is allowed to author in Task 8."""
+
+    title: str
+    summary: list[str] = Field(min_length=1, max_length=8)
+    chart: ChartSpec | None = None
+    assumptions: list[str] = Field(default_factory=list, max_length=8)
+    warnings: list[str] = Field(default_factory=list, max_length=8)
+
+
 class AnalysisReport(StrictModel):
     title: str
     summary: list[str] = Field(min_length=1, max_length=8)

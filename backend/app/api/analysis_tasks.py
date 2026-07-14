@@ -31,7 +31,7 @@ def create_analysis_task(
             "TASK_CAPACITY_EXCEEDED",
             "分析任务容量已满，请稍后重试。",
         )
-    background_tasks.add_task(task_service.run_fixed_analysis, task.task_id)
+    background_tasks.add_task(task_service.run_analysis, task.task_id, request.question)
     return task
 
 

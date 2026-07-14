@@ -9,6 +9,7 @@ description = "Agentic GenBI MVP FastAPI service"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi==0.139.0",
+    "openai-agents==0.18.2",
     "pydantic-settings==2.14.2",
     "pymysql[rsa]==1.1.1",
     "sqlalchemy==2.0.41",
@@ -29,4 +30,5 @@ pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
     "integration: requires the local Docker MySQL test service",
+    "live_agent: requires RUN_LIVE_AGENT_SMOKE_TEST=true and a valid MiniMax API key",
 ]

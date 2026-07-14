@@ -2,10 +2,11 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.agents.runner import MiniMaxAnalysisRunner
 from app.api.analysis_tasks import router as analysis_tasks_router
 from app.config import Settings, get_settings
 from app.schemas.analysis import ApiError, ApiErrorResponse
-from app.services.fixed_analysis import run_fixed_analysis
+from app.services.analysis_service import AnalysisService
 from app.services.task_service import TaskService
 
 
@@ -18,7 +19,7 @@ def create_app(
     resolved_settings = settings or get_settings()
     app.state.settings = resolved_settings
     app.state.task_service = task_service or TaskService(
-        lambda: run_fixed_analysis(resolved_settings)
+        AnalysisService(resolved_settings, MiniMaxAnalysisRunner(resolved_settings)).run
     )
 
     @app.exception_handler(RequestValidationError)
