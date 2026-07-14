@@ -42,8 +42,11 @@ class AgentProviderError(AgentRunError):
 class InvalidAgentReport(AgentRunError):
     code = "INVALID_REPORT"
 
-    def __init__(self) -> None:
-        super().__init__("Analysis provider returned an invalid report.")
+    def __init__(self, detail: str | None = None) -> None:
+        message = "Analysis provider returned an invalid report."
+        if detail is not None:
+            message = f"{message} Detail: {detail[:300]}"
+        super().__init__(message)
 
 
 SdkRunner = Callable[[object, str], Any]
@@ -78,7 +81,9 @@ class MiniMaxAnalysisRunner:
         try:
             return validate_narrative_output(output)
         except (ValidationError, json.JSONDecodeError, ValueError) as error:
-            raise InvalidAgentReport from error
+            raw = repr(output)[:200]
+            head = str(error).splitlines()[0] if str(error).splitlines() else "<empty>"
+            raise InvalidAgentReport(f"{head} | raw={raw}") from error
 
 
 def _run_with_agents_sdk(agent: object, prompt: str) -> Any:

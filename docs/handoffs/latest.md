@@ -111,6 +111,13 @@ LLM 看到错误继续重试，对应任务产生 5+ 次 `sql_validation` 步骤
 - 任务状态仍存于 FastAPI 进程内，进程重启后旧 task_id 消失
 - watchdog 仅覆盖任务级总时长，不打断 LLM 单次 stream 调用
 - `dm.*` 全表 schema 包含 280 张表，`list_tables` 首次可能 5 秒内返回
+- LLM 偶尔返回无法 `ReportNarrative.model_validate` 的字符串（missing
+  field、JSON 截断、extra `analysis` 段），这时任务会变成
+  `failed` 且 `error.code = INVALID_REPORT`。这条路径下 `error.message`
+  现在带上 **Detail:** 前缀的原始异常摘要（最多 300 字符），方便快速
+  判断是字段缺失、JSON 截断还是其他原因。具体测试见
+  `test_runner_rejects_non_json_provider_output` 与
+  `test_runner_invalid_report_message_carries_pydantic_detail`。
 
 ## 复现与回退
 
