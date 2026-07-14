@@ -25,7 +25,13 @@ def create_app(
     )
     resolved_settings = settings or get_settings()
     app.state.settings = resolved_settings
-    app.state.task_service = task_service or TaskService(DynamicAnalysisCoordinator(resolved_settings).run)
+    if task_service is None:
+        coordinator = DynamicAnalysisCoordinator(resolved_settings)
+        task_service = TaskService(
+            analysis_runner=coordinator.run,
+            step_aware_analysis_runner=coordinator.run,
+        )
+    app.state.task_service = task_service
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(_: Request, __: RequestValidationError) -> JSONResponse:

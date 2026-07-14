@@ -52,3 +52,27 @@ def test_get_table_schema_does_not_probe_a_table_outside_the_allowlist() -> None
     assert error.value.code == "TABLE_NOT_AVAILABLE"
     assert str(error.value) == "Requested table is not available."
     assert inspector.inspected_names == []
+
+
+def test_get_table_schema_uses_the_schema_from_a_qualified_allowlisted_name() -> None:
+    class CrossSchemaInspector:
+        def __init__(self) -> None:
+            self.request: tuple[str, str | None] | None = None
+
+        def get_columns(self, table_name: str, schema: str | None = None) -> list[dict[str, object]]:
+            self.request = (table_name, schema)
+            return [{"name": "product_id", "type": "BIGINT", "nullable": False, "comment": None}]
+
+    from app.database.metadata import get_allowlisted_table_schema
+
+    inspector = CrossSchemaInspector()
+    settings = Settings(
+        app_env="test",
+        database_url="mysql+pymysql://readonly_user:readonly-password@localhost:3306/dm",
+        allowed_tables=("dw.products",),
+    )
+
+    result = get_allowlisted_table_schema("dw.products", inspector, settings)
+
+    assert inspector.request == ("products", "dw")
+    assert result.table_name == "dw.products"

@@ -26,6 +26,22 @@ def test_policy_accepts_cte_select() -> None:
     assert normalized.sql.endswith("LIMIT 4")
 
 
+def test_policy_accepts_a_join_between_explicitly_allowed_schemas() -> None:
+    cross_schema_policy = SqlPolicy(
+        allowed_tables=("dm.orders", "dw.products"), max_rows=3
+    )
+
+    normalized = cross_schema_policy.validate(
+        "SELECT o.order_id, p.product_name "
+        "FROM dm.orders AS o JOIN dw.products AS p ON p.product_id = o.product_id"
+    )
+
+    assert normalized.sql.endswith("LIMIT 4")
+    assert cross_schema_policy.referenced_tables(
+        "SELECT * FROM dm.orders AS o JOIN dw.products AS p ON p.product_id = o.product_id"
+    ) == frozenset({"dm.orders", "dw.products"})
+
+
 @pytest.mark.parametrize(
     "sql",
     [

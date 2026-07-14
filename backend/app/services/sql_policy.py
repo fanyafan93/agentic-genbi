@@ -52,7 +52,9 @@ class SqlPolicy:
         statement = statements[0]
         cte_names = {cte.alias_or_name for cte in statement.find_all(exp.CTE)}
         return frozenset(
-            table.name for table in statement.find_all(exp.Table) if table.name not in cte_names
+            self._table_identifier(table)
+            for table in statement.find_all(exp.Table)
+            if table.name not in cte_names
         )
 
     def _reject_unsafe_nodes(self, statement: exp.Expression) -> None:
@@ -75,5 +77,15 @@ class SqlPolicy:
         for table in statement.find_all(exp.Table):
             if table.name in cte_names:
                 continue
-            if table.db or table.catalog or table.name not in self._allowed_tables:
+            if table.catalog or not self._is_allowed(table):
                 raise SqlPolicyViolation("The query references a table outside the allowlist.")
+
+    def _is_allowed(self, table: exp.Table) -> bool:
+        identifier = self._table_identifier(table)
+        if identifier in self._allowed_tables:
+            return True
+        return bool(table.db and f"{table.db}.*" in self._allowed_tables)
+
+    @staticmethod
+    def _table_identifier(table: exp.Table) -> str:
+        return f"{table.db}.{table.name}" if table.db else table.name
