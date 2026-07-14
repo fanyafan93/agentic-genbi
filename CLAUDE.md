@@ -1,5 +1,5 @@
-# Claude Code project instructions
+# Claude Code 项目说明
 
 @AGENTS.md
 
-`AGENTS.md` is the single source of project collaboration rules. Read the documents listed there before making changes. Do not duplicate those rules here; update `AGENTS.md` when the shared policy changes.
+本项目的唯一协作规则来源是 `AGENTS.md`。开始任务前请读取该文件及其“开始任务前必须阅读”部分列出的文档；不要在本文件复制规则，以免两份规范发生漂移。

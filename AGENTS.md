@@ -1,98 +1,78 @@
-# Agentic GenBI MVP collaboration guide
+# Agentic GenBI MVP 协作指南
 
-## Project goal
+## 项目目标
 
-Build the smallest useful web-based data analysis agent. A user submits a natural-language question, the backend inspects one allowed MySQL database, generates and safely executes read-only SQL, retries repairable SQL failures at most twice, and returns a structured report for table, chart, SQL, status, and narrative display.
+构建一个最小可用的 Web 数据分析 Agent：用户提交自然语言分析问题，后端通过 OpenAI Agents SDK 查看单个 MySQL 测试库的元数据、生成并安全执行只读 SQL，在普通 SQL 错误发生时最多自动修复两次，最终返回统一的结构化报表 JSON。
 
-The current phase is architecture and project documentation. Do not represent planned capabilities as implemented.
+## 开始任务前必须阅读
 
-## MVP scope
+1. `README.md`
+2. `docs/product/mvp-scope.md`
+3. `docs/architecture/overview.md`
+4. `docs/architecture/interfaces.md`
+5. `docs/plans/current.md`
+6. `docs/handoffs/latest.md`
+7. 与任务相关的 `docs/architecture/decisions/` ADR
 
-The only required vertical flow is:
+## MVP 范围
 
-`Next.js UI -> FastAPI -> OpenAI Agents SDK -> metadata/query tools -> SQL safety layer -> read-only MySQL -> validated report JSON -> UI`
+范围内只有一条端到端链路：网页提问、FastAPI 创建分析任务、单个分析 Agent 调用数据库元数据与查询工具、SQL 安全检查、只读查询、最多两次修复重试、结构化报告生成，以及前端轮询并展示状态、步骤、SQL、表格、图表和结论。
 
-The MVP uses one test or desensitized MySQL database, one agent, in-process task state, and frontend polling. It does not provide production durability, multi-user isolation, or background job infrastructure.
+本阶段禁止擅自加入 WrenAI、LangGraph、多 Agent、多租户、完整权限系统、Redis、Celery、Kubernetes、MinIO、PDF 导出、仪表板编辑器、定时任务、多数据库、向量数据库、任意代码执行或数据库写入能力。新增范围必须先更新范围文档并获得人工确认。
 
-## Technology stack
+## 技术栈
 
-- Frontend: Next.js, React, TypeScript, Ant Design, ECharts, Vitest.
-- Backend: Python, FastAPI, OpenAI Agents SDK, SQLAlchemy, Pydantic, pytest.
-- Database: one MySQL test/desensitized database accessed through a read-only account.
-- Local deployment: Docker Compose.
+- 前端：Next.js、React、TypeScript、Ant Design、ECharts、Vitest
+- 后端：Python、FastAPI、Pydantic、OpenAI Agents SDK、SQLAlchemy、pytest
+- 数据库：单个 MySQL 测试库或脱敏库
+- 本地部署：Docker Compose
 
-Versions remain **待验证假设** until the project skeleton task pins and verifies them. Do not invent version claims in documentation or code.
+具体版本在项目骨架任务中锁定；没有验证前不得在文档中伪造版本号。
 
-## Read first
+## 架构边界
 
-Before changing code or architecture, read in order:
+- 前端只调用 FastAPI，不接触数据库凭据或 OpenAI API 密钥。
+- FastAPI 负责 HTTP 契约、任务生命周期、硬性预算、Agent 编排、结果校验和错误映射。
+- OpenAI Agents SDK 负责单 Agent 的推理、函数工具调用和结构化最终输出，不负责安全授权。
+- `list_tables` 和 `get_table_schema` 只能暴露白名单内元数据。
+- `execute_sql` 必须先经过 SQL 安全层；工具不得绕过安全层直接使用 SQLAlchemy。
+- SQL 安全层负责语句类型、单语句、危险语法、表白名单、行数和超时限制。
+- MySQL 连接必须使用只读账号；数据库权限是 Python 安全检查之外的第二道强制边界。
+- 报表使用 `AnalysisReport` 契约；第一版不把 `build_report` 注册为 Agent 工具，而是使用 Agent 结构化输出并由 Pydantic 校验。
+- MVP 任务状态保存在 FastAPI 单进程内存中。不得将其描述为持久、可恢复或支持多实例。
 
-1. `docs/product/mvp-scope.md`
-2. `docs/architecture/overview.md`
-3. `docs/architecture/interfaces.md`
-4. `docs/architecture/decisions/ADR-001-agent-runtime.md`
-5. `docs/architecture/decisions/ADR-002-mvp-boundaries.md`
-6. `docs/plans/current.md`
-7. `docs/handoffs/latest.md`
+## SQL 安全规则
 
-## Architecture boundaries
+以下规则必须由 Python 代码和数据库权限共同执行，不能只写在提示词中：
 
-- The browser calls FastAPI only. It never receives database credentials or connects to MySQL.
-- FastAPI owns API validation, task lifecycle, orchestration budgets, report validation, and error mapping.
-- OpenAI Agents SDK owns model interaction and tool selection. It does not own security policy, retry limits, or database authorization.
-- Agent tools expose narrow typed operations: `list_tables`, `get_table_schema`, and `execute_sql`.
-- `build_report` is not an Agent tool in the MVP. The Agent returns an `AnalysisReport` as structured output, which Pydantic validates.
-- The SQL safety layer is a deterministic Python boundary called by `execute_sql` before SQLAlchemy. It must not rely on prompting.
-- SQLAlchemy owns connection pooling and execution, not business analysis or Agent control flow.
-- MySQL is the final authorization boundary and must use a read-only account restricted to allowed schemas/tables.
-- Frontend chart rendering consumes the backend `ChartSpec`; it must not execute arbitrary JavaScript received from the model.
+- 只允许一条 `SELECT` 或以 `WITH` 开始且最终为查询的语句。
+- 拒绝 `INSERT`、`UPDATE`、`DELETE`、`DROP`、`ALTER`、`TRUNCATE` 及其他写入、DDL、管理语句。
+- 拒绝多语句、注释绕过和未授权表访问。
+- 强制最大返回行数和查询超时；具体默认值在项目骨架任务中配置并记录。
+- Agent 每个任务的工具调用总数有硬上限；SQL 初次执行后最多修复并重试两次。
+- 安全拒绝、权限错误、超时、连接失败和预算耗尽不得交给 Agent 反复尝试。
+- 审计原始 SQL、每次修复 SQL、结构化数据库错误、最终状态与结果摘要；不得在普通日志中泄露凭据或不必要的敏感数据。
 
-## SQL safety rules
+## 测试要求
 
-Enforce all rules in Python and database permissions:
+- 后端使用 pytest 覆盖数据模型、工具、安全策略、错误分类和重试上限。
+- 前端使用 Vitest 覆盖状态轮询、报告渲染和错误状态。
+- 至少维护 5 个固定分析问题作为端到端验收样例，其中包含成功、字段修复和表名修复场景。
+- 涉及 SQL 安全边界的改动必须添加拒绝用例，不能只测试成功路径。
+- 任务完成前运行与改动相关的最小测试集；里程碑完成前运行全量测试。
 
-- Accept exactly one statement whose root is `SELECT` or a read-only `WITH ... SELECT`.
-- Reject comments or syntax tricks that make statement count or intent ambiguous.
-- Reject data-changing, DDL, administrative, file, locking, stored-program, and multi-statement operations, including `INSERT`, `UPDATE`, `DELETE`, `REPLACE`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `GRANT`, `CALL`, `LOAD`, `INTO OUTFILE`, and `FOR UPDATE`.
-- Parse SQL with a MySQL-aware parser; keyword matching alone is insufficient.
-- Permit only configured schemas and tables. Metadata tools apply the same allowlist.
-- Apply a server-controlled maximum row count even when the model supplies `LIMIT`.
-- Apply a database/query timeout.
-- Use a database account with no write or DDL privileges.
-- Return normal SQL failures as `SqlError`; do not leak credentials, connection strings, or internal stack traces.
-- Allow at most two repair retries after the first SQL attempt.
-- Bound total Agent tool calls and record each attempt, SQL text, sanitized database error, timing, and final outcome.
+## Git 工作要求
 
-Exact row, timeout, and tool-call limits are configuration values to be confirmed in the skeleton task. Tests must cover their enforcement.
+- 开始前检查 `git status`，不得覆盖或回退不属于当前任务的改动。
+- 每个提交只包含一个可独立理解和验证的垂直切片。
+- 使用清晰的 Conventional Commit 风格信息，如 `feat: add analysis task health check`。
+- 未经明确要求不改写历史、不强推、不使用破坏性 Git 命令。
+- 提交前检查差异、测试结果和文档一致性。
 
-## Testing requirements
+## 任务完成标准
 
-- Follow red-green-refactor for behavior changes.
-- Backend: pytest unit tests for models, SQL policy, tools, retry budget, and API contracts; integration tests use a disposable test database.
-- Frontend: Vitest component/contract tests; browser-level coverage for the fixed report and final end-to-end flow.
-- Maintain at least five deterministic analysis questions with expected structural outcomes.
-- Never run automated tests against production data. Use test or desensitized fixtures only.
-- A task is not complete until its targeted tests pass and relevant broader tests have been run.
+任务只有在实现与契约一致、相关测试通过、安全限制未弱化、README/架构/接口文档按需更新，并且 `docs/handoffs/latest.md` 已记录本次状态后才算完成。若测试无法运行，必须在交接文档和最终回复中说明原因与剩余风险。
 
-## Git workflow
+## 会话交接
 
-- Inspect `git status` before editing and preserve unrelated user changes.
-- Keep each task independently reviewable and commit only files in scope.
-- Use concise Conventional Commit messages where practical; recommended messages are listed in `docs/plans/current.md`.
-- Do not rewrite history, force-push, amend, or reset user work unless explicitly requested.
-- Update `docs/handoffs/latest.md` before ending every development session, including test evidence and remaining work.
-
-## Technologies prohibited without a new decision record
-
-Do not add WrenAI, LangGraph, multiple agents, Redis, Celery, Kubernetes, MinIO, a vector database, multi-database support, multi-tenancy, a full auth system, arbitrary code execution, PDF export, dashboard editing, or scheduled jobs. Do not add a generic repository/framework abstraction for hypothetical future databases.
-
-## Definition of done
-
-A task is complete only when:
-
-- Its acceptance criteria and interface contract are satisfied.
-- Security controls are implemented outside prompts and have tests.
-- Targeted tests and relevant regression tests pass with recorded commands.
-- User-facing and architecture documents match actual behavior.
-- No secrets, production data, generated artifacts, or unrelated changes are committed.
-- `docs/plans/current.md` status and `docs/handoffs/latest.md` are updated.
+每次开发会话结束前必须更新 `docs/handoffs/latest.md`。只记录已验证事实；未知内容标记为“待验证假设”，未完成内容不得写成已完成。

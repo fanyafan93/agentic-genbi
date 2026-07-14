@@ -1,95 +1,77 @@
-# ADR-002: Keep MVP infrastructure and data boundaries minimal
+# ADR-002：限制 MVP 平台边界
 
-- Status: Accepted
-- Date: 2026-07-14
-- Decision owners: Project technical lead
+- 状态：已接受
+- 日期：2026-07-14
 
-## Context
+## 背景
 
-The MVP is intended to validate one complete natural-language analytics loop, not a general BI platform. The highest-risk unknowns are safe SQL execution, useful metadata discovery, bounded repair, and understandable report output. Infrastructure for scale, tenancy, durable jobs, and semantic modeling does not reduce those initial risks.
+项目要验证的是自然语言到安全只读分析报告的完整链路，而不是提前建设商业 BI 平台。旧分支历史曾包含 Wren 商业版、多租户和治理界面设计，但当前需求明确替换了该方向。
 
-## Decision
+## 决策
 
-The first version will:
+MVP 只连接一个 MySQL 测试库或脱敏库，使用单 FastAPI 进程内任务状态。暂不使用 Redis、Celery、WrenAI、多租户、多数据库或完整权限系统。
 
-- connect to exactly one MySQL test or desensitized database;
-- use a dedicated read-only MySQL account and configured schema/table allowlists;
-- keep task state in one FastAPI process and expose polling;
-- use one analysis Agent;
-- generate the report as validated structured Agent output;
-- run locally with Docker Compose.
+## 为什么只接一个 MySQL
 
-The first version will not use Redis, Celery, WrenAI, LangGraph, multi-tenancy, a vector database, Kubernetes, MinIO, or a generic multi-database connector layer.
+- 单一方言能让 SQL 安全检查、错误分类和自动修复形成可验证闭环。
+- 可集中验证只读权限、超时、行数和白名单，而不是同时处理多个驱动差异。
+- 当前没有第二数据源的已确认用户需求。
+- 数据库服务边界仍保持清晰，但不提前设计通用插件框架。
 
-## Rationale
+## 为什么暂不使用 Redis 和 Celery
 
-### One MySQL database
+方案 B 的状态轮询需要后台执行，但本地 MVP 可由 FastAPI 进程内 Task Manager 管理。当前不要求跨重启恢复、多 worker、一致排队或大规模并发，因此 Redis/Celery 会增加部署、故障模式和测试成本。
 
-- It matches the confirmed first data source.
-- It allows SQL parsing, metadata, timeout, and read-only permissions to be designed for one dialect and tested deeply.
-- A generic connector interface before a second real database would encode guesses and weaken safety.
+触发重新评估的条件：
 
-### No Redis or Celery
+- 任务必须在服务重启后恢复。
+- 必须运行多个 API worker 或多个实例。
+- 查询排队、优先级、取消或重试需要可靠持久状态。
+- Agent 任务时长或并发量超过进程内方案的已测容量。
 
-- Local process tasks and polling satisfy the accepted MVP user experience.
-- No acceptance criterion requires restart survival, horizontal workers, scheduling, or long-running queues.
-- Queue infrastructure would add serialization, worker lifecycle, retries, result storage, and operational failure modes.
+## 为什么暂不使用 WrenAI
 
-### No WrenAI
+当前目标是先验证 schema 探查、SQL 安全执行和错误修复链路。尚未有稳定的业务语义模型、指标治理流程或语义层维护责任人。过早接入 WrenAI 会把语义建模问题与 Agent 执行问题混在同一里程碑。
 
-- The MVP must first learn whether schema metadata plus one Agent can answer the fixed questions safely.
-- A semantic layer introduces modeling and synchronization work before a recurring semantic problem has been measured.
-- Report assumptions and known limitations make current semantic gaps visible.
+触发重新评估的条件：
 
-### No multi-tenancy
+- 固定问题评测反复因业务口径、表关联或指标定义失败，而不是 SQL 语法失败。
+- 已有可维护的语义模型、负责人和变更流程。
+- 多个分析场景需要复用受治理的指标定义。
 
-- The MVP uses one controlled database and has no production identity system.
-- Tenant isolation is a security architecture, not a UI flag; implementing it partially would create false confidence.
+## 为什么暂不使用多租户
 
-## Consequences
+MVP 只面向一个测试环境，没有真实用户隔离、计费或组织权限需求。伪造租户模型会扩大数据库、API、安全和测试范围，且不能证明核心分析链路。
 
-### Benefits
+触发重新评估的条件：
 
-- Small architecture with clear trust boundaries.
-- Faster delivery of the complete vertical loop.
-- Security testing can focus on one SQL dialect and permission model.
-- Failures are easier to reproduce locally.
+- 两个以上真实团队需要数据、凭据、任务历史和配额隔离。
+- 出现明确认证来源、租户生命周期和合规要求。
+- 已完成单租户安全评审与端到端稳定性验证。
 
-### Costs and accepted limitations
+## 为什么暂不使用多数据库
 
-- Tasks and results disappear on backend restart.
-- Only one backend worker/process is supported.
-- One configured database serves all local users.
-- Business terminology is limited to metadata/comments and Agent instructions.
-- Adding a second database or real tenancy will require deliberate interface and migration work.
+不同方言会影响 AST、函数、超时、元数据和错误码。第二数据库只有在存在真实用户与验收样例后才值得抽象。
 
-## Introduction triggers
+触发重新评估的条件：第二个数据库类型有明确负责人、测试环境、固定问题和业务价值，并且现有 MySQL MVP 已稳定通过安全与修复测试。
 
-### Redis/durable result storage
+## 后果
 
-Introduce when tasks must survive restart, multiple API workers must share status, task history must be retained, or measured memory usage requires eviction/persistence.
+### 正面
 
-### Celery or another job queue
+- 本地部署组件最少，故障定位和测试边界清晰。
+- 团队可以优先验证最有风险的 SQL 安全与自动修复能力。
+- 每个后续平台能力都有基于真实需求的引入门槛。
 
-Introduce after durable storage is justified and background runs need independent workers, queue backpressure, scheduled execution, or operational retries. Do not introduce Celery solely to make HTTP asynchronous.
+### 代价
 
-### WrenAI or another semantic layer
+- 服务重启会丢失任务状态。
+- 不支持多 worker、高并发和横向扩展。
+- 没有语义层时，复杂业务口径可能需要用户介入。
+- 第二种数据库不能直接接入，需要新的 ADR 和实现任务。
 
-Evaluate when fixed questions repeatedly fail because business metrics, joins, or naming cannot be captured reliably through schema comments and concise context, and the team can own semantic-model lifecycle and validation.
+## 防止过度设计的规则
 
-### Multi-tenancy and production authentication
-
-Introduce before serving multiple untrusted users, organizations, or datasets. The design must cover identity, tenant-scoped credentials, authorization, audit, deletion, and isolation tests together.
-
-### Multiple databases
-
-Introduce only when a second concrete data source has acceptance scenarios. Define a narrow connector contract from both working implementations rather than predicting it now.
-
-## Rejected shortcuts
-
-- Treating prompt instructions as database authorization.
-- Storing tenant IDs without enforcing isolation throughout data access.
-- Adding unused abstractions named for future databases.
-- Running multiple FastAPI workers while retaining process-local task state.
-
-Any boundary change requires an ADR and updates to scope, interfaces, tests, README, and handoff documentation.
+- 不创建未被当前任务使用的抽象基类、插件注册中心或基础设施目录。
+- 不提前加入依赖；每个新依赖必须由当前验收标准直接需要。
+- 扩展触发条件出现后先记录 ADR，再修改架构和范围文档。

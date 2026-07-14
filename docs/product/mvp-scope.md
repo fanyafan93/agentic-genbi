@@ -1,76 +1,69 @@
-# Web Data Analysis Agent MVP Scope
+# Web 数据分析 Agent MVP 范围
 
-Status: Approved design baseline
-Date: 2026-07-14
+## 用户场景
 
-## User scenario
+业务分析人员在网页输入一个自然语言问题，例如“查询最近三个月各品牌销售额趋势，并分析下降最大的品牌”。用户不需要手写 SQL，也不能直接访问数据库。系统应展示执行状态和关键步骤，并在成功后提供最终 SQL、结果表格、图表和结论。
 
-An analyst enters a question such as “查询最近三个月各品牌销售额趋势，并分析下降最大的品牌。” The system inspects the allowed database metadata, generates and safely executes read-only SQL, repairs ordinary SQL mistakes within a fixed budget, and returns a report suitable for immediate review in a browser.
+## MVP 目标
 
-The MVP validates one thing: whether a single Agent can complete this narrow analysis loop safely and transparently enough to justify further product work.
+验证一条真实、受控、可测试的 Agentic Analytics 端到端链路：单个 Agent 能够发现数据库元数据、生成只读 SQL、从有限的普通 SQL 错误中恢复，并输出前端可稳定消费的报告 JSON。
 
-## MVP goals
+MVP 的成功标准是链路可用和安全边界可信，不是覆盖复杂 BI 平台能力。
 
-- Demonstrate one complete request from browser input to table, chart, SQL, and conclusions.
-- Make metadata discovery and SQL execution observable through execution steps.
-- Prove deterministic safety enforcement outside the model prompt.
-- Prove bounded recovery from common table, column, alias, grouping, function, and syntax errors.
-- Keep the implementation small enough for one developer or coding Agent to understand and test end to end.
+## 范围内功能
 
-## In scope
+- 单页面提交一个自然语言分析需求。
+- FastAPI 创建分析任务并提供状态轮询接口。
+- 任务状态仅保存在单个 FastAPI 进程内存中。
+- 单个 OpenAI Agents SDK Agent 理解问题并选择工具。
+- `list_tables` 返回白名单内可访问表。
+- `get_table_schema` 返回字段名、类型、可空性和字段备注。
+- `execute_sql` 接受只读 SQL，经安全检查后执行并返回结构化成功或失败结果。
+- Python 代码强制单语句、只读、表白名单、最大行数、查询超时、工具调用总数和重试次数。
+- MySQL 使用只读账号，并仅连接一个测试库或脱敏库。
+- 字段名、表名和有限 SQL 语法错误最多自动修复两次。
+- Agent 使用结构化输出生成 `AnalysisReport`，Pydantic 再次校验。
+- 前端展示任务状态、执行步骤、最终 SQL、表格、ECharts 图表和文字结论。
+- pytest、Vitest 以及至少 5 个固定端到端问题。
 
-- One Next.js analysis page using React, TypeScript, Ant Design, and ECharts.
-- One FastAPI service with in-process task creation and polling.
-- One OpenAI Agents SDK analysis Agent.
-- Tools: `list_tables`, `get_table_schema`, and `execute_sql`.
-- One MySQL test or desensitized database through SQLAlchemy and a read-only account.
-- Deterministic SQL parsing, statement/type validation, schema/table allowlisting, row limit, query timeout, and tool-call budget.
-- Initial SQL attempt plus at most two repair retries.
-- Structured `SqlError`, execution steps, task status, and report JSON.
-- Pydantic-validated Agent structured output for report generation.
-- Backend pytest, frontend Vitest, core security tests, and at least five deterministic end-to-end questions.
-- Docker Compose for local development.
+## 范围外功能
 
-## Out of scope
+- WrenAI、LangGraph、多 Agent 和向量数据库。
+- 多租户、完整登录授权系统和细粒度行列权限。
+- Redis、Celery、消息队列、分布式任务和多实例恢复。
+- Kubernetes、MinIO、生产级高可用和弹性伸缩。
+- 多数据库、自动数据源发现和数据库切换。
+- 数据库写入、自动修改数据和任意代码执行。
+- PDF/HTML 导出、仪表板编辑器、定时任务和告警。
+- 多轮对话记忆、历史任务持久化和协作分享。
 
-- WrenAI or a semantic layer.
-- LangGraph or multiple Agents.
-- Redis, Celery, durable queues, resumable jobs, or cross-process task state.
-- Multi-database support, dynamic connectors, or database federation.
-- Multi-tenancy, production identity, fine-grained application authorization, SSO, or billing.
-- Kubernetes, MinIO, cloud deployment automation, or production observability platforms.
-- Vector databases, long-term memory, autonomous schema modification, or arbitrary code execution.
-- Database writes of any kind.
-- PDF/HTML report export, dashboard editing, scheduling, sharing, or collaboration.
+## 验收标准
 
-## Acceptance criteria
+1. 用户能从网页提交非空且长度受限的分析需求。
+2. FastAPI 返回任务 ID，前端能轮询到 `queued`、`running` 和终态。
+3. Agent 能调用 `list_tables` 与 `get_table_schema`。
+4. Agent 能生成并通过安全层执行只读 SQL。
+5. 安全层拒绝写入、DDL、多语句、未授权表和绕过尝试。
+6. 字段名错误时，Agent 能结合结构化错误与表结构修复。
+7. 表名错误时，Agent 能重新调用元数据工具寻找授权表。
+8. 首次 SQL 之后最多执行两次修复重试，不能无限循环。
+9. 查询成功后返回符合 `AnalysisReport` 的统一 JSON。
+10. 前端能展示状态、步骤、最终 SQL、表格、图表和结论。
+11. 至少 5 个固定问题通过端到端测试，覆盖成功、字段修复和表名修复。
+12. 后端单元测试、SQL 安全测试和前端核心组件测试可重复运行。
 
-1. A user can submit a non-empty analysis question in the web page.
-2. FastAPI creates a task and returns an `AnalysisTaskStatus`; the frontend can poll until a terminal state.
-3. The Agent can call `list_tables` and `get_table_schema` within an allowlist.
-4. The Agent can generate and execute one safe read-only SQL statement.
-5. A wrong column can be repaired using a structured error and refreshed table schema.
-6. A wrong table can be repaired by listing allowed tables again.
-7. The first execution plus no more than two repair retries is enforced in Python.
-8. Unsafe SQL, database authorization failures, timeouts, ambiguous requirements, missing business definitions, and exhausted budgets stop safely.
-9. A successful task returns one validated `AnalysisReport` contract.
-10. The UI displays task status/steps, final SQL, result table, ECharts visualization, and conclusions.
-11. Five fixed questions cover trend, comparison, ranking, composition, and one repair scenario.
-12. Backend unit tests, core SQL security tests, frontend component tests, and the fixed end-to-end flow run successfully.
+## 已知限制
 
-## Known limitations
-
-- Task state is process memory only. Restarting FastAPI loses tasks, and multiple backend workers are unsupported.
-- Polling is used instead of streaming; progress visibility is step-level and may lag by the polling interval.
-- There is no semantic layer. Business terms are limited to database names/comments and prompt context.
-- Chart support is intentionally narrow: table-only fallback plus line, bar, and pie specifications.
-- The Agent may produce analytically weak conclusions even when SQL is valid; report claims must be grounded in returned rows.
-- Result truncation can make some analyses incomplete; the report must expose truncation.
+- 进程内任务状态在服务重启后丢失，不支持多 worker 或横向扩展。
+- MVP 同一时刻可承载的任务数量有限；并发上限是待验证假设。
+- 不具备业务语义层。字段含义、指标口径和表关联若不能从元数据明确推导，系统必须要求用户介入。
+- 图表仅支持折线图、柱状图、饼图和无图表回退，复杂可视化不在范围内。
+- MySQL 方言是唯一目标；不同版本的函数兼容性需在测试库验证。
+- OpenAI 模型名称、SDK 版本、默认行数、超时和工具调用上限将在项目骨架任务中锁定。
+- Agent 输出是概率性的，固定问题需要稳定测试数据和可控评估策略，不能把一次成功视为稳定通过。
 
 ## 待验证假设
 
-- The selected MySQL test dataset has useful table/column comments and five stable questions with known expected structure.
-- The chosen OpenAI model supports the required structured output and tool calling through the selected Agents SDK version.
-- A MySQL-compatible SQL parser can reliably enforce the required read-only subset; the skeleton/security task must evaluate candidates before pinning one.
-- Database-driver timeout behavior is enforceable consistently in the selected local MySQL image.
-- The team accepts process-local task loss and a single FastAPI worker for this MVP.
+- 测试 MySQL 的版本、字符集、时区、表结构、字段备注完整度和只读账号尚未提供。
+- 前端与 FastAPI 的部署域名、CORS 策略和端口尚未确认。
+- 是否允许将脱敏后的问题、SQL 和工具结果发送到 OpenAI tracing 尚未确认；MVP 默认关闭 trace 中的敏感数据。
