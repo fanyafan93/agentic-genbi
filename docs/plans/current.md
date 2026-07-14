@@ -133,17 +133,16 @@ flowchart LR
 
 ## 任务 4：只读 MySQL 连接
 
-**状态：** 待办
+**状态：** 已完成（2026-07-14）
 **目标：** 将 SQLAlchemy 连接到一个本地 MySQL 测试数据库，并用已验证的配置和最小权限凭据进行保护。
 
 **文件：**
 
-- 新建 `backend/app/database/engine.py`、`backend/app/database/session.py`。
-- 新建 `backend/tests/database/test_connection.py`、`backend/tests/integration/conftest.py`、`backend/tests/integration/sql/init.sql`。
-- 修改 `backend/app/config.py`、`docker-compose.yml`、`.env.example`、`README.md`。
+- 新建 `backend/app/database.py`、`backend/tests/database/test_config.py`、`backend/tests/database/test_database.py`、`backend/tests/database/test_connection.py`、`mysql/init/001-schema-and-readonly-user.sql`。
+- 修改 `backend/pyproject.toml`、`backend/uv.lock`、`backend/app/config.py`、`backend/tests/conftest.py`、`docker-compose.yml`、`.env.example`、`README.md`。
 
 **输入接口：** 后端持有的 `DATABASE_URL` 和白名单配置。
-**输出接口：** 只能被后端数据库服务使用的 SQLAlchemy engine/connection 依赖。
+**输出接口：** `create_engine_for_settings(settings)` 和 `connection_for_settings(settings)`；连接上下文结束时归还连接。
 
 **验收标准：**
 
@@ -152,7 +151,8 @@ flowchart LR
 - 凭据只保留在服务端，不出现在 API 响应、日志或前端产物中。
 - 成功和失败路径都能正确关闭连接。
 
-**测试：** `pytest backend/tests/database/test_connection.py -v -m integration`，并显式断言被拒绝的 `INSERT` 和 `DROP`。
+**验证结果：** 真实 MySQL 8.4 容器初始化 6 条确定性样例数据；应用账号可 `SELECT`，并在集成测试中被数据库拒绝 `INSERT` 与 `DROP TABLE`。宿主机端口固定为 `3307`，避免干扰本机已有 MySQL。
+**测试：** `uv run --frozen pytest tests/database/test_connection.py -v -m integration`，并显式断言被拒绝的 `INSERT` 和 `DROP`。
 **依赖：** 任务 1。
 **推荐提交：** `feat: connect read-only MySQL test database`
 

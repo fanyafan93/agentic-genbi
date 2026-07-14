@@ -4,37 +4,33 @@
 
 ## 当前任务
 
-任务 3「固定前端报告展示」已完成，当前分支为 `task-3-frontend-analysis-report`，父分支为 `task-2-analysis-task-api`。
+任务 4「只读 MySQL 连接」已完成，当前分支为 `task-4-readonly-mysql`，基于已合并任务 1 至任务 3 的 `Agentic-GenBI-MVP`。
 
 ## 已完成内容
 
-- 创建 `AnalysisPage`，提交用户问题并消费任务 2 的创建/状态轮询 API。
-- 空问题不会提交；任务进入 `succeeded`、`failed`、`requires_input` 后停止轮询。
-- 轮询遇到后端 `404` 会显示错误并停止，不会自动重提任务。
-- 成功状态展示固定报告的摘要、最终 SQL、结果表、假设和提醒。
-- `chart: null` 只展示表格；非空图表由前端生成受控的 ECharts option，并使用本地 DOM 预览，不执行服务端代码。
-- 页面采用响应式布局，支持桌面和移动端。
+- 新增 `DATABASE_URL` 必填配置，使用 Pydantic `SecretStr` 保存，配置校验错误不回显连接串。
+- 新增 `app.database`，集中提供 SQLAlchemy engine 和会自动关闭连接的上下文管理器。
+- Docker Compose 的 MySQL 8.4 在首次启动时创建 `analytics.sales_channel_monthly`，写入 6 条确定性脱敏数据。
+- 初始化 `readonly_user`，仅授予 `analytics.*` 的 `SELECT` 权限；后端容器使用该账号。
+- 宿主机端口使用 `3307`，避免占用本机已有 `3306` MySQL；容器内仍使用 `mysql:3306`。
+- 真实集成测试验证 `SELECT` 成功，且 MySQL 本身拒绝 `INSERT` 和 `DROP TABLE`。
 
 ## 主要文件
 
-- `frontend/src/features/analysis/AnalysisPage.tsx`
-- `frontend/src/features/analysis/AnalysisForm.tsx`
-- `frontend/src/features/analysis/TaskStatus.tsx`
-- `frontend/src/features/analysis/ReportView.tsx`
-- `frontend/src/features/analysis/ReportTable.tsx`
-- `frontend/src/features/analysis/ReportChart.tsx`
-- `frontend/src/services/analysis-api.ts`
-- `frontend/src/types/analysis.ts`
-- `frontend/src/app/styles.css`
-- `frontend/tests/analysis-page.test.tsx`
-- `frontend/tests/report-view.test.tsx`
+- `backend/app/config.py`
+- `backend/app/database.py`
+- `backend/tests/database/test_config.py`
+- `backend/tests/database/test_database.py`
+- `backend/tests/database/test_connection.py`
+- `mysql/init/001-schema-and-readonly-user.sql`
+- `docker-compose.yml`
 
 ## 验证结果
 
-- `npm.cmd run test -- --run`：6 个测试通过。
-- `npm.cmd run build`：Next.js 生产构建通过。
-- `uv run --frozen pytest -q`：后端 8 个测试通过。
+- `uv run --frozen pytest -q`：11 项后端测试通过。
+- `uv run --frozen pytest tests/database/test_connection.py -q -m integration`：1 项真实 MySQL 权限测试通过。
+- MySQL 容器健康检查通过，初始化日志确认 schema 和只读用户已创建。
 
 ## 下一步
 
-进入任务 4：只读 MySQL 连接和测试 schema。任务 3 仍使用任务 2 的固定报告，不代表已经接入真实数据库、Agent、SQL 执行或 SQL 自动修复。
+进入任务 5「固定 SQL 查询垂直切片」。任务 5 可以使用 `connection_for_settings` 查询固定的 `sales_channel_monthly`，将结果映射为报告数据；仍不能接受模型生成的任意 SQL。SQL 安全策略、表白名单和 SQL 自动修复分别属于后续任务 7、6 和 11。
