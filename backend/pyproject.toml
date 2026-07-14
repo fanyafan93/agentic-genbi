@@ -10,6 +10,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi==0.139.0",
     "pydantic-settings==2.14.2",
+    "pymysql[rsa]==1.1.1",
+    "sqlalchemy==2.0.41",
     "uvicorn==0.51.0",
 ]
 
@@ -25,3 +27,6 @@ packages = ["app"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "integration: requires the local Docker MySQL test service",
+]
