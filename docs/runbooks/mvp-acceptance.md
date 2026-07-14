@@ -54,3 +54,30 @@
   - 5 题失败中 `INVALID_REPORT` 与 `SQL_EXECUTION_ERROR` 来自 LLM
     返回的结构 / SQL 错误，由 `runner.py` / `coordinator.py` 已经接住，并不影响
     关闭步骤的保证。
+
+### 2026-07-15 INVALID_REPORT 修复重验
+
+[`8f7cd3e`](https://gitee.com/shenzhen-liran-cosmetics/genbi/commit/8f7cd3e)
+之后再次重跑上面 5 题脚本，整体成功率从 1/5 提到 **3/5**：
+
+| 问题 | 状态 | 步骤/finished | attempts | 行数 |
+| --- | --- | --- | --- | --- |
+| trend | succeeded | 7/7 | 1 | 50 |
+| comparison | succeeded | 6/6 | 1 | 6 |
+| ranking | failed | 7/7 | — | — |
+| composition | succeeded | 9/9 | 2 | 38 |
+| schema_probe | failed | 4/4 | — | — |
+
+- `INVALID_REPORT` 的失败信息现在带 **Detail:** 前缀暴露根本原因
+  （JSON 截断、Pydantic 字段缺失等），由
+  `backend/app/agents/runner.py` 中 `InvalidAgentReport(detail)` 与
+  `runner.py` 里 `<first line of exception> | raw=<truncated repr>` 的拼接
+  提供。
+- 后端完整单测：`89 passed, 2 skipped in 5.09s`（新增
+  `test_runner_invalid_report_message_carries_pydantic_detail` 显式断言
+  detail 走到 message 中）。
+- 后端运行后端镜像 `agentic-genbi-mvp-backend` 内检查
+  `app/agents/runner.py` 第 45–85 行已包含 detail 截断与 raw 截断逻辑。
+- 走偏题（如 "Generate an essay about imaginary cats"）连续三次都返回
+  `ANALYSIS_NEEDS_CLARIFICATION` 或 `SQL_EXECUTION_ERROR`，
+  未再次触发 `INVALID_REPORT`。
