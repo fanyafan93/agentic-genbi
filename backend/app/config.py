@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PROJECT_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     minimax_api_key: SecretStr | None = None
     minimax_base_url: str = "https://api.minimaxi.com/v1"
     minimax_model: str = "MiniMax-M3"
+    max_query_rows: int = Field(default=500, ge=1, le=10_000)
+    query_timeout_ms: int = Field(default=5_000, ge=100, le=60_000)
+    max_sql_retries: int = Field(default=2, ge=0, le=2)
 
     @field_validator("allowed_tables", mode="before")
     @classmethod
