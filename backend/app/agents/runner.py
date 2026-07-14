@@ -13,7 +13,16 @@ from app.schemas.analysis import ReportNarrative
 
 
 class AgentRunError(Exception):
-    code: str
+    code: str = "AGENT_RUN_ERROR"
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or self.code)
+
+    @classmethod
+    def with_code(cls, code: str, message: str) -> "AgentRunError":
+        instance = cls(message)
+        instance.code = code
+        return instance
 
 
 class AgentProviderNotConfigured(AgentRunError):
@@ -68,7 +77,7 @@ class MiniMaxAnalysisRunner:
 
         try:
             return validate_narrative_output(output)
-        except ValidationError as error:
+        except (ValidationError, json.JSONDecodeError, ValueError) as error:
             raise InvalidAgentReport from error
 
 

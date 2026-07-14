@@ -83,6 +83,21 @@ def test_runner_rejects_invalid_provider_output() -> None:
     assert error.value.code == "INVALID_REPORT"
 
 
+def test_runner_rejects_non_json_provider_output() -> None:
+    from app.agents.runner import InvalidAgentReport, MiniMaxAnalysisRunner
+
+    runner = MiniMaxAnalysisRunner(
+        settings_with_key(),
+        agent_factory=lambda _: object(),
+        sdk_runner=FakeSdkRunner(result="I cannot produce a report right now."),
+    )
+
+    with pytest.raises(InvalidAgentReport) as error:
+        runner.run("How did sales change?", "trusted context")
+
+    assert error.value.code == "INVALID_REPORT"
+
+
 def test_runner_validates_json_after_removing_minimax_thinking_content() -> None:
     from app.agents.runner import MiniMaxAnalysisRunner
 

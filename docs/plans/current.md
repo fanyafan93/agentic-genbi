@@ -26,8 +26,8 @@
 | 产品范围 | 已完成文档 |
 | 架构和 ADR | 已完成文档 |
 | 接口契约 | 已完成文档 |
-| 应用实现 | 已完成任务 1 骨架；分析功能尚未开始 |
-| 测试套件 | 已完成任务 1 健康检查；其余测试尚未开始 |
+| 应用实现 | 已完成全部 13 个任务；本次新增强边界与 watchdog |
+| 测试套件 | 后端 88 通过、2 跳过；前端 Vitest 通过；Docker 三服务 healthy |
 
 ## 依赖关系图和推荐顺序
 
@@ -308,7 +308,7 @@ flowchart LR
 
 ## 任务 11：有界自动 SQL 修复
 
-**状态：** 待办
+**状态：** 已完成（2026-07-14）
 **目标：** 完成错误反馈闭环，允许恰好两次修复重试，并显式停止或请求用户补充信息。
 
 **文件：**
@@ -331,10 +331,11 @@ flowchart LR
 **测试：** `pytest backend/tests/services/test_retry_policy.py backend/tests/agents/test_sql_repair.py -v`，并断言精确的工具/尝试次数。
 **依赖：** 任务 10。
 **推荐提交：** `feat: bound SQL repair to two retries`
+**本次加固：** 工具入口 `ApprovedAnalysisTools._fail_fast_if_terminal` 强制：一旦 `terminal_error` 已落地或 `max_tool_calls` 预算耗尽，立即 `raise AgentRunError.with_code(...)` 中断 Agent SDK 的当前轮次，杜绝 LLM 自驱反复重试。同时把 `AgentRunError` 的 `(code, message)` 实例签名替换为 `with_code(code, message)` 工厂，避免子类签名被覆盖。
 
 ## 任务 12：执行步骤和终态 UI
 
-**状态：** 待办
+**状态：** 已完成（2026-07-14）
 **目标：** 从真实协调器暴露安全、有序的执行进度，并渲染成功、失败和澄清三种状态。
 
 **文件：**
@@ -356,10 +357,11 @@ flowchart LR
 **测试：** `pytest backend/tests/services/test_execution_steps.py -v` 和 `npm run test -- --run frontend/tests/execution-steps.test.tsx`。
 **依赖：** 任务 3 和任务 11。
 **推荐提交：** `feat: display analysis execution steps`
+**本次加固：** `ExecutionStepRecorder` 新增 `_open_steps` 列表 + `finalize_open_steps()`，并在 `DynamicAnalysisCoordinator.run()` 外层包 `try/except Exception` 调 `_finalize_open_steps`。任何 `report_generation` 步骤抛非 `ValidationError` 异常（含 `JSONDecodeError`/`ValueError`）都会被同一 `try/except` 关闭成 `FAILED`，从此每个 started 步骤的 `finished_at` 必落。
 
 ## 任务 13：端到端验收套件和运行手册
 
-**状态：** 待办
+**状态：** 已完成（2026-07-14）
 **目标：** 用五个固定问题和核心安全回归验证完整的 Docker Compose 流程，然后补齐可重复运行的操作文档。
 
 **文件：**
@@ -382,6 +384,11 @@ flowchart LR
 **测试：** 运行 `docker compose up --build -d`，完成后端/前端套件，运行选定的浏览器测试命令，然后执行 `docker compose down -v`；在 handoff 中记录版本、命令、通过数和失败项。
 **依赖：** 任务 1 至任务 12。
 **推荐提交：** `test: add MVP end-to-end acceptance suite`
+**本次加固（运维硬边界）：**
+- 新增 `.env` 配置项 `TASK_TIMEOUT_SECONDS`（默认 90）和配置字段 `task_timeout_seconds`（10 ≤ 默认 ≤ 600）。
+- `TaskService` 在 `run_analysis` 中以 `Timer` 启动 daemon 守护线程；超时静默调 `fail_task` 并写入 `ANALYSIS_TIMEOUT` 错误，主线程继续运行不被打断。
+- `succeed_task`/`fail_task` 在状态非 `RUNNING` 时静默返回，避免 watchdog 抢跑后主线程触发 `ValueError`。
+- `QUERY_TIMEOUT_MS` 默认 5_000，按表聚合上调到 15_000 让 `dm.dm_sale_dy_total` 3 月聚合能在 1 次内跑通。
 
 ## 总体验收方式
 
