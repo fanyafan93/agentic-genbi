@@ -158,12 +158,12 @@ flowchart LR
 
 ## 任务 5：固定 SQL 查询垂直切片
 
-**状态：** 待办
+**状态：** 已完成（2026-07-14）
 **目标：** 用一条硬编码、由开发者拥有的只读查询替换固定报告行，验证数据库结果转换和报告传输。
 
 **文件：**
 
-- 新建 `backend/app/database/query.py`、`backend/app/services/fixed_analysis.py`。
+- 新建 `backend/app/query.py`、`backend/app/services/fixed_analysis.py`。
 - 新建 `backend/tests/database/test_query.py`、`backend/tests/services/test_fixed_analysis.py`。
 - 修改 `backend/app/api/analysis_tasks.py`、`backend/app/services/task_service.py`。
 
@@ -176,7 +176,8 @@ flowchart LR
 - 列顺序、`row_count`、`truncated`、SQL 和耗时都正确。
 - 驱动失败会变成终态、已脱敏的任务错误，而不是直接把堆栈响应给前端。
 
-**测试：** `pytest backend/tests/database/test_query.py backend/tests/services/test_fixed_analysis.py -v`。
+**验证结果：** 默认应用任务会查询 `sales_channel_monthly` 的 6 条记录，将 `date` 和 `Decimal` 转为 JSON 值，返回月度渠道销售额折线图报告；客户端不能传入 SQL。
+**测试：** `uv run --frozen pytest tests/database/test_query.py tests/services/test_fixed_analysis.py tests/api/test_analysis_tasks.py -v`。
 **依赖：** 任务 2 和任务 4。
 **推荐提交：** `feat: return report data from fixed MySQL query`
 
