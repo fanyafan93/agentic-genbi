@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from app.agents.runner import AgentRunError
+from app.agents.coordinator import AnalysisNeedsClarification
 from app.schemas.analysis import (
     AnalysisReport,
     AnalysisRequest,
@@ -91,12 +92,29 @@ class TaskService:
         )
         return self.get_task(task_id)
 
+    def require_input_task(self, task_id: str, error: ApiError) -> AnalysisTaskStatus:
+        task = self._get_mutable_task(task_id)
+        if task.status is not TaskState.RUNNING:
+            raise ValueError("only running tasks may require input")
+        completed_at = _utc_now()
+        self._tasks[task_id] = task.model_copy(
+            update={
+                "status": TaskState.REQUIRES_INPUT,
+                "error": error,
+                "updated_at": completed_at,
+                "completed_at": completed_at,
+            }
+        )
+        return self.get_task(task_id)
+
     def run_analysis(self, task_id: str, question: str) -> None:
         """Run the injected analysis service and map expected Agent failures safely."""
 
         self.start_task(task_id)
         try:
             self.succeed_task(task_id, self._analysis_runner(question))
+        except AnalysisNeedsClarification as error:
+            self.require_input_task(task_id, ApiError(code=error.code, message=str(error)))
         except AgentRunError as error:
             self.fail_task(task_id, ApiError(code=error.code, message=str(error)))
         except Exception:
