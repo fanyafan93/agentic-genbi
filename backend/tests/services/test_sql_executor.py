@@ -62,8 +62,39 @@ def test_executor_applies_server_limits_and_normalizes_rows() -> None:
     assert result.result is not None
     assert result.result.rows[0] == {"month_start": "2026-01-01", "sales_amount": 120.5}
     assert result.result.row_count == 2
+    assert result.result.truncated is False
     assert connection.calls[0] == ("SET SESSION MAX_EXECUTION_TIME = :timeout", {"timeout": 1500})
-    assert connection.calls[1][0].endswith("LIMIT 2")
+    assert connection.calls[1][0].endswith("LIMIT 3")
+
+
+def test_executor_uses_one_extra_row_only_to_detect_truncation() -> None:
+    class ThreeRowResult(FakeResult):
+        def __iter__(self):
+            return iter([
+                {"channel": "online"},
+                {"channel": "retail"},
+                {"channel": "distributor"},
+            ])
+
+    class ThreeRowConnection(FakeConnection):
+        def execute(self, statement, params=None):
+            result = super().execute(statement, params)
+            return ThreeRowResult() if str(statement).startswith("SELECT") else result
+
+    connection = ThreeRowConnection()
+
+    @contextmanager
+    def connection_factory(_: Settings):
+        yield connection
+
+    executor = SqlExecutor(settings(), connection_factory=connection_factory)
+    result = executor.execute("SELECT channel FROM sales_channel_monthly")
+
+    assert result.success is True
+    assert result.result is not None
+    assert result.result.rows == [{"channel": "online"}, {"channel": "retail"}]
+    assert result.result.row_count == 2
+    assert result.result.truncated is True
 
 
 def test_executor_returns_sanitized_policy_failure_without_opening_a_connection() -> None:

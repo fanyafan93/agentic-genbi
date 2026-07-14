@@ -1,4 +1,6 @@
-from app.agents.coordinator import DynamicAnalysisCoordinator
+import pytest
+
+from app.agents.coordinator import AnalysisNeedsClarification, DynamicAnalysisCoordinator
 from app.config import Settings
 from app.database.errors import SqlErrorCode, SqlToolError
 from app.query import SqlExecutionResult, SqlResultColumn
@@ -109,11 +111,19 @@ def test_coordinator_stops_after_the_third_failed_query() -> None:
     executor = AlwaysFailExecutor()
 
     def scripted_agent(_: str, tools) -> dict[str, object]:
+        tools.list_tables()
+        tools.get_table_schema("sales_channel_monthly")
         for _ in range(4):
             tools.execute_sql("SELECT missing_metric FROM sales_channel_monthly")
         return {"title": "unused", "summary": ["unused"], "chart": None, "assumptions": [], "warnings": []}
 
-    coordinator = DynamicAnalysisCoordinator(settings(), executor=executor, agent_runner=scripted_agent)
+    coordinator = DynamicAnalysisCoordinator(
+        settings(),
+        executor=executor,
+        list_tables_fn=lambda _: ListTablesResult(),
+        get_schema_fn=lambda table_name, _: TableSchema(table_name=table_name, columns=[]),
+        agent_runner=scripted_agent,
+    )
 
     from app.agents.coordinator import DynamicAnalysisError
     import pytest
@@ -140,11 +150,19 @@ def test_coordinator_stops_a_non_repairable_error_without_another_sql_attempt() 
     executor = UnsafeExecutor()
 
     def scripted_agent(_: str, tools) -> dict[str, object]:
+        tools.list_tables()
+        tools.get_table_schema("sales_channel_monthly")
         tools.execute_sql("DELETE FROM sales_channel_monthly")
         tools.execute_sql("SELECT channel FROM sales_channel_monthly")
         return {"title": "unused", "summary": ["unused"], "chart": None, "assumptions": [], "warnings": []}
 
-    coordinator = DynamicAnalysisCoordinator(settings(), executor=executor, agent_runner=scripted_agent)
+    coordinator = DynamicAnalysisCoordinator(
+        settings(),
+        executor=executor,
+        list_tables_fn=lambda _: ListTablesResult(),
+        get_schema_fn=lambda table_name, _: TableSchema(table_name=table_name, columns=[]),
+        agent_runner=scripted_agent,
+    )
 
     from app.agents.coordinator import DynamicAnalysisError
     import pytest
@@ -171,3 +189,38 @@ def test_approved_agent_tool_registry_contains_exactly_three_tools() -> None:
         "get_table_schema",
         "execute_sql",
     ]
+
+
+def test_sql_tool_requires_metadata_for_each_referenced_table() -> None:
+    from app.agents.coordinator import ApprovedAnalysisTools
+
+    executor = SequencedExecutor()
+    tools = ApprovedAnalysisTools(
+        settings(),
+        executor=executor,
+        list_tables_fn=lambda _: ListTablesResult(
+            tables=[TableInfo(name="sales_channel_monthly", comment=None)]
+        ),
+        get_schema_fn=lambda table_name, _: TableSchema(table_name=table_name, columns=[]),
+    )
+
+    assert tools.get_table_schema("sales_channel_monthly")["error"]["code"] == "METADATA_REQUIRED"
+    assert tools.execute_sql("SELECT channel FROM sales_channel_monthly")["error"]["code"] == "METADATA_REQUIRED"
+    tools.list_tables()
+    assert tools.execute_sql("SELECT channel FROM sales_channel_monthly")["error"]["code"] == "METADATA_REQUIRED"
+    tools.get_table_schema("sales_channel_monthly")
+    assert tools.execute_sql("SELECT channel FROM sales_channel_monthly")["success"] is False
+    assert executor.sql == ["SELECT channel FROM sales_channel_monthly"]
+
+
+def test_coordinator_requests_clarification_without_executing_sql() -> None:
+    def ambiguous_agent(_: str, _tools) -> dict[str, object]:
+        return {"requires_input": True, "message": "请说明要分析的销售指标和时间范围。"}
+
+    coordinator = DynamicAnalysisCoordinator(settings(), agent_runner=ambiguous_agent)
+
+    with pytest.raises(AnalysisNeedsClarification) as error:
+        coordinator.run("销售情况")
+
+    assert error.value.code == "ANALYSIS_NEEDS_CLARIFICATION"
+    assert str(error.value) == "请说明要分析的销售指标和时间范围。"

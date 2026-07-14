@@ -1,4 +1,6 @@
 from collections.abc import Callable
+import json
+import re
 from typing import Any
 
 from agents import Runner, RunConfig, function_tool
@@ -20,6 +22,7 @@ from app.schemas.analysis import AnalysisReport, ReportNarrative, ReportTable, R
 from app.schemas.tools import ListTablesResult, TableSchema
 from app.services.retry_policy import RetryDecision, RetryPolicy
 from app.services.sql_executor import SqlExecutor
+from app.services.sql_policy import SqlPolicy
 from app.tools.execute_sql import serialize_sql_tool_result
 from app.tools.get_table_schema import get_table_schema
 from app.tools.list_tables import list_tables
@@ -28,6 +31,15 @@ from app.tools.list_tables import list_tables
 class DynamicAnalysisError(AgentRunError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
+        super().__init__(message)
+
+
+class AnalysisNeedsClarification(AgentRunError):
+    """The question lacks the business scope needed for a reliable query."""
+
+    code = "ANALYSIS_NEEDS_CLARIFICATION"
+
+    def __init__(self, message: str) -> None:
         super().__init__(message)
 
 
@@ -51,7 +63,10 @@ class ApprovedAnalysisTools:
         self._list_tables_fn = list_tables_fn
         self._get_schema_fn = get_schema_fn
         self._retry_policy = RetryPolicy(settings.max_sql_retries)
+        self._metadata_policy = SqlPolicy(settings.allowed_tables, settings.max_query_rows)
         self._tool_calls = 0
+        self._listed_tables = False
+        self._inspected_tables: set[str] = set()
         self.sql_attempts = 0
         self.last_result: SqlExecutionResult | None = None
         self.last_sql: str | None = None
@@ -60,18 +75,33 @@ class ApprovedAnalysisTools:
     def list_tables(self) -> dict[str, object]:
         if not self._claim_tool_call():
             return self._budget_error()
-        return self._list_tables_fn(self._settings).model_dump()
+        result = self._list_tables_fn(self._settings)
+        self._listed_tables = True
+        return result.model_dump()
 
     def get_table_schema(self, table_name: str) -> dict[str, object]:
         if not self._claim_tool_call():
             return self._budget_error()
-        return self._get_schema_fn(table_name, self._settings).model_dump()
+        if not self._listed_tables:
+            return self._error_response(
+                SqlToolError(
+                    SqlErrorCode.METADATA_REQUIRED,
+                    "Call list_tables before requesting a table schema.",
+                    True,
+                )
+            )
+        result = self._get_schema_fn(table_name, self._settings)
+        self._inspected_tables.add(result.table_name)
+        return result.model_dump()
 
     def execute_sql(self, sql: str) -> dict[str, object]:
         if not self._claim_tool_call():
             return self._budget_error()
         if self.terminal_error is not None:
             return self._error_response(self.terminal_error)
+        metadata_error = self._metadata_error(sql)
+        if metadata_error is not None:
+            return self._error_response(metadata_error)
         if self.sql_attempts >= self._settings.max_sql_retries + 1:
             self.terminal_error = SqlToolError(
                 SqlErrorCode.SQL_RETRY_EXHAUSTED,
@@ -140,6 +170,22 @@ class ApprovedAnalysisTools:
         )
         return self._error_response(self.terminal_error)
 
+    def _metadata_error(self, sql: str) -> SqlToolError | None:
+        if not self._listed_tables:
+            return SqlToolError(
+                SqlErrorCode.METADATA_REQUIRED,
+                "Call list_tables before executing SQL.",
+                True,
+            )
+        referenced_tables = self._metadata_policy.referenced_tables(sql)
+        if not referenced_tables.issubset(self._inspected_tables):
+            return SqlToolError(
+                SqlErrorCode.METADATA_REQUIRED,
+                "Call get_table_schema for every table referenced by the SQL.",
+                True,
+            )
+        return None
+
     @staticmethod
     def _error_response(error: SqlToolError) -> dict[str, object]:
         return {
@@ -178,6 +224,10 @@ class DynamicAnalysisCoordinator:
             raise
         except Exception as error:
             raise AgentProviderError from error
+
+        clarification_message = _clarification_message(output)
+        if clarification_message is not None:
+            raise AnalysisNeedsClarification(clarification_message)
 
         if tools.last_result is None or tools.last_sql is None:
             error = tools.terminal_error or SqlToolError(
@@ -223,3 +273,21 @@ def _build_report(
         query_duration_ms=result.query_duration_ms,
         sql_attempts=sql_attempts,
     )
+
+
+def _clarification_message(output: Any) -> str | None:
+    """Accept the explicit no-query response contract for ambiguous questions."""
+
+    if isinstance(output, str):
+        without_thinking = re.sub(r"<think>.*?</think>", "", output, flags=re.DOTALL).strip()
+        fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", without_thinking, flags=re.DOTALL)
+        try:
+            output = json.loads(fenced.group(1) if fenced else without_thinking)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(output, dict) or output.get("requires_input") is not True:
+        return None
+    message = output.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    return "Please provide the missing business scope before analysis can continue."

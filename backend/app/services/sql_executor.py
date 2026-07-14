@@ -62,14 +62,18 @@ class SqlExecutor:
         except SQLAlchemyError as error:
             return SqlToolResult(success=False, error=classify_database_error(error))
 
-        rows = [{key: normalize_value(value) for key, value in row.items()} for row in raw_rows]
+        truncated = len(raw_rows) > normalized.limit
+        rows = [
+            {key: normalize_value(value) for key, value in row.items()}
+            for row in raw_rows[: normalized.limit]
+        ]
         return SqlToolResult(
             success=True,
             result=SqlExecutionResult(
                 columns=_result_columns(raw_rows),
                 rows=rows,
                 row_count=len(rows),
-                truncated=len(rows) >= normalized.limit,
+                truncated=truncated,
                 query_duration_ms=round((perf_counter() - started_at) * 1000),
             ),
         )

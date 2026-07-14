@@ -36,16 +36,39 @@ class SqlPolicy:
         statement = statements[0]
         self._reject_unsafe_nodes(statement)
         self._validate_tables(statement)
-        normalized = statement.limit(self._max_rows).sql(dialect="mysql")
+        # Fetch one extra row so the executor can report truncation accurately.
+        normalized = statement.limit(self._max_rows + 1).sql(dialect="mysql")
         return NormalizedSql(sql=normalized, limit=self._max_rows)
+
+    def referenced_tables(self, candidate_sql: str) -> frozenset[str]:
+        """Return physical tables from one parseable query, excluding CTE aliases."""
+
+        try:
+            statements = parse(candidate_sql, read="mysql")
+        except ParseError:
+            return frozenset()
+        if len(statements) != 1 or not isinstance(statements[0], exp.Query):
+            return frozenset()
+        statement = statements[0]
+        cte_names = {cte.alias_or_name for cte in statement.find_all(exp.CTE)}
+        return frozenset(
+            table.name for table in statement.find_all(exp.Table) if table.name not in cte_names
+        )
 
     def _reject_unsafe_nodes(self, statement: exp.Expression) -> None:
         forbidden_nodes = (
             exp.Into,
             exp.Lock,
+            exp.SessionParameter,
         )
         if any(statement.find(node_type) is not None for node_type in forbidden_nodes):
             raise SqlPolicyViolation("The query uses a forbidden read-only escape hatch.")
+        forbidden_functions = {"BENCHMARK", "LOAD_FILE", "SLEEP"}
+        if any(
+            function.name.upper() in forbidden_functions
+            for function in statement.find_all(exp.Anonymous)
+        ):
+            raise SqlPolicyViolation("The query uses a forbidden file-access function.")
 
     def _validate_tables(self, statement: exp.Expression) -> None:
         cte_names = {cte.alias_or_name for cte in statement.find_all(exp.CTE)}

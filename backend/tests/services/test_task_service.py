@@ -1,5 +1,6 @@
 import pytest
 
+from app.agents.coordinator import AnalysisNeedsClarification
 from app.agents.runner import AgentProviderNotConfigured
 from app.schemas.analysis import AnalysisRequest, TaskState
 from app.services.task_service import TaskCapacityExceeded, TaskNotFound, TaskService
@@ -54,3 +55,18 @@ def test_task_service_maps_agent_configuration_error_to_failed_task() -> None:
     assert failed_task.error is not None
     assert failed_task.error.code == "PROVIDER_NOT_CONFIGURED"
     assert failed_task.error.message == "Analysis provider is not configured."
+
+
+def test_task_service_maps_clarification_request_to_requires_input() -> None:
+    def clarification_runner(_: str):
+        raise AnalysisNeedsClarification("请说明销售指标。")
+
+    service = TaskService(analysis_runner=clarification_runner)
+    task = service.create_task(AnalysisRequest(question="销售情况"))
+
+    service.run_analysis(task.task_id, "销售情况")
+
+    updated_task = service.get_task(task.task_id)
+    assert updated_task.status is TaskState.REQUIRES_INPUT
+    assert updated_task.error is not None
+    assert updated_task.error.code == "ANALYSIS_NEEDS_CLARIFICATION"

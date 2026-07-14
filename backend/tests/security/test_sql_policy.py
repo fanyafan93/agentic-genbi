@@ -12,7 +12,7 @@ def test_policy_accepts_select_and_applies_server_owned_limit() -> None:
         "SELECT month_start, channel, sales_amount FROM sales_channel_monthly"
     )
 
-    assert normalized.sql.endswith("LIMIT 3")
+    assert normalized.sql.endswith("LIMIT 4")
     assert normalized.limit == 3
 
 
@@ -23,7 +23,7 @@ def test_policy_accepts_cte_select() -> None:
     )
 
     assert normalized.sql.startswith("WITH")
-    assert normalized.sql.endswith("LIMIT 3")
+    assert normalized.sql.endswith("LIMIT 4")
 
 
 @pytest.mark.parametrize(
@@ -35,6 +35,9 @@ def test_policy_accepts_cte_select() -> None:
         "DELETE FROM sales_channel_monthly",
         "DROP TABLE sales_channel_monthly",
         "SELECT * INTO OUTFILE '/tmp/leak.csv' FROM sales_channel_monthly",
+        "SELECT LOAD_FILE('/etc/passwd') FROM sales_channel_monthly",
+        "SELECT SLEEP(10) FROM sales_channel_monthly",
+        "SELECT @@version FROM sales_channel_monthly",
         "SELECT * FROM sales_channel_monthly FOR UPDATE",
     ],
 )
@@ -56,11 +59,11 @@ def test_policy_rejects_tables_outside_the_allowlist() -> None:
     ],
 )
 def test_policy_does_not_reject_keywords_in_literals_or_comments(sql: str) -> None:
-    assert policy().validate(sql).sql.endswith("LIMIT 3")
+    assert policy().validate(sql).sql.endswith("LIMIT 4")
 
 
 def test_policy_clamps_model_limit_instead_of_allowing_a_larger_result_set() -> None:
     normalized = policy().validate("SELECT * FROM sales_channel_monthly LIMIT 100")
 
-    assert normalized.sql.endswith("LIMIT 3")
+    assert normalized.sql.endswith("LIMIT 4")
     assert normalized.limit == 3

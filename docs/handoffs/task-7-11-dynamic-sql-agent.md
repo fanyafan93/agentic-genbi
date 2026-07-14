@@ -5,15 +5,19 @@
 - `sqlglot==30.12.0` is the MySQL AST parser for every dynamic query.
 - SQL policy allows only a single SELECT or CTE SELECT against `ALLOWED_TABLES`.
   It rejects writes, DDL, multiple statements, locks, file output, and qualified
-  database objects, then applies a server-owned LIMIT.
+  database objects, server-variable reads, and file/timing functions, then applies a
+  server-owned output limit.
 - `SqlExecutor` sets MySQL `MAX_EXECUTION_TIME`, normalizes rows, and returns
   sanitized errors. Browser and Agent inputs cannot set connection, timeout, row,
   or retry parameters.
 - `DynamicAnalysisCoordinator` exposes exactly `list_tables`, `get_table_schema`,
-  and `execute_sql` to the MiniMax Agent. The final report always uses the last
-  successful server-owned SQL result.
+  and `execute_sql` to the MiniMax Agent. It enforces metadata discovery before SQL,
+  and the final report always uses the last successful server-owned SQL result.
 - Unknown table/column, syntax, and type errors can prompt a repair. Total SQL
   execution is capped at three attempts: one initial attempt and two repairs.
+- Ambiguous questions may return `requires_input` with a concise request for missing
+  business scope. SQL fetching reads one extra row internally so `truncated` is exact
+  while the report never exceeds the server-owned row limit.
 
 ## Verification
 
@@ -23,6 +27,18 @@
   rejected before execution.
 - A live MiniMax smoke command selected `sales_channel_monthly`, generated a channel
   aggregation SQL query, returned two rows, and produced a valid report in one attempt.
+
+## Final Verification
+
+- Targeted policy, executor, coordinator, and task-state tests: `30 passed`.
+- Full backend suite after the review fixes: `69 passed, 1 skipped`.
+- Real MySQL integration: dynamic SELECT returned six seeded rows and INSERT was
+  rejected before database execution.
+- `docker compose config --no-interpolate` resolved the server-owned row, timeout,
+  tool-call, and retry settings.
+- A rebuilt isolated Docker image completed a real MiniMax run. It selected
+  `sales_channel_monthly`, generated a channel sales aggregation, returned two rows,
+  and completed in one SQL attempt.
 
 ## Remaining Work
 
