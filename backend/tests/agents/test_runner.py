@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.config import Settings
@@ -97,6 +99,67 @@ def test_runner_validates_json_after_removing_minimax_thinking_content() -> None
     narrative = runner.run("How did sales change?", "trusted context")
 
     assert narrative.title == "Monthly sales trend"
+
+
+def test_runner_normalizes_minimax_legacy_chart_fields() -> None:
+    from app.agents.runner import MiniMaxAnalysisRunner
+
+    runner = MiniMaxAnalysisRunner(
+        settings_with_key(),
+        agent_factory=lambda _: object(),
+        sdk_runner=FakeSdkRunner(
+            result=json.dumps(
+                {
+                    "title": "Monthly sales trend",
+                    "summary": ["Sales changed across channels."],
+                    "chart": {
+                        "type": "line",
+                        "x_axis": "month_start",
+                        "y_axis": "sales_amount",
+                        "series": ["channel"],
+                        "data": [{"month_start": "2026-01-01", "sales_amount": 120000}],
+                    },
+                    "assumptions": [],
+                    "warnings": [],
+                }
+            )
+        ),
+    )
+
+    narrative = runner.run("How did sales change?", "trusted context")
+
+    assert narrative.chart is not None
+    assert narrative.chart.x_field == "month_start"
+    assert narrative.chart.y_fields == ["sales_amount"]
+    assert narrative.chart.series_field == "channel"
+
+
+def test_runner_drops_an_unsupported_minimax_chart_variant() -> None:
+    from app.agents.runner import MiniMaxAnalysisRunner
+
+    runner = MiniMaxAnalysisRunner(
+        settings_with_key(),
+        agent_factory=lambda _: object(),
+        sdk_runner=FakeSdkRunner(
+            result=json.dumps(
+                {
+                    "title": "Monthly sales trend",
+                    "summary": ["Sales changed across channels."],
+                    "chart": {
+                        "type": "line",
+                        "x": "month_start",
+                        "series": [{"name": "online", "values": [{"sales_amount": 120000}]}],
+                    },
+                    "assumptions": [],
+                    "warnings": [],
+                }
+            )
+        ),
+    )
+
+    narrative = runner.run("How did sales change?", "trusted context")
+
+    assert narrative.chart is None
 
 
 def test_runner_sanitizes_provider_errors() -> None:

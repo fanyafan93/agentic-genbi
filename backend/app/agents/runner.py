@@ -1,4 +1,5 @@
 from collections.abc import Callable
+import json
 import re
 from typing import Any
 
@@ -82,8 +83,33 @@ def _run_with_agents_sdk(agent: object, prompt: str) -> Any:
 
 def _validate_narrative_output(output: Any) -> ReportNarrative:
     if isinstance(output, str):
-        return ReportNarrative.model_validate_json(_extract_json(output))
-    return ReportNarrative.model_validate(output)
+        output = json.loads(_extract_json(output))
+    return ReportNarrative.model_validate(_normalize_legacy_chart(output))
+
+
+def _normalize_legacy_chart(output: Any) -> Any:
+    """Adapt MiniMax's common chart variant to the server-owned report contract."""
+
+    if not isinstance(output, dict) or not isinstance(output.get("chart"), dict):
+        return output
+
+    chart = output["chart"]
+    if "x_axis" not in chart or "y_axis" not in chart:
+        required_fields = {"type", "title", "x_field", "y_fields"}
+        return output if required_fields.issubset(chart) else {**output, "chart": None}
+
+    y_axis = chart["y_axis"]
+    y_fields = y_axis if isinstance(y_axis, list) else [y_axis]
+    series = chart.get("series")
+    series_field = series[0] if isinstance(series, list) and len(series) == 1 else series
+    normalized_chart = {
+        "type": chart.get("type"),
+        "title": chart.get("title", output.get("title")),
+        "x_field": chart["x_axis"],
+        "y_fields": y_fields,
+        "series_field": series_field,
+    }
+    return {**output, "chart": normalized_chart}
 
 
 def _extract_json(output: str) -> str:
