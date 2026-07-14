@@ -4,10 +4,11 @@ import { describe, expect, it } from "vitest";
 
 import Home from "../src/app/page";
 
-describe("MVP skeleton page", () => {
-  it("identifies the project as being in the scaffold stage", () => {
+describe("MVP analysis page", () => {
+  it("identifies the product as an analysis workspace", () => {
     const page = renderToStaticMarkup(createElement(Home));
 
-    expect(page).toContain("项目骨架阶段");
+    expect(page).toContain("AGENTIC GENBI");
+    expect(page).toContain("开始分析");
   });
 });
