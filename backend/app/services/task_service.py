@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -27,8 +28,9 @@ class TaskService:
     boundary explicit until durable queueing is justified.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, analysis_runner: Callable[[], AnalysisReport] | None = None) -> None:
         self._tasks: dict[str, AnalysisTaskStatus] = {}
+        self._analysis_runner = analysis_runner or _fixed_report
 
     def create_task(self, request: AnalysisRequest) -> AnalysisTaskStatus:
         if any(task.status in {TaskState.QUEUED, TaskState.RUNNING} for task in self._tasks.values()):
@@ -76,7 +78,7 @@ class TaskService:
         """Complete the temporary deterministic analysis used before Agent/DB work."""
 
         self.start_task(task_id)
-        self.succeed_task(task_id, _fixed_report())
+        self.succeed_task(task_id, self._analysis_runner())
 
     def _get_mutable_task(self, task_id: str) -> AnalysisTaskStatus:
         try:

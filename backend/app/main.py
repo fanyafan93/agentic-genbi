@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from app.api.analysis_tasks import router as analysis_tasks_router
 from app.config import Settings, get_settings
 from app.schemas.analysis import ApiError, ApiErrorResponse
+from app.services.fixed_analysis import run_fixed_analysis
 from app.services.task_service import TaskService
 
 
@@ -14,8 +15,11 @@ def create_app(
     """Create the HTTP application with already-validated runtime settings."""
 
     app = FastAPI(title="Agentic GenBI MVP")
-    app.state.settings = settings or get_settings()
-    app.state.task_service = task_service or TaskService()
+    resolved_settings = settings or get_settings()
+    app.state.settings = resolved_settings
+    app.state.task_service = task_service or TaskService(
+        lambda: run_fixed_analysis(resolved_settings)
+    )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(_: Request, __: RequestValidationError) -> JSONResponse:

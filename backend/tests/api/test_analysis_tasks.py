@@ -34,6 +34,22 @@ async def test_create_task_returns_queued_then_get_returns_fixed_completed_repor
 
 
 @pytest.mark.anyio
+async def test_default_application_returns_the_fixed_mysql_report() -> None:
+    settings = Settings(
+        app_env="test",
+        database_url="mysql+pymysql://readonly_user:readonly-password@127.0.0.1:3307/analytics",
+    )
+    transport = httpx.ASGITransport(app=create_app(settings))
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await client.post("/api/v1/analysis-tasks", json={"question": "查看销售额"})
+        fetched = await client.get(f"/api/v1/analysis-tasks/{created.json()['task_id']}")
+
+    assert fetched.json()["report"]["title"] == "月度渠道销售额"
+    assert fetched.json()["report"]["table"]["row_count"] == 6
+
+
+@pytest.mark.anyio
 async def test_blank_and_overlong_questions_return_validation_error_envelope() -> None:
     app = create_app(Settings(app_env="test"), task_service=TaskService())
     transport = httpx.ASGITransport(app=app)
