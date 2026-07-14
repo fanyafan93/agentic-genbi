@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     max_query_rows: int = Field(default=500, ge=1, le=10_000)
     query_timeout_ms: int = Field(default=5_000, ge=100, le=60_000)
     max_sql_retries: int = Field(default=2, ge=0, le=2)
+    max_tool_calls: int = Field(default=12, ge=3, le=30)
 
     @field_validator("allowed_tables", mode="before")
     @classmethod

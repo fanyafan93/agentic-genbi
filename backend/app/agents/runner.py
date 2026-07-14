@@ -67,7 +67,7 @@ class MiniMaxAnalysisRunner:
             raise AgentProviderError from error
 
         try:
-            return _validate_narrative_output(output)
+            return validate_narrative_output(output)
         except ValidationError as error:
             raise InvalidAgentReport from error
 
@@ -81,7 +81,7 @@ def _run_with_agents_sdk(agent: object, prompt: str) -> Any:
     return result.final_output
 
 
-def _validate_narrative_output(output: Any) -> ReportNarrative:
+def validate_narrative_output(output: Any) -> ReportNarrative:
     if isinstance(output, str):
         output = json.loads(_extract_json(output))
     return ReportNarrative.model_validate(_normalize_legacy_chart(output))

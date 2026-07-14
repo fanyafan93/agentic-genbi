@@ -3,11 +3,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.agents.runner import MiniMaxAnalysisRunner
+from app.agents.coordinator import DynamicAnalysisCoordinator
 from app.api.analysis_tasks import router as analysis_tasks_router
 from app.config import Settings, get_settings
 from app.schemas.analysis import ApiError, ApiErrorResponse
-from app.services.analysis_service import AnalysisService
 from app.services.task_service import TaskService
 
 
@@ -26,9 +25,7 @@ def create_app(
     )
     resolved_settings = settings or get_settings()
     app.state.settings = resolved_settings
-    app.state.task_service = task_service or TaskService(
-        AnalysisService(resolved_settings, MiniMaxAnalysisRunner(resolved_settings)).run
-    )
+    app.state.task_service = task_service or TaskService(DynamicAnalysisCoordinator(resolved_settings).run)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(_: Request, __: RequestValidationError) -> JSONResponse:

@@ -1,3 +1,5 @@
+from typing import Any
+
 from agents import Agent, ModelSettings, OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
 
@@ -5,7 +7,7 @@ from app.agents.prompts import ANALYSIS_INSTRUCTIONS
 from app.config import Settings
 
 
-def build_minimax_analysis_agent(settings: Settings) -> Agent:
+def build_minimax_analysis_agent(settings: Settings, tools: list[Any] | None = None) -> Agent:
     """Create a structured-output Agent backed by MiniMax's OpenAI-compatible API."""
 
     api_key = settings.minimax_api_key
@@ -21,6 +23,7 @@ def build_minimax_analysis_agent(settings: Settings) -> Agent:
         name="GenBI Analysis Agent",
         instructions=ANALYSIS_INSTRUCTIONS,
         model=model,
+        tools=tools or [],
         # MiniMax M-series does not support OpenAI JSON-schema response_format.
         # The runner validates the prompted JSON with Pydantic after the SDK call.
         model_settings=ModelSettings(
