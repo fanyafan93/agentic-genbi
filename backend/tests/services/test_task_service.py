@@ -1,8 +1,10 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from app.agents.coordinator import AnalysisNeedsClarification
 from app.agents.runner import AgentProviderNotConfigured
-from app.schemas.analysis import AnalysisRequest, TaskState
+from app.schemas.analysis import AgentExecutionStep, AnalysisRequest, StepState, TaskState
 from app.services.task_service import TaskCapacityExceeded, TaskNotFound, TaskService
 from tests.fixtures.fixed_report import make_fixed_report
 
@@ -70,3 +72,52 @@ def test_task_service_maps_clarification_request_to_requires_input() -> None:
     assert updated_task.status is TaskState.REQUIRES_INPUT
     assert updated_task.error is not None
     assert updated_task.error.code == "ANALYSIS_NEEDS_CLARIFICATION"
+
+
+def test_task_service_replaces_an_in_progress_step_without_reordering_history() -> None:
+    service = TaskService()
+    task = service.create_task(AnalysisRequest(question="Show monthly sales"))
+    service.start_task(task.task_id)
+
+    started = AgentExecutionStep(
+        step_id="step-1",
+        sequence=1,
+        kind="list_tables",
+        status=StepState.STARTED,
+        title="Inspect approved tables",
+        started_at=task.created_at,
+    )
+    completed = started.model_copy(
+        update={"status": StepState.SUCCEEDED, "finished_at": task.created_at}
+    )
+
+    service.record_step(task.task_id, started)
+    service.record_step(task.task_id, completed)
+
+    updated_task = service.get_task(task.task_id)
+    assert updated_task.steps == [completed]
+
+
+def test_task_service_forwards_steps_from_a_step_aware_analysis_runner() -> None:
+    def step_aware_runner(_: str, on_step) -> object:
+        on_step(
+            AgentExecutionStep(
+                step_id="step-1",
+                sequence=1,
+                kind="agent_started",
+                status=StepState.SUCCEEDED,
+                title="Starting analysis",
+                started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+            )
+        )
+        return make_fixed_report()
+
+    service = TaskService(step_aware_analysis_runner=step_aware_runner)
+    task = service.create_task(AnalysisRequest(question="Show monthly sales"))
+
+    service.run_analysis(task.task_id, "Show monthly sales")
+
+    completed_task = service.get_task(task.task_id)
+    assert completed_task.status is TaskState.SUCCEEDED
+    assert [step.step_id for step in completed_task.steps] == ["step-1"]
