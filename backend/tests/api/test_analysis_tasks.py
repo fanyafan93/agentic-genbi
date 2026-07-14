@@ -78,6 +78,25 @@ async def test_blank_and_overlong_questions_return_validation_error_envelope() -
 
 
 @pytest.mark.anyio
+async def test_analysis_api_allows_local_frontend_cors_preflight() -> None:
+    app = create_app(Settings(app_env="test"), task_service=TaskService())
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.options(
+            "/api/v1/analysis-tasks",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert "POST" in response.headers["access-control-allow-methods"]
+
+
+@pytest.mark.anyio
 async def test_unknown_task_returns_task_not_found_error_envelope() -> None:
     app = create_app(Settings(app_env="test"), task_service=TaskService())
     transport = httpx.ASGITransport(app=app)

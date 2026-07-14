@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.agents.runner import MiniMaxAnalysisRunner
@@ -16,6 +17,13 @@ def create_app(
     """Create the HTTP application with already-validated runtime settings."""
 
     app = FastAPI(title="Agentic GenBI MVP")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
     resolved_settings = settings or get_settings()
     app.state.settings = resolved_settings
     app.state.task_service = task_service or TaskService(
