@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-项目已完成任务 1 至任务 4：项目骨架与健康检查、固定分析任务 API、固定前端报告，以及数据库级只读 MySQL 连接。当前前端仍展示固定报告；真实业务查询、SQL 安全策略、元数据工具和 Agent 仍在后续任务中实现。
+项目已完成任务 1 至任务 6 和任务 8：项目骨架、任务 API、固定只读查询、数据库连接、白名单元数据工具，以及 MiniMax 驱动的结构化 Agent 报告。当前 Agent 不调用工具、不生成动态 SQL；SQL 安全策略仍在任务 7 中待实现。
 
 ## 规划中的 MVP 能力
 
@@ -81,8 +81,9 @@ uv run --frozen pytest tests/database/test_connection.py -v -m integration
 | 变量 | 用途 | 是否敏感 |
 | --- | --- | --- |
 | `APP_ENV` | 当前骨架必须提供，取值为 `development`、`test` 或 `production` | 否 |
-| `OPENAI_API_KEY` | OpenAI API 身份凭据 | 是 |
-| `OPENAI_MODEL` | Agent 使用的模型，由部署环境显式配置 | 否 |
+| `MINIMAX_API_KEY` | MiniMax API 身份凭据 | 是 |
+| `MINIMAX_BASE_URL` | MiniMax 中国区 OpenAI 兼容端点，默认 `https://api.minimaxi.com/v1` | 否 |
+| `MINIMAX_MODEL` | Agent 使用的 MiniMax 模型，默认 `MiniMax-M3` | 否 |
 | `DATABASE_URL` | MySQL 只读连接串 | 是 |
 | `ALLOWED_TABLES` | 允许暴露给 Agent 的表白名单 | 否 |
 | `MAX_QUERY_ROWS` | 查询最大返回行数 | 否 |
@@ -91,7 +92,7 @@ uv run --frozen pytest tests/database/test_connection.py -v -m integration
 | `MAX_SQL_RETRIES` | SQL 修复重试上限，MVP 必须为 `2` | 否 |
 | `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` | 是否在 SDK trace 中包含敏感输入输出，默认应关闭 | 否 |
 
-密钥只通过本地 `.env` 或部署环境注入，禁止提交到 Git。`DATABASE_URL` 已由任务 4 作为后端必填配置验证，并以 `SecretStr` 保存，避免其出现在配置验证错误中；`OPENAI_API_KEY` 等其余配置将在对应功能接入时启用。
+密钥只通过本地 `.env` 或部署环境注入，禁止提交到 Git。`DATABASE_URL` 和 `MINIMAX_API_KEY` 都以 `SecretStr` 保存，避免其出现在配置验证错误中。MiniMax 调用使用 OpenAI 兼容 Chat Completions；Agent tracing 在运行时关闭，避免将查询上下文发送到 trace。
 
 ## 骨架测试命令
 
@@ -105,7 +106,7 @@ docker compose run --rm --no-deps frontend npm run test -- --run tests/health.te
 
 ## 当前尚未实现
 
-已实现 FastAPI `/health`、任务状态 API、固定报告前端、受管 SQLAlchemy 连接和数据库级只读 MySQL 测试库。真实业务查询、SQL 安全检查、元数据工具、Agent、SQL 自动修复和基于查询的报告生成仍未实现。WrenAI、LangGraph、多 Agent、多租户、Redis、Celery、多数据库、PDF、仪表板编辑器和任意代码执行明确不在 MVP 范围内。
+已实现 FastAPI `/health`、任务状态 API、固定只读查询、受管 SQLAlchemy 连接、数据库级只读 MySQL 测试库、白名单元数据工具，以及 MiniMax 结构化 Agent 报告。动态 SQL 生成与执行、SQL 安全检查、Agent 工具编排和 SQL 自动修复仍未实现；任务 7 保持待办。WrenAI、LangGraph、多 Agent、多租户、Redis、Celery、多数据库、PDF、仪表板编辑器和任意代码执行明确不在 MVP 范围内。
 
 ## 文档导航
 

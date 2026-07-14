@@ -1,17 +1,31 @@
 from functools import lru_cache
-from typing import Literal
+from pathlib import Path
+from typing import Annotated, Literal
 
-from pydantic import SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+PROJECT_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 class Settings(BaseSettings):
     """Runtime settings required by the currently implemented application shell."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=PROJECT_ENV_FILE, extra="ignore")
 
     app_env: Literal["development", "test", "production"]
     database_url: SecretStr
+    allowed_tables: Annotated[tuple[str, ...], NoDecode] = ("sales_channel_monthly",)
+    minimax_api_key: SecretStr | None = None
+    minimax_base_url: str = "https://api.minimaxi.com/v1"
+    minimax_model: str = "MiniMax-M3"
+
+    @field_validator("allowed_tables", mode="before")
+    @classmethod
+    def parse_allowed_tables(cls, value: str | tuple[str, ...]) -> tuple[str, ...]:
+        if isinstance(value, str):
+            return tuple(name.strip() for name in value.split(",") if name.strip())
+        return value
 
 
 @lru_cache

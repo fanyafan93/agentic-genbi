@@ -2,10 +2,12 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from app.agents.runner import AgentRunError
 from app.schemas.analysis import (
     AnalysisReport,
     AnalysisRequest,
     AnalysisTaskStatus,
+    ApiError,
     ReportTable,
     ResultColumn,
     TaskState,
@@ -28,9 +30,9 @@ class TaskService:
     boundary explicit until durable queueing is justified.
     """
 
-    def __init__(self, analysis_runner: Callable[[], AnalysisReport] | None = None) -> None:
+    def __init__(self, analysis_runner: Callable[[str], AnalysisReport] | None = None) -> None:
         self._tasks: dict[str, AnalysisTaskStatus] = {}
-        self._analysis_runner = analysis_runner or _fixed_report
+        self._analysis_runner = analysis_runner or (lambda _: _fixed_report())
 
     def create_task(self, request: AnalysisRequest) -> AnalysisTaskStatus:
         if any(task.status in {TaskState.QUEUED, TaskState.RUNNING} for task in self._tasks.values()):
@@ -74,11 +76,39 @@ class TaskService:
         )
         return self.get_task(task_id)
 
+    def fail_task(self, task_id: str, error: ApiError) -> AnalysisTaskStatus:
+        task = self._get_mutable_task(task_id)
+        if task.status is not TaskState.RUNNING:
+            raise ValueError("only running tasks may fail")
+        completed_at = _utc_now()
+        self._tasks[task_id] = task.model_copy(
+            update={
+                "status": TaskState.FAILED,
+                "error": error,
+                "updated_at": completed_at,
+                "completed_at": completed_at,
+            }
+        )
+        return self.get_task(task_id)
+
+    def run_analysis(self, task_id: str, question: str) -> None:
+        """Run the injected analysis service and map expected Agent failures safely."""
+
+        self.start_task(task_id)
+        try:
+            self.succeed_task(task_id, self._analysis_runner(question))
+        except AgentRunError as error:
+            self.fail_task(task_id, ApiError(code=error.code, message=str(error)))
+        except Exception:
+            self.fail_task(
+                task_id,
+                ApiError(code="ANALYSIS_FAILED", message="Analysis task failed unexpectedly."),
+            )
+
     def run_fixed_analysis(self, task_id: str) -> None:
         """Complete the temporary deterministic analysis used before Agent/DB work."""
 
-        self.start_task(task_id)
-        self.succeed_task(task_id, self._analysis_runner())
+        self.run_analysis(task_id, "")
 
     def _get_mutable_task(self, task_id: str) -> AnalysisTaskStatus:
         try:
