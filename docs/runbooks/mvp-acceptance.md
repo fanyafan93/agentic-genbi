@@ -81,3 +81,32 @@
 - 走偏题（如 "Generate an essay about imaginary cats"）连续三次都返回
   `ANALYSIS_NEEDS_CLARIFICATION` 或 `SQL_EXECUTION_ERROR`，
   未再次触发 `INVALID_REPORT`。
+
+### 2026-07-15 `13f46b4` 之后的二次重验
+
+上一条记录里 `INVALID_REPORT` 的 message 不带 `Detail:` ，
+是因为 coordinator 还有第二处 `raise InvalidAgentReport from error`
+没传 detail，而实际生产路径里命中的是 coordinator 不是 runner。
+`13f46b4` 给 coordinator 的同一段 `except` 加了
+`f"{head} | raw={raw}"` 拼接，并把 `app.observability.logger`
+（不存在）换成标准 `logging.getLogger("agentic_genbi").error`。
+验收脚本 `docs/runbooks/scripts/run-acceptance-with-detail.ps1` 会把每个任务的
+JSON 快照写到 `verification_runs/<date>/<id>.json`，用来诊断这种回归。
+
+| 问题 | 状态 | 步骤/finished | attempts | 行数 |
+| --- | --- | --- | --- | --- |
+| trend | succeeded | 7/7 | 1 | 50 |
+| comparison | succeeded | 6/6 | 1 | 6 |
+| ranking | requires_input | 3/3 | — | — |
+| composition | succeeded | 20/20 | 3 | 60 |
+| schema_probe | failed | 3/3 | — | — |
+
+- 失败项都给出语义化错误：`ANALYSIS_NEEDS_CLARIFICATION` 和
+  `SQL_EXECUTION_ERROR`，不再回到模糊的 `INVALID_REPORT`。
+- 后端单测： `89 passed, 2 skipped in 5.10s`（新增
+  `test_coordinator_marks_report_generation_failed_for_non_json_output`
+  里的 `Detail:` 与 `raw=` 双断言）。
+- 容器内确认：
+  `docker exec agentic-genbi-mvp-backend-1 grep -n`
+  `agentic_genbi` 出现在 `app/agents/coordinator.py` 与
+  `app/agents/runner.py` —— 两个 raise 点都已接 stderr 日志。

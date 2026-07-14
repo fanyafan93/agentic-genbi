@@ -385,9 +385,15 @@ class DynamicAnalysisCoordinator:
                         narrative, tools.last_result, tools.last_sql, tools.sql_attempts
                     )
                 except (ValidationError, json.JSONDecodeError, ValueError) as error:
-                    if isinstance(error, ValidationError):
-                        raise InvalidAgentReport from error
-                    raise InvalidAgentReport from error
+                    head = str(error).splitlines()[0] if str(error).splitlines() else "<empty>"
+                    raw = repr(output)[:200]
+                    import logging
+                    logging.getLogger("agentic_genbi").error(
+                        "validate_narrative_output_failed: %s | raw=%s",
+                        head,
+                        raw,
+                    )
+                    raise InvalidAgentReport(f"{head} | raw={raw}") from error
             except Exception:
                 step_recorder.finish(report_step, StepState.FAILED)
                 raise

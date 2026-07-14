@@ -83,6 +83,12 @@ class MiniMaxAnalysisRunner:
         except (ValidationError, json.JSONDecodeError, ValueError) as error:
             raw = repr(output)[:200]
             head = str(error).splitlines()[0] if str(error).splitlines() else "<empty>"
+            import logging
+            logging.getLogger("agentic_genbi").error(
+                "validate_narrative_output_failed: %s | raw=%s",
+                head,
+                raw,
+            )
             raise InvalidAgentReport(f"{head} | raw={raw}") from error
 
 

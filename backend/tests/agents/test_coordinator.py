@@ -197,6 +197,8 @@ def test_coordinator_marks_report_generation_failed_for_non_json_output() -> Non
         coordinator.run("Show channel sales", on_step=events.append)
 
     assert error.value.code == "INVALID_REPORT"
+    assert "Detail:" in str(error.value), str(error.value)
+    assert "raw=" in str(error.value), str(error.value)
     report_steps = [event for event in events if event.kind == "report_generation"]
     assert len(report_steps) == 2
     assert report_steps[-1].status is StepState.FAILED
