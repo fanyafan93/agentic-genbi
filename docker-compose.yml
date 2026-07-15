@@ -1,0 +1,51 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: ${DATABASE_URL:-mysql+pymysql://readonly_user:readonly-password@mysql:3306/analytics}
+      ALLOWED_TABLES: ${ALLOWED_TABLES:-sales_channel_monthly}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/v1}
+      MINIMAX_MODEL: ${MINIMAX_MODEL:-MiniMax-M3}
+      MAX_QUERY_ROWS: ${MAX_QUERY_ROWS:-500}
+      QUERY_TIMEOUT_MS: ${QUERY_TIMEOUT_MS:-5000}
+      MAX_TOOL_CALLS: ${MAX_TOOL_CALLS:-12}
+      MAX_SQL_RETRIES: ${MAX_SQL_RETRIES:-2}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/health').status == 200"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: analytics
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
