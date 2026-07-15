@@ -145,6 +145,14 @@ LLM 看到错误继续重试，对应任务产生 5+ 次 `sql_validation` 步骤
 - **错误码：** `TASK_TIMEOUT_SECONDS` 触发后错误为 `ANALYSIS_TIMEOUT`。
 - **数据格式：** `AnalysisTaskStatus.steps` 所有项目状态终必带 `finished_at`。
 
+## 长远方向
+
+项目跑过 MVP 之后下一波投入方向记录在
+[`docs/plans/roadmap.md`](../plans/roadmap.md)。它把 PDF 导出 / 仪表板 /
+定时任务列为阶段 1（1–2 月），把多数据库 / 向量库 / Redis / Celery 列为阶段 2（2–4 月），
+把多 Agent / LangGraph / WrenAI 列为阶段 3（3–6 月），并明确把 **自动修库 / 自
+由执行任意代码 / Kubernetes / 完整权限系统 / 多租户**列为**不应自动化**的产品边界。
+
 ## 已知限制（保持 MVP 范围内）
 
 - 任务状态仍存于 FastAPI 进程内，进程重启后旧 task_id 消失
