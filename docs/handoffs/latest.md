@@ -1,12 +1,51 @@
 # 最新交接
 
-更新时间：2026-07-14 22:50（Asia/Shanghai）
+更新时间：2026-07-15 03:58（Asia/Shanghai）
 
 ## 当前分支
 
-`Agentic-GenBI-MVP`。本次提交是**对动态 SQL Agent 的边界加固**
-（含硬边界、watchdog、步骤 finished_at 兜底），不改动业务契约。
-`docs/plans/current.md`、`docs/handoffs/latest.md` 与本次提交同改。
+`Agentic-GenBI-MVP`。自 12:00 起累计 6 个独立 commit 完成：
+1. `12ba23f` — fix：边界加固 + watchdog + 步骤 finished_at 兜底
+2. `70eb286` — feat：跨 schema 通配符
+3. `bf55476` — feat：前端步骤 UI
+4. `b5e7578` — test+docs：acceptance 套件 + 运维 runbooks
+5. `8c4109c` — chore：忽略 frontend-test.html
+6. `e3c3e66` / `5b8de00` / `93494c1` — docs + scripts + INVALID_REPORT 双轮修复
+
+## INVALID_REPORT 双轮修复（`8f7cd3e` → `93494c1`）
+
+第一次端到端验收时 5 题里 1 题
+`INVALID_REPORT`。`8f7cd3e` 让
+[`InvalidAgentReport.__init__`](file:///e:/my_repo/Agentic-GenBI-MVP/backend/app/agents/runner.py#L42-L52)
+接受可选 `detail` 参数并把异常摘要拼到 `message` 里，runner.py
+接 `<exception first line> | raw=<200-char repr>`。但重跑验收时
+发现线上 API 仍然把 message 显示成纯裸的
+`"Analysis provider returned an invalid report."`。
+
+根因：`InvalidAgentReport` 在仓库内**有两个** raise 点，
+12ba23f/8f7cd3e 都只修了
+[`runner.py`](file:///e:/my_repo/Agentic-GenBI-MVP/backend/app/agents/runner.py)
+一处；
+[coordinator.py 380–393](file:///e:/my_repo/Agentic-GenBI-MVP/backend/app/agents/coordinator.py#L380-L393)
+report_generation 仍然 `raise InvalidAgentReport from error`
+（不带 detail）。生产路径里这一处会先于 runner 命中，所以
+detail 没流到 API。
+
+`93494c1` 修复：
+
+| 文件 | 改动 |
+| --- | --- |
+| `backend/app/agents/coordinator.py` | 同 try 块拼接 `<head> | raw=<raw>` 传给 InvalidAgentReport |
+| `backend/app/agents/runner.py` | `app.observability.logger`（不存在）替换成标准 `logging.getLogger("agentic_genbi").error` |
+| `backend/tests/agents/test_coordinator.py` | `test_coordinator_marks_report_generation_failed_for_non_json_output` 新增 `Detail:` + `raw=` 双断言 |
+| `docs/runbooks/scripts/run-acceptance-with-detail.ps1` | 把每个任务 JSON 写到 `verification_runs/<date>/`，是诊断这次"detail 跑不到 API"回归的关键 |
+| `docs/runbooks/mvp-acceptance.md` | 新增 2026-07-15 重验章节 |
+
+`93494c1` 后端单测：`89 passed, 2 skipped in 5.10s`。
+`93494c1` 后 live 5 题验收：3/5 succeeded（trend 50 行、comparison
+6 行、composition 60 行 attempts=3），失败项都是语义化
+（`ANALYSIS_NEEDS_CLARIFICATION` / `SQL_EXECUTION_ERROR`），
+不再是模糊的 `INVALID_REPORT`。
 
 ## 本次改动
 
@@ -118,6 +157,10 @@ LLM 看到错误继续重试，对应任务产生 5+ 次 `sql_validation` 步骤
   判断是字段缺失、JSON 截断还是其他原因。具体测试见
   `test_runner_rejects_non_json_provider_output` 与
   `test_runner_invalid_report_message_carries_pydantic_detail`。
+  `93494c1` 之后 `coordinator.py` 的 raise 也带同样的 detail；
+  触发时 `agentic_genbi` logger 也会写一行
+  `validate_narrative_output_failed: <head> | raw=<raw>` 到 stderr
+  （`docker logs agentic-genbi-mvp-backend-1` 可查）。
 
 ## 复现与回退
 

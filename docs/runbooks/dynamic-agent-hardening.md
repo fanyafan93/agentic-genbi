@@ -73,7 +73,30 @@ ALLOWED_TABLES=dm.*,dw.*
 只配置 `dm.sales_fact` 不会授权 `dw.dim_product`。
 SQL 中也要写 `dm.sales_fact`、`dw.dim_product` 这种完整限定名。
 
-### 7. 外部只读 MySQL
+### 7. 任务 `error.code = INVALID_REPORT`
+
+两个 raise 路径都带 `Detail: <head> | raw=<200字符>` 前缀与
+stderr 日志：
+```
+docker logs agentic-genbi-mvp-backend-1 | grep validate_narrative_output_failed
+```
+- **head** 是 Pydantic 错误的第 1 行（如 "1 validation error for
+  ReportNarrative, title"），让人能立即判断是字段缺失还是类型错。
+- **raw** 是 `repr(provider_output)` 的前 200 字符；如果 LLM
+  返回了一段 thinking + 一段 JSON + 一段散文，能直接看到原文。
+
+修复 `/ regression` 测试：
+
+| 测试 | 文件 |
+| --- | --- |
+| runner detail 透传 | `tests/agents/test_runner.py::test_runner_invalid_report_message_carries_pydantic_detail` |
+| coordinator detail 透传 | `tests/agents/test_coordinator.py::test_coordinator_marks_report_generation_failed_for_non_json_output` |
+
+reproduce / 实时校验脚本：
+`docs/runbooks/scripts/run-acceptance-with-detail.ps1`，把每个 task JSON
+存到 `verification_runs/<date>/<id>.json`。
+
+### 8. 外部只读 MySQL
 
 - 用 URL 编码后的密码，例如冒号 `%3A`、`@` `%40`
 - `.env` 不要提交到仓库（已经放在 `.gitignore`）

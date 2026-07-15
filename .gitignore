@@ -17,3 +17,8 @@ coverage/
 
 # Frontend transient artefacts produced during local validation
 frontend-test.html
+
+# Live end-to-end dumps; contains real task IDs from the external readonly
+# MySQL, must not be committed. Regenerate with
+# docs/runbooks/scripts/run-acceptance-with-detail.ps1
+verification_runs/
