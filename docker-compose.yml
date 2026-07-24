@@ -1,4 +1,4 @@
-name: agentic-genbi
+name: agentic-genbi-new
 
 services:
   frontend:
@@ -7,7 +7,7 @@ services:
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     ports:
-      - "3000:3000"
+      - "3010:3000"
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
