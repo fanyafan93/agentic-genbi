@@ -1,5 +1,9 @@
+import { auth } from "@/auth";
 import { AnalysisWorkspace } from "@/modules/analysis/components/AnalysisWorkspace";
+import { SignInScreen } from "@/modules/auth/components/SignInScreen";
 
-export default function HomePage() {
+export default async function HomePage() {
+  const session = await auth();
+  if (!session?.user) return <SignInScreen />;
   return <AnalysisWorkspace />;
 }

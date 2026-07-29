@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>会话 icon 动画 demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 40px 24px 60px;
+      background: #f5f5f2;
+      font-family: ui-sans-serif, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      color: #1e3a5f;
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; letter-spacing: .5px; }
+    .sub { color: #6b7480; font-size: 13px; margin: 0 0 32px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 18px;
+      max-width: 1180px;
+    }
+    .card {
+      background: #fff;
+      border: 1px solid rgba(30,58,95,.1);
+      border-radius: 14px;
+      padding: 22px 20px 18px;
+      box-shadow: 0 6px 24px rgba(30,58,95,.06);
+    }
+    .card h2 { margin: 0 0 4px; font-size: 14px; font-weight: 800; }
+    .card .desc { margin: 0 0 16px; color: #6b7480; font-size: 12px; line-height: 1.55; }
+    .stage {
+      display: grid;
+      place-items: center;
+      width: 96px;
+      height: 96px;
+      border-radius: 50%;
+      background: rgba(30,58,95,.06);
+      color: #1e3a5f;
+      margin: 0 auto 16px;
+    }
+    .stage svg { width: 52px; height: 52px; display: block; }
+    .tag {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(235,91,79,.08);
+      color: #eb5b4f;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .3px;
+    }
+    .play-toggle {
+      display: block;
+      width: 100%;
+      margin-top: 14px;
+      padding: 8px 12px;
+      border: 1px solid rgba(30,58,95,.18);
+      border-radius: 8px;
+      background: #fff;
+      color: #1e3a5f;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .play-toggle:hover { background: rgba(30,58,95,.04); }
+
+    /* ========== A. 打字机三点 ========== */
+    .ico-a .dot {
+      transform-origin: center;
+      animation: dot-bounce 1.2s ease-in-out infinite;
+    }
+    .ico-a .dot-1 { animation-delay: 0s; }
+    .ico-a .dot-2 { animation-delay: .18s; }
+    .ico-a .dot-3 { animation-delay: .36s; }
+    @keyframes dot-bounce {
+      0%, 60%, 100% { transform: translateY(0); opacity: .4; }
+      30%           { transform: translateY(-3px); opacity: 1; }
+    }
+
+    /* ========== B. 气泡呼吸 ========== */
+    .ico-b .bubble {
+      transform-origin: center;
+      animation: bubble-breathe 2.2s ease-in-out infinite;
+    }
+    @keyframes bubble-breathe {
+      0%, 100% { transform: scale(1); }
+      50%      { transform: scale(1.06); }
+    }
+
+    /* ========== C. 线条描边 (hover) ========== */
+    .ico-c path {
+      stroke-dasharray: 80;
+      stroke-dashoffset: 0;
+    }
+    .ico-c:hover path {
+      animation: draw 1.2s ease-out forwards;
+    }
+    .ico-c .p2 { animation-delay: .15s !important; }
+    @keyframes draw {
+      0%   { stroke-dashoffset: 80; }
+      100% { stroke-dashoffset: 0; }
+    }
+    .card-c .stage { cursor: pointer; }
+
+    /* ========== D. 尾巴抖动 ========== */
+    .ico-d .tail {
+      transform-origin: 4px 16px;
+      animation: tail-wiggle 3.6s ease-in-out infinite;
+    }
+    @keyframes tail-wiggle {
+      0%, 88%, 100% { transform: rotate(0); }
+      90%           { transform: rotate(-6deg); }
+      93%           { transform: rotate(5deg); }
+      96%           { transform: rotate(-2deg); }
+    }
+  </style>
+</head>
+<body>
+  <h1>会话 icon · 4 个动画方案</h1>
+  <p class="sub">鼠标 hover / 持续播放 / 点击触发。挑一个喜欢的方向，我直接接到 nav tab 的 conversation icon 上。</p>
+
+  <div class="grid">
+
+    <!-- A -->
+    <div class="card">
+      <h2>A · 打字机三点</h2>
+      <p class="desc">圆点轮流跳起，像 iMessage 打字指示器。<b>持续播放</b>，无 hover 触发。</p>
+      <div class="stage ico-a">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H8l-4 3v-6.2A7.5 7.5 0 1 1 20 11.5Z" />
+          <circle class="dot dot-1" cx="9"  cy="13" r="1.1" fill="currentColor" stroke="none" />
+          <circle class="dot dot-2" cx="12" cy="13" r="1.1" fill="currentColor" stroke="none" />
+          <circle class="dot dot-3" cx="15" cy="13" r="1.1" fill="currentColor" stroke="none" />
+        </svg>
+      </div>
+      <span class="tag">持续</span>
+    </div>
+
+    <!-- B -->
+    <div class="card">
+      <h2>B · 气泡呼吸</h2>
+      <p class="desc">整个气泡 scale 1 ↔ 1.06 循环，柔和。<b>持续播放</b>。</p>
+      <div class="stage ico-b">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <g class="bubble">
+            <path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H8l-4 3v-6.2A7.5 7.5 0 1 1 20 11.5Z" />
+            <path d="M8 11h8M8 14h5" />
+          </g>
+        </svg>
+      </div>
+      <span class="tag">持续 · 柔和</span>
+    </div>
+
+    <!-- C -->
+    <div class="card card-c">
+      <h2>C · 描边出现</h2>
+      <p class="desc">线条从无到有「画」出来。<b>hover 触发</b>，不打扰默认状态。</p>
+      <div class="stage ico-c">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path class="p1" d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H8l-4 3v-6.2A7.5 7.5 0 1 1 20 11.5Z" />
+          <path class="p2" d="M8 11h8M8 14h5" />
+        </svg>
+      </div>
+      <span class="tag">hover</span>
+    </div>
+
+    <!-- D -->
+    <div class="card">
+      <h2>D · 尾巴抖动</h2>
+      <p class="desc">左下小尾巴每 3.6s 抖一下，像气泡在「说话」。<b>持续播放</b>，克制不抢眼。</p>
+      <div class="stage ico-d">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H8l-4 3v-6.2A7.5 7.5 0 1 1 20 11.5Z" />
+          <path d="M8 11h8M8 14h5" />
+          <path class="tail" d="M4 16 8 19v-3" />
+        </svg>
+      </div>
+      <span class="tag">持续 · 克制</span>
+    </div>
+
+  </div>
+
+  <p class="sub" style="margin-top: 32px;">
+    hover 到 C 卡片上触发描边动画。其他 3 个持续循环。
+  </p>
+</body>
+</html>
