@@ -1,7 +1,7 @@
 "use client";
 
 import { useSession } from "next-auth/react";
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 
 import {
   buildResourceExplorationPrompt,
@@ -63,7 +63,7 @@ const initialExplorations: Exploration[] = [
         title: "可沉淀结论",
         body: "首购后 30 天复购率应以会员 ID 去重，排除未支付订单和未满观察期首购用户；退款口径需要在正式计算前由业务确认。",
         details: [{ label: "沉淀范围", items: ["剃须刀品类", "消费者复购分析", "经营指标探索"] }],
-        action: "沉淀为知识",
+        action: "保存到知识库",
       },
     ],
   },
@@ -108,7 +108,7 @@ const initialExplorations: Exploration[] = [
           { label: "引用资源", items: ["华东区域经营日报", "store_region_mapping.sql", "gmv_region_reconcile.sql"] },
           { label: "已验证结论", items: ["门店归属要按日报快照", "数据截止时间统一到 T+1 09:00"] },
         ],
-        action: "沉淀为知识",
+        action: "保存到知识库",
       },
     ],
   },
@@ -611,6 +611,8 @@ function mergeContinuationExploration(base: Exploration, userMessage: string, ne
     ...base,
     status: next.status,
     updatedAt: "刚刚",
+    createdAt: base.createdAt ?? next.createdAt,
+    lastMessageAt: next.lastMessageAt ?? new Date().toISOString(),
     resources: base.resources + next.resources,
     summary: next.summary || base.summary,
     messages: [
@@ -633,6 +635,8 @@ function markExplorationStopped(base: Exploration, userMessage: string): Explora
     title: base.id === draftExplorationId ? userMessage.slice(0, 18) || base.title : base.title,
     status: "待确认",
     updatedAt: "刚刚",
+    createdAt: base.createdAt ?? new Date().toISOString(),
+    lastMessageAt: new Date().toISOString(),
     summary: "用户已停止本次对话。",
     messages: [
       ...base.messages,
@@ -665,6 +669,38 @@ function isContinuationExploration(item: Exploration) {
 
 function cleanExplorationList(items: Exploration[]) {
   return items.filter((item) => !isDraftPlaceholderExploration(item) && !isContinuationExploration(item));
+}
+
+function getExplorationTimeValue(value?: string) {
+  if (!value) return 0;
+  const normalized = value.trim();
+  if (!normalized || normalized === "草稿") return 0;
+  if (normalized === "刚刚") return Date.now();
+  if (normalized.startsWith("今天")) {
+    const timePart = normalized.replace("今天", "").trim();
+    const [hour = "23", minute = "59"] = timePart.split(":");
+    const date = new Date();
+    date.setHours(Number(hour) || 23, Number(minute) || 59, 0, 0);
+    return date.getTime();
+  }
+  if (normalized === "昨天") return Date.now() - 24 * 60 * 60 * 1000;
+  const parsed = Date.parse(normalized);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function getExplorationLastMessageTime(item: Exploration) {
+  return getExplorationTimeValue(item.lastMessageAt ?? item.updatedAt ?? item.createdAt);
+}
+
+function formatExplorationTime(value?: string) {
+  if (!value) return "未知";
+  const normalized = value.trim();
+  if (!normalized) return "未知";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return normalized;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return normalized;
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function messageTitleClass(title: string) {
@@ -738,6 +774,10 @@ export function KnowledgeExplorationSidebar() {
   const [managingExplorations, setManagingExplorations] = useState(false);
   const [selectedDeleteIds, setSelectedDeleteIds] = useState<Set<string>>(new Set());
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const orderedExplorations = useMemo(
+    () => [...explorations].sort((left, right) => getExplorationLastMessageTime(right) - getExplorationLastMessageTime(left)),
+    [explorations],
+  );
 
   function toggleExplorationDelete(id: string) {
     setConfirmingDelete(false);
@@ -805,7 +845,7 @@ export function KnowledgeExplorationSidebar() {
                 </button>
               </span>
             </div>
-            {explorations.map((item) => (
+            {orderedExplorations.map((item) => (
               <button
                 key={item.id}
                 type="button"
@@ -821,7 +861,7 @@ export function KnowledgeExplorationSidebar() {
                   <strong>{item.title}</strong>
                   <em className={item.status}>{item.status}</em>
                 </span>
-                <small>{item.updatedAt}</small>
+                <small>{formatExplorationTime(item.lastMessageAt ?? item.updatedAt)}</small>
               </button>
             ))}
             {managingExplorations && (
@@ -918,8 +958,11 @@ export function KnowledgeExplorationSidebar() {
 
 export function KnowledgeExploration() {
   const {
+    explorations,
     tab,
     setTab,
+    selectedExplorationId,
+    setSelectedExplorationId,
     selectedExploration,
     selectedResource,
     resourceDetail,
@@ -947,14 +990,32 @@ export function KnowledgeExploration() {
   } = useExploration();
   const [draft, setDraft] = useState("");
   const activeStopTokenRef = useRef<{ stopped: boolean } | null>(null);
-  const messagesRef = useRef<HTMLOListElement | null>(null);
+  const messagesRef = useRef<HTMLDivElement | null>(null);
   const visibleMessages = useMemo(() => {
     if (!selectedExploration) return [];
     return selectedExploration.messages.filter(shouldShowExplorationMessage);
   }, [selectedExploration]);
+  const displayedExplorations = useMemo(() => {
+    if (selectedExplorationId !== draftExplorationId) return explorations;
+    if (explorations.some((item) => item.id === draftExplorationId)) return explorations;
+    return [draftExploration, ...explorations];
+  }, [explorations, selectedExplorationId]);
+  const [visualSelectedExplorationId, setVisualSelectedExplorationId] = useState(selectedExplorationId);
+  const visualSelectedExplorationIndex = Math.max(
+    0,
+    displayedExplorations.findIndex((item) => item.id === visualSelectedExplorationId),
+  );
+  const targetExplorationIndex = Math.max(
+    0,
+    displayedExplorations.findIndex((item) => item.id === selectedExplorationId),
+  );
+  const isCardTransitioning = tab === "explorations" && visualSelectedExplorationId !== selectedExplorationId;
+  const cardTransitionDirection = targetExplorationIndex >= visualSelectedExplorationIndex ? "forward" : "backward";
   const [submitting, setSubmitting] = useState(false);
   const [submittingExplorationId, setSubmittingExplorationId] = useState<string | null>(null);
-  const showExplorationWaiting = shouldShowExplorationWaiting(submitting, submittingExplorationId, selectedExploration.id);
+  const showExplorationWaiting =
+    visualSelectedExplorationId === selectedExplorationId &&
+    shouldShowExplorationWaiting(submitting, submittingExplorationId, selectedExploration.id);
   const waitingContext = useMemo(() => {
     const userMessageCount = visibleMessages.filter((message) => message.role === "user").length;
     return userMessageCount > 1 ? "已收到你的追问，会基于当前探索继续处理。" : "问题已发送，正在等待第一段结果。";
@@ -962,15 +1023,17 @@ export function KnowledgeExploration() {
 
   useEffect(() => {
     if (tab !== "explorations") return;
+    if (isCardTransitioning) return;
     const node = messagesRef.current;
     if (!node) return;
     requestAnimationFrame(() => {
       node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
     });
-  }, [tab, selectedExploration.id, selectedExploration.status, visibleMessages.length, submittingExplorationId]);
+  }, [isCardTransitioning, tab, selectedExploration.id, selectedExploration.status, visibleMessages.length, submittingExplorationId]);
 
   useEffect(() => {
     if (tab !== "explorations") return;
+    if (isCardTransitioning) return;
     const node = messagesRef.current;
     if (!node || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
@@ -980,7 +1043,28 @@ export function KnowledgeExploration() {
     });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [tab, selectedExploration.id]);
+  }, [isCardTransitioning, tab, selectedExploration.id]);
+
+  useEffect(() => {
+    if (tab !== "explorations") {
+      setVisualSelectedExplorationId(selectedExplorationId);
+      return;
+    }
+    if (visualSelectedExplorationId === selectedExplorationId) return;
+    const currentIndex = displayedExplorations.findIndex((item) => item.id === visualSelectedExplorationId);
+    const targetIndex = displayedExplorations.findIndex((item) => item.id === selectedExplorationId);
+    if (currentIndex === -1 || targetIndex === -1) {
+      setVisualSelectedExplorationId(selectedExplorationId);
+      return;
+    }
+    const direction = targetIndex > currentIndex ? 1 : -1;
+    const nextId = displayedExplorations[currentIndex + direction]?.id ?? selectedExplorationId;
+    const remainingSteps = Math.abs(targetIndex - currentIndex);
+    const timer = window.setTimeout(() => {
+      setVisualSelectedExplorationId(nextId);
+    }, remainingSteps > 1 ? 130 : 210);
+    return () => window.clearTimeout(timer);
+  }, [displayedExplorations, selectedExplorationId, tab, visualSelectedExplorationId]);
 
   async function submitExploration(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1025,111 +1109,136 @@ export function KnowledgeExploration() {
   return (
     <section className="knowledge-exploration-page" aria-label="知识探索">
       {tab === "explorations" && (
-        <article className="exploration-agent-run">
-          <header className="exploration-agent-header">
-            <div>
-              <span className="exploration-kicker">{selectedExploration.id === draftExplorationId ? "草稿" : selectedExploration.id}</span>
-              <h2>{selectedExploration.title}</h2>
-            </div>
-            <em className={selectedExploration.status}>{selectedExploration.status}</em>
-          </header>
-
-          <ol className="exploration-messages" ref={messagesRef}>
-            {visibleMessages.map((message) => (
-              <li key={message.id} className={`exploration-message ${message.role}`}>
-                <span className={`message-avatar ${message.role === "user" ? "user-avatar" : ""}`} aria-hidden="true">
-                  {message.role === "user" ? (
-                    "J"
-                  ) : (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="4" y="7" width="16" height="12" rx="2" />
-                      <path d="M12 3v4" />
-                      <circle cx="9" cy="13" r="0.6" fill="currentColor" />
-                      <circle cx="15" cy="13" r="0.6" fill="currentColor" />
-                      <path d="M2 12v3" />
-                      <path d="M22 12v3" />
-                    </svg>
-                  )}
-                </span>
-                <div className={`message-bubble ${message.title ? messageTitleClass(message.title) : ""}`}>
-                  {message.title && <strong className={`message-title ${messageTitleClass(message.title)}`}>{message.title}</strong>}
-                  <div className="message-body-markdown">
-                    <MarkdownContent>{message.body}</MarkdownContent>
+        <div className="disc-stage">
+          <div className={`disc-deck ${isCardTransitioning ? "is-moving" : ""} is-${cardTransitionDirection}`} aria-label="探索会话卡片堆">
+            {displayedExplorations.map((item, index) => {
+              const isActive = item.id === visualSelectedExplorationId;
+              const isTarget = item.id === selectedExplorationId;
+              const itemMessages = item.messages.filter(shouldShowExplorationMessage);
+              const shouldRenderConversation = isActive && isTarget && !isCardTransitioning;
+              const offset = index - visualSelectedExplorationIndex;
+              const distance = Math.min(Math.abs(offset), 4);
+              const direction = offset === 0 ? 0 : offset > 0 ? 1 : -1;
+              const isInStack = Math.abs(offset) <= 4;
+              const cardStyle = {
+                "--card-x": `${direction * distance * 78}px`,
+                "--card-y": `${distance * 26}px`,
+                "--card-scale": `${1 - distance * 0.062}`,
+                "--card-opacity": `${isActive ? 1 : Math.max(0.2, 0.66 - distance * 0.11)}`,
+                "--card-z": `${40 - distance}`,
+              } as CSSProperties;
+              return (
+                <article
+                  key={item.id}
+                  className={`disc-card ${isActive ? "active" : ""} ${isTarget ? "is-target" : ""} ${isCardTransitioning && isActive && !isTarget ? "is-exiting" : ""} ${offset < 0 ? "is-before" : offset > 0 ? "is-after" : ""} ${isInStack ? "" : "is-hidden"}`}
+                  data-exploration-id={item.id}
+                  style={cardStyle}
+                  onClick={() => !isActive && setSelectedExplorationId(item.id)}
+                  aria-label={item.title}
+                  aria-hidden={!isInStack}
+                >
+                  <div>
+                    <span className="disc-kicker">{item.id === draftExplorationId ? "草稿" : item.id}</span>
+                    <h2 className="disc-title">{item.title}</h2>
                   </div>
-                  {message.details?.map((group) => (
-                    <details key={group.label} className="message-details">
-                      <summary>{group.label}</summary>
-                      <ul>
-                        {group.items.map((item) => (
-                          <li key={item}>{item}</li>
-                        ))}
-                      </ul>
-                    </details>
-                  ))}
-                  {message.action && (
-                    <button
-                      className="knowledge-save"
-                      type="button"
-                      onClick={() => saveExplorationKnowledge(message)}
-                      disabled={knowledgeSavingId === message.id}
-                    >
-                      {knowledgeSavingId === message.id ? "沉淀中" : message.action}
-                    </button>
+                  <div className="disc-meta">
+                    <span className={`disc-badge ${item.status}`}>{item.status}</span>
+                    <span>创建 {formatExplorationTime(item.createdAt ?? item.updatedAt)}</span>
+                  </div>
+                  {!shouldRenderConversation && (
+                    <div className="disc-card-preview" aria-hidden="true">
+                      <strong>{item.id === draftExplorationId ? "等待你的问题" : item.summary}</strong>
+                      <span>{item.id === draftExplorationId ? "这是一张新的探索会话卡片，输入问题后会开始真实探索。" : `${item.messages.length} 条会话记录`}</span>
+                    </div>
                   )}
-                </div>
-              </li>
-            ))}
-            {showExplorationWaiting && (
-              <li className="exploration-message agent exploration-thinking" aria-live="polite">
-                <span className="message-avatar" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="4" y="7" width="16" height="12" rx="2" />
-                    <path d="M12 3v4" />
-                    <circle cx="9" cy="13" r="0.6" fill="currentColor" />
-                    <circle cx="15" cy="13" r="0.6" fill="currentColor" />
-                    <path d="M2 12v3" />
-                    <path d="M22 12v3" />
-                  </svg>
-                </span>
-                <div className="message-bubble">
-                  <strong className="message-title is-progress">等待 Agent 返回</strong>
-                  <p>Agent 正在调用工具或等待模型输出。</p>
-                  <p className="thinking-note">{waitingContext}</p>
-                  <span className="thinking-status-line" aria-hidden="true" />
-                </div>
-              </li>
-            )}
-          </ol>
+                  {shouldRenderConversation && (
+                    <>
+                      <div className="disc-messages" ref={isActive ? messagesRef : null}>
+                        {itemMessages.map((message) => (
+                          <div key={message.id} className={`disc-msg ${message.role}`}>
+                            <span className="disc-av" aria-hidden="true">
+                              {message.role === "user" ? "J" : "A"}
+                            </span>
+                            <div className={`disc-bubble ${message.title ? messageTitleClass(message.title) : ""}`}>
+                              {message.title && <strong>{message.title}</strong>}
+                              <div className="message-body-markdown">
+                                <MarkdownContent>{message.body}</MarkdownContent>
+                              </div>
+                              {message.details?.map((group) => (
+                                <details key={group.label} className="message-details">
+                                  <summary>{group.label}</summary>
+                                  <ul>
+                                    {group.items.map((detailItem) => (
+                                      <li key={detailItem}>{detailItem}</li>
+                                    ))}
+                                  </ul>
+                                </details>
+                              ))}
+                              {message.action && (
+                                <button
+                                  className="knowledge-save"
+                                  type="button"
+                                  onClick={() => saveExplorationKnowledge(message)}
+                                  disabled={knowledgeSavingId === message.id}
+                                >
+                                  {knowledgeSavingId === message.id ? "保存中" : message.action}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                        {showExplorationWaiting && (
+                          <div className="disc-msg agent exploration-thinking" aria-live="polite">
+                            <span className="disc-av" aria-hidden="true">
+                              A
+                            </span>
+                            <div className="disc-bubble">
+                              <strong>等待 Agent 返回</strong>
+                              <div className="message-body-markdown">
+                                <p>Agent 正在调用工具或等待模型输出。</p>
+                                <p className="thinking-note">{waitingContext}</p>
+                              </div>
+                              <span className="thinking-status-line" aria-hidden="true" />
+                            </div>
+                          </div>
+                        )}
+                      </div>
 
-          <form className="exploration-composer" onSubmit={submitExploration}>
-            <textarea
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={submitExplorationFromKeyboard}
-              placeholder="输入探索问题，或补充 Agent 需要确认的口径"
-              rows={2}
-            />
-            <button
-              type={submitting ? "button" : "submit"}
-              className={submitting ? "is-stopping" : ""}
-              aria-label={submitting ? "停止对话" : "发送"}
-              title={submitting ? "停止对话" : "发送"}
-              disabled={!submitting && !draft.trim()}
-              onClick={submitting ? stopExploration : undefined}
-            >
-              {submitting ? (
-                <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
-                  <rect x="5.5" y="5.5" width="13" height="13" rx="2" />
-                </svg>
-              ) : (
-                <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 19V5" />
-                  <path d="m5 12 7-7 7 7" />
-                </svg>
-              )}
-            </button>
-          </form>
-        </article>
+                      <form className="exploration-composer" onSubmit={submitExploration}>
+                        <textarea
+                          value={draft}
+                          onChange={(event) => setDraft(event.target.value)}
+                          onKeyDown={submitExplorationFromKeyboard}
+                          placeholder="输入探索问题，或补充 Agent 需要确认的口径"
+                          rows={2}
+                        />
+                        <button
+                          type={submitting ? "button" : "submit"}
+                          className={submitting ? "is-stopping" : ""}
+                          aria-label={submitting ? "停止对话" : "发送"}
+                          title={submitting ? "停止对话" : "发送"}
+                          disabled={!submitting && !draft.trim()}
+                          onClick={submitting ? stopExploration : undefined}
+                        >
+                          {submitting ? (
+                            <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+                              <rect x="5.5" y="5.5" width="13" height="13" rx="2" />
+                            </svg>
+                          ) : (
+                            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M12 19V5" />
+                              <path d="m5 12 7-7 7 7" />
+                            </svg>
+                          )}
+                        </button>
+                      </form>
+                    </>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        </div>
       )}
 
       {tab === "resources" && (

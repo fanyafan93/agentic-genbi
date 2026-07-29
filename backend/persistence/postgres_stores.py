@@ -361,6 +361,99 @@ class PostgresKnowledgeStore(KnowledgeStore):
             ).fetchall()
         return [_knowledge_from_row(row) for row in rows]
 
+    def search_knowledge(
+        self,
+        *,
+        query: str = "",
+        item_type: str | None = None,
+        status: str | None = None,
+        tag: str | None = None,
+        owner: str | None = None,
+        limit: int = 50,
+    ) -> list[KnowledgeRecord]:
+        clauses = []
+        params: dict[str, Any] = {"limit": limit}
+        if query.strip():
+            params["query"] = f"%{query.strip()}%"
+            clauses.append(
+                "(title ILIKE %(query)s OR question ILIKE %(query)s OR conclusion ILIKE %(query)s OR scope ILIKE %(query)s OR verification ILIKE %(query)s OR metadata::text ILIKE %(query)s)"
+            )
+        if item_type:
+            params["item_type"] = item_type
+            clauses.append("metadata ->> 'type' = %(item_type)s")
+        if status:
+            params["status"] = status
+            clauses.append("metadata ->> 'status' = %(status)s")
+        if owner:
+            params["owner"] = owner
+            clauses.append("metadata ->> 'owner' = %(owner)s")
+        if tag:
+            params["tag"] = tag
+            clauses.append("metadata -> 'tags' ? %(tag)s")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with _connect(self.database_url) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM {POSTGRES_KNOWLEDGE_TABLE}
+                {where}
+                ORDER BY created_at DESC
+                LIMIT %(limit)s
+                """,
+                params,
+            ).fetchall()
+        return [_knowledge_from_row(row) for row in rows]
+
+    def update_knowledge(
+        self,
+        record_id: str,
+        *,
+        title: str | None = None,
+        question: str | None = None,
+        conclusion: str | None = None,
+        scope: str | None = None,
+        verification: str | None = None,
+        evidence_refs: list[str] | None = None,
+        run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> KnowledgeRecord | None:
+        current = self.get_knowledge(record_id)
+        if not current:
+            return None
+        merged_metadata = dict(current.metadata or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        record = KnowledgeRecord(
+            id=current.id,
+            title=title.strip() if title is not None else current.title,
+            question=question.strip() if question is not None else current.question,
+            conclusion=conclusion.strip() if conclusion is not None else current.conclusion,
+            scope=scope.strip() if scope is not None else current.scope,
+            verification=verification.strip() if verification is not None else current.verification,
+            evidence_refs=[ref.strip() for ref in evidence_refs if ref.strip()] if evidence_refs is not None else current.evidence_refs,
+            run_id=run_id.strip() if run_id else current.run_id,
+            created_at=current.created_at,
+            metadata=merged_metadata,
+        )
+        self.upsert_knowledge(record)
+        return record
+
+    def get_knowledge(self, record_id: str) -> KnowledgeRecord | None:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(f"SELECT * FROM {POSTGRES_KNOWLEDGE_TABLE} WHERE id = %(id)s", {"id": record_id}).fetchone()
+        return _knowledge_from_row(row) if row else None
+
+    def list_tags(self) -> list[dict[str, Any]]:
+        with _connect(self.database_url) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT tag, COUNT(*) AS count
+                FROM {POSTGRES_KNOWLEDGE_TABLE}, jsonb_array_elements_text(metadata -> 'tags') AS tag
+                GROUP BY tag
+                ORDER BY count DESC, tag ASC
+                """
+            ).fetchall()
+        return [{"name": str(row["tag"]), "count": int(row["count"]), "group": "未分组"} for row in rows]
+
     def delete_knowledge(self, record_id: str) -> bool:
         with _connect(self.database_url) as conn:
             cursor = conn.execute(f"DELETE FROM {POSTGRES_KNOWLEDGE_TABLE} WHERE id = %(id)s", {"id": record_id})

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>方案 B - 统一工作区外壳</title>
+  <style>
+    :root { --accent:#ee6258; --ink:#1a2638; --muted:#737b86; --line:#e6ded7; --paper:#fffdfb; --wash:#f5f2ee; --nav:#273e5b; }
+    *{box-sizing:border-box} body{margin:0;background:#f3f6f5;color:var(--ink);font:15px/1.5 "Microsoft YaHei","Segoe UI",sans-serif}
+    .top{height:68px;display:grid;grid-template-columns:220px 1fr 170px;align-items:center;padding:0 28px;background:#fbfaf8;border-bottom:1px solid var(--line)}
+    .brand{font-weight:900;letter-spacing:.08em;font-size:22px}.slogan{text-align:center;font-weight:900;letter-spacing:.28em;font-size:25px}.slogan span{color:var(--accent);font-style:italic}.user{justify-self:end;padding:8px 14px;border:1px solid var(--line);border-radius:12px;background:white}
+    .shell{height:calc(100vh - 68px);display:grid;grid-template-columns:64px 300px 1fr;gap:4px;padding:0 4px 4px}.rail,.side,.main{background:var(--paper);border:1px solid var(--line)}.rail{border-radius:8px;display:flex;flex-direction:column;align-items:center;gap:24px;padding-top:32px;color:#9aa0a6;font-size:22px}.rail .active{color:white;background:var(--accent);border-radius:14px;padding:12px}.side{border-radius:8px;padding:24px 18px;overflow:hidden}.kicker{color:var(--accent);letter-spacing:.24em;font-size:12px;font-weight:800}.side h1{margin:8px 0 22px;font-size:26px}.hint{color:var(--muted)}.new{width:100%;border:0;border-radius:8px;background:var(--accent);color:white;padding:13px;font-weight:800}.tabs{display:grid;grid-template-columns:repeat(3,1fr);margin:22px -18px 18px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.tabs button{border:0;background:#fffaf7;padding:14px 8px;font-weight:800;color:#394254;cursor:pointer}.tabs button.active{color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent);background:#fff4f1}.task{width:100%;text-align:left;border:0;border-radius:8px;padding:14px;margin-bottom:10px;background:#fff;box-shadow:0 1px 0 #eee}.task strong{display:block}.task small{color:var(--muted)}
+    .main{border-radius:8px;padding:20px 28px;overflow:hidden}.workspace{height:100%;max-width:1000px;margin:0 auto;background:white;border:1px solid var(--line);border-radius:12px;box-shadow:0 18px 48px rgba(36,48,67,.08);display:grid;grid-template-rows:auto 1fr;overflow:hidden}
+    .workspace-header{padding:28px 34px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:24px;align-items:start;background:linear-gradient(180deg,#fffdfb,#fbfaf8)}.workspace-header h2{margin:8px 0 5px;font-size:30px}.workspace-actions{display:flex;gap:10px}.workspace-actions button{border:1px solid var(--line);background:white;border-radius:8px;padding:10px 14px;font-weight:800}.workspace-actions .primary{background:var(--accent);border-color:var(--accent);color:white}
+    .workspace-body{min-height:0;overflow:auto;padding:24px;background:#fdfbf9}.layout{display:grid;gap:18px}.explore-layout{grid-template-columns:1fr}.resource-layout{grid-template-columns:280px 1fr}.knowledge-layout{grid-template-columns:240px 1fr 280px}.card{background:white;border:1px solid var(--line);border-radius:9px;padding:18px;margin-bottom:14px}.card h3{margin:0 0 8px}.tag{display:inline-block;padding:6px 9px;margin:4px;border-radius:7px;background:#fff0ec;color:var(--accent);font-weight:800}.side-panel{background:#faf7f4;border:1px solid var(--line);border-radius:9px;padding:18px}.table{border:1px solid var(--line);border-radius:8px;overflow:hidden}.row{display:grid;grid-template-columns:150px 1fr;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}.row div{padding:12px}.row div:first-child{background:var(--wash);font-weight:800}.note{position:fixed;right:24px;bottom:18px;background:var(--nav);color:white;border-radius:999px;padding:10px 16px;font-size:13px}
+  </style>
+</head>
+<body>
+  <header class="top"><div class="brand">AGENTIC GENBI</div><div class="slogan">MAKE <span>DATA</span> SENSE</div><div class="user">范佳录 · 用户</div></header>
+  <div class="shell"><nav class="rail"><span>▦</span><span>☰</span><span class="active">⌕</span><span>⚙</span></nav>
+    <aside class="side"><span class="kicker">KNOWLEDGE EXPLORATION</span><h1>知识探索</h1><p class="hint">三个模块共用同一主区外壳。</p><button class="new">＋ 新建探索</button><div class="tabs"><button class="active" data-tab="explore">我的探索</button><button data-tab="resources">资源库</button><button data-tab="knowledge">知识库</button></div><button class="task"><strong>首购后 30 天复购率</strong><small>已完成</small></button><button class="task"><strong>推广费用</strong><small>待确认</small></button></aside>
+    <main class="main"><section class="workspace"><header class="workspace-header"><div><span class="kicker" id="kicker">EXPLORATION PROCESS</span><h2 id="title">首购后 30 天复购率</h2><p class="hint" id="subtitle">探索会话、资源库和知识库使用同一张工作台画布。</p></div><div class="workspace-actions" id="actions"><button>查看证据</button><button class="primary">保存到知识库</button></div></header><div class="workspace-body" id="body"></div></section></main>
+  </div>
+  <div class="note">方案 B：统一外壳，内容不动画，靠结构一致降低突兀感</div>
+  <script>
+    const views = {
+      explore: { kicker:"EXPLORATION PROCESS", title:"首购后 30 天复购率", subtitle:"探索会话、资源库和知识库使用同一张工作台画布。", actions:["查看证据","保存到知识库"], html:`<div class="layout explore-layout"><div><div class="card"><h3>探索进展</h3><p>Agent 已检索资源库、查看表结构，并整理出需要确认的口径分支。</p></div><div class="card"><h3>工具调用摘要</h3><p>搜索资源库 search_resources、查看表结构 get_table_schema、读取资源片段 read_resource_excerpt。</p></div><div class="card"><h3>探索结论</h3><p>当前只能说明剃须刀专用品类有现成实现，不能直接推广到全品类复购率。</p></div></div></div>` },
+      resources: { kicker:"RESOURCE LIBRARY", title:"资源库", subtitle:"同一外壳里展示资源搜索和结构摘要。", actions:["重建索引","查看片段"], html:`<div class="layout resource-layout"><aside class="side-panel"><button class="task"><strong>推广总览明细表.cpt</strong><small>FineReport</small></button><button class="task"><strong>dm_fina_sales_profit_sum.hwf</strong><small>Apache Hop</small></button></aside><section class="card"><h3>推广总览明细表.cpt</h3><p>结构摘要只展示参数、数据集、字段候选和表引用。</p><div class="table"><div class="row"><div>参数</div><div>start_date, end_date, channel</div></div><div class="row"><div>读表</div><div>dw_f_cmmg_promoexpen_split_list</div></div></div></section></div>` },
+      knowledge: { kicker:"KNOWLEDGE BASE", title:"知识库", subtitle:"管理语义层、探索沉淀、认证和标签。", actions:["批量打标","新建知识"], html:`<div class="layout knowledge-layout"><aside class="side-panel"><strong>分类</strong><p><span class="tag">指标定义</span><span class="tag">字段映射</span><span class="tag">报表逻辑</span></p></aside><section><div class="card"><h3>毛利率计算口径</h3><p>销售毛利占销售收入的比例，已由 BI 工程师认可。</p></div><div class="card"><h3>收入净额字段映射</h3><p>来源于探索沉淀，待财务确认。</p></div></section><aside class="side-panel"><h3>详情</h3><p>版本：v1.0</p><p>Agent 可见：可检索</p></aside></div>` }
+    };
+    const body = document.getElementById("body");
+    function render(id) {
+      const view = views[id];
+      document.getElementById("kicker").textContent = view.kicker;
+      document.getElementById("title").textContent = view.title;
+      document.getElementById("subtitle").textContent = view.subtitle;
+      document.getElementById("actions").innerHTML = view.actions.map((item, i) => `<button class="${i === view.actions.length - 1 ? "primary" : ""}">${item}</button>`).join("");
+      body.innerHTML = view.html;
+      document.querySelectorAll(".tabs button").forEach((button) => button.classList.toggle("active", button.dataset.tab === id));
+    }
+    document.querySelectorAll(".tabs button").forEach((button) => button.addEventListener("click", () => render(button.dataset.tab)));
+    render("explore");
+  </script>
+</body>
+</html>

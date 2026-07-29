@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>user-chip 动效 · 5 个 demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 40px 24px 60px;
+      background: linear-gradient(135deg, #c5c8cc 0%, #ecebe8 44%, #f5d0c8 100%);
+      font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      color: #1e3a5f;
+      min-height: 100vh;
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; letter-spacing: .5px; }
+    .sub { color: #6b7480; font-size: 13px; margin: 0 0 32px; max-width: 800px; line-height: 1.6; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 20px;
+      max-width: 1280px;
+    }
+    .demo {
+      background: #fff;
+      border: 1px solid rgba(30,58,95,.1);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 8px 28px rgba(30,58,95,.06);
+    }
+    .demo-tag {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 18px;
+      background: rgba(30,58,95,.04);
+      border-bottom: 1px solid rgba(30,58,95,.08);
+      font-size: 12px; color: #6b7480;
+    }
+    .demo-tag strong { color: #1e3a5f; font-size: 13px; font-weight: 800; }
+    .pill {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      background: rgba(232,104,90,.12); color: #eb5b4f;
+      font-size: 10px; font-weight: 800; letter-spacing: .04em;
+    }
+    .stage {
+      padding: 60px 32px;
+      background: linear-gradient(135deg, #fafaf7 0%, #f0ece4 100%);
+      display: grid;
+      place-items: center;
+      min-height: 180px;
+    }
+    .hint {
+      padding: 10px 18px;
+      background: rgba(30,58,95,.04);
+      border-top: 1px solid rgba(30,58,95,.08);
+      font-size: 11px;
+      color: #6b7480;
+      text-align: center;
+    }
+
+    /* ========= 共享：基础 user-chip 样式 ========= */
+    .user-chip {
+      display: inline-flex; align-items: center; gap: 10px;
+      padding: 4px 12px 4px 4px;
+      min-width: 150px;
+      border: 1px solid rgba(30,58,95,.12);
+      border-radius: 12px;
+      background: rgba(255,255,255,.85);
+      color: var(--text-primary);
+      cursor: pointer;
+      transition: 180ms ease;
+      font-family: inherit;
+    }
+    .user-chip-name { font-size: .82rem; font-weight: 700; color: #1a1a1a; line-height: 1; }
+    .user-chip-role { font-size: .7rem; font-weight: 600; color: #e8685a; letter-spacing: .04em; line-height: 1; padding-left: 8px; border-left: 1px solid rgba(30,58,95,.18); }
+    .user-chip-meta { display: inline-flex; align-items: center; gap: 8px; }
+    .user-chip-avatar {
+      display: grid; place-items: center;
+      width: 32px; height: 32px; border-radius: 50%;
+      background: #1e3a5f; color: #fff;
+      font-size: .84rem; font-weight: 800; flex-shrink: 0;
+    }
+
+    /* ========= 1 · 头像描线圆环（描线风，跟 search icon 同款） ========= */
+    .v1-wrap { position: relative; display: inline-flex; width: 32px; height: 32px; flex-shrink: 0; }
+    .v1-ring { position: absolute; inset: -3px; width: 38px; height: 38px; color: #e8685a; opacity: 0; pointer-events: none; }
+    .v1-ring circle { stroke-dasharray: 100; stroke-dashoffset: 100; transform: rotate(-90deg); transform-origin: center; }
+    .v1-avatar { transition: transform 200ms cubic-bezier(.34,1.56,.64,1); }
+    .v1:hover { background: #fff; border-color: rgba(30,58,95,.22); box-shadow: 0 4px 12px rgba(30,58,95,.08); }
+    .v1:hover .v1-avatar { transform: scale(1.08); }
+    .v1:hover .v1-ring { opacity: 1; }
+    .v1:hover .v1-ring circle { animation: ring-draw 600ms cubic-bezier(.4,0,.2,1) forwards; }
+    .v1:active { transform: scale(0.97); }
+    .v1:active .v1-ring circle { animation: ring-draw 400ms forwards, ring-spin 600ms ease-out; }
+    @keyframes ring-draw { to { stroke-dashoffset: 0; } }
+    @keyframes ring-spin { from { transform: rotate(-90deg); } to { transform: rotate(270deg); } }
+
+    /* ========= 2 · 头像外发光（珊瑚光晕） ========= */
+    .v2-wrap { position: relative; display: inline-flex; width: 32px; height: 32px; flex-shrink: 0; border-radius: 50%; }
+    .v2-avatar { transition: transform 200ms ease, box-shadow 200ms ease; }
+    .v2:hover { background: #fff; border-color: rgba(30,58,95,.22); }
+    .v2:hover .v2-avatar { transform: scale(1.1); box-shadow: 0 0 0 4px rgba(232,104,90,.25), 0 0 14px rgba(232,104,90,.45); }
+    .v2:active .v2-avatar { transform: scale(0.95); }
+    .v2:active { transform: scale(0.97); }
+
+    /* ========= 3 · 头像从左到右渐变扫光 ========= */
+    .v3-wrap { position: relative; display: inline-flex; width: 32px; height: 32px; flex-shrink: 0; border-radius: 50%; overflow: hidden; }
+    .v3-avatar { transition: transform 200ms ease; }
+    .v3-wrap::after {
+      content: ""; position: absolute; top: 0; left: -100%;
+      width: 60%; height: 100%;
+      background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,.7) 50%, transparent 100%);
+      transform: skewX(-20deg);
+    }
+    .v3:hover { background: #fff; border-color: rgba(30,58,95,.22); }
+    .v3:hover .v3-avatar { transform: scale(1.05); }
+    .v3:hover .v3-wrap::after { animation: sweep 800ms ease-out; }
+    .v3:active { transform: scale(0.97); }
+    @keyframes sweep { from { left: -100%; } to { left: 200%; } }
+
+    /* ========= 4 · 头像整体缩放 + 整 chip 抖动 ========= */
+    .v4:hover { background: #fff; border-color: rgba(30,58,95,.22); animation: shake 400ms ease-out; }
+    .v4-avatar { transition: transform 200ms cubic-bezier(.34,1.56,.64,1); }
+    .v4:hover .v4-avatar { transform: scale(1.15); }
+    .v4:active { transform: scale(0.95); }
+    @keyframes shake {
+      0% { transform: translateX(0); }
+      20% { transform: translateX(-2px); }
+      40% { transform: translateX(2px); }
+      60% { transform: translateX(-1px); }
+      80% { transform: translateX(1px); }
+      100% { transform: translateX(0); }
+    }
+
+    /* ========= 5 · 头像上下浮动 + 文字微微下移 ========= */
+    .v5:hover { background: #fff; border-color: rgba(30,58,95,.22); box-shadow: 0 6px 18px rgba(30,58,95,.12); }
+    .v5-wrap { display: inline-flex; align-items: center; gap: 10px; transition: transform 280ms cubic-bezier(.34,1.56,.64,1); }
+    .v5-avatar { transition: transform 280ms cubic-bezier(.34,1.56,.64,1); }
+    .v5:hover .v5-wrap { transform: translateY(-2px); }
+    .v5:hover .v5-avatar { transform: scale(1.1) rotate(-6deg); }
+    .v5:active { transform: scale(0.97); }
+    .v5:active .v5-avatar { transform: scale(0.9); }
+  </style>
+</head>
+<body>
+  <h1>user-chip 动效 · 5 个 demo</h1>
+  <p class="sub">5 种不同的 hover/active 动效。每个卡片**鼠标滑过** user-chip 看效果。**点击**看 active。</p>
+
+  <div class="grid">
+
+    <!-- 1 -->
+    <div class="demo">
+      <div class="demo-tag"><strong>1 · 描线圆环（描线风）</strong><span class="pill">推荐</span></div>
+      <div class="stage">
+        <button class="user-chip v1" type="button">
+          <span class="v1-wrap">
+            <span class="user-chip-avatar v1-avatar">范</span>
+            <svg class="v1-ring" viewBox="0 0 36 36" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+              <circle cx="18" cy="18" r="16" />
+            </svg>
+          </span>
+          <span class="user-chip-meta">
+            <span class="user-chip-name">范佳录</span>
+            <span class="user-chip-role">用户</span>
+          </span>
+        </button>
+      </div>
+      <div class="hint">hover → 头像放大 1.08 + 头像外描一圈 coral 圆环</div>
+    </div>
+
+    <!-- 2 -->
+    <div class="demo">
+      <div class="demo-tag"><strong>2 · 头像外发光（珊瑚光晕）</strong><span class="pill">柔和</span></div>
+      <div class="stage">
+        <button class="user-chip v2" type="button">
+          <span class="v2-wrap">
+            <span class="user-chip-avatar v2-avatar">范</span>
+          </span>
+          <span class="user-chip-meta">
+            <span class="user-chip-name">范佳录</span>
+            <span class="user-chip-role">用户</span>
+          </span>
+        </button>
+      </div>
+      <div class="hint">hover → 头像外发 25% coral 光晕 + 头像 1.1× 放大</div>
+    </div>
+
+    <!-- 3 -->
+    <div class="demo">
+      <div class="demo-tag"><strong>3 · 头像扫光（高光带）</strong><span class="pill">科技感</span></div>
+      <div class="stage">
+        <button class="user-chip v3" type="button">
+          <span class="v3-wrap">
+            <span class="user-chip-avatar v3-avatar">范</span>
+          </span>
+          <span class="user-chip-meta">
+            <span class="user-chip-name">范佳录</span>
+            <span class="user-chip-role">用户</span>
+          </span>
+        </button>
+      </div>
+      <div class="hint">hover → 一束白光从左到右扫过头像</div>
+    </div>
+
+    <!-- 4 -->
+    <div class="demo">
+      <div class="demo-tag"><strong>4 · 整 chip 抖动 + 头像放大</strong><span class="pill">活泼</span></div>
+      <div class="stage">
+        <button class="user-chip v4" type="button">
+          <span class="user-chip-avatar v4-avatar">范</span>
+          <span class="user-chip-meta">
+            <span class="user-chip-name">范佳录</span>
+            <span class="user-chip-role">用户</span>
+          </span>
+        </button>
+      </div>
+      <div class="hint">hover → 头像 1.15× + 整 chip 左右轻微抖动</div>
+    </div>
+
+    <!-- 5 -->
+    <div class="demo">
+      <div class="demo-tag"><strong>5 · 整 chip 上浮 + 头像旋转</strong><span class="pill">动感</span></div>
+      <div class="stage">
+        <button class="user-chip v5" type="button">
+          <span class="v5-wrap">
+            <span class="user-chip-avatar v5-avatar">范</span>
+            <span class="user-chip-meta">
+              <span class="user-chip-name">范佳录</span>
+              <span class="user-chip-role">用户</span>
+            </span>
+          </span>
+        </button>
+      </div>
+      <div class="hint">hover → 整 chip 上浮 2px + 头像 1.1× 旋转 -6°</div>
+    </div>
+
+  </div>
+</body>
+</html>

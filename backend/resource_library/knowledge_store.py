@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -69,15 +69,108 @@ class KnowledgeStore:
         return record
 
     def list_knowledge(self, *, limit: int = 50) -> list[KnowledgeRecord]:
-        if not self.path.exists():
-            return []
-        records = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            records.append(KnowledgeRecord(**json.loads(line)))
+        records = self._read_all()
         records.sort(key=lambda item: item.created_at, reverse=True)
         return records[:limit]
+
+    def search_knowledge(
+        self,
+        *,
+        query: str = "",
+        item_type: str | None = None,
+        status: str | None = None,
+        tag: str | None = None,
+        owner: str | None = None,
+        limit: int = 50,
+    ) -> list[KnowledgeRecord]:
+        normalized_query = query.strip().lower()
+        normalized_tag = (tag or "").strip().lower()
+        records = self._read_all()
+        matched = []
+        for record in records:
+            metadata = record.metadata or {}
+            if item_type and metadata.get("type") != item_type:
+                continue
+            if status and metadata.get("status") != status:
+                continue
+            if owner and metadata.get("owner") != owner:
+                continue
+            tags = [str(item).lower() for item in metadata.get("tags", []) if str(item).strip()]
+            if normalized_tag and normalized_tag not in tags:
+                continue
+            haystack = " ".join(
+                [
+                    record.title,
+                    record.question,
+                    record.conclusion,
+                    record.scope,
+                    record.verification,
+                    json.dumps(metadata, ensure_ascii=False, default=str),
+                ]
+            ).lower()
+            if normalized_query and normalized_query not in haystack:
+                continue
+            matched.append(record)
+        matched.sort(key=lambda item: item.created_at, reverse=True)
+        return matched[:limit]
+
+    def update_knowledge(
+        self,
+        record_id: str,
+        *,
+        title: str | None = None,
+        question: str | None = None,
+        conclusion: str | None = None,
+        scope: str | None = None,
+        verification: str | None = None,
+        evidence_refs: list[str] | None = None,
+        run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> KnowledgeRecord | None:
+        records = self._read_all()
+        updated: KnowledgeRecord | None = None
+        next_records = []
+        for record in records:
+            if record.id != record_id:
+                next_records.append(record)
+                continue
+            merged_metadata = dict(record.metadata or {})
+            if metadata:
+                merged_metadata.update(metadata)
+            updated = replace(
+                record,
+                title=title.strip() if title is not None else record.title,
+                question=question.strip() if question is not None else record.question,
+                conclusion=conclusion.strip() if conclusion is not None else record.conclusion,
+                scope=scope.strip() if scope is not None else record.scope,
+                verification=verification.strip() if verification is not None else record.verification,
+                evidence_refs=[ref.strip() for ref in evidence_refs if ref.strip()] if evidence_refs is not None else record.evidence_refs,
+                run_id=run_id.strip() if run_id else record.run_id,
+                metadata=merged_metadata,
+            )
+            next_records.append(updated)
+        if not updated:
+            return None
+        self._write_all(next_records)
+        return updated
+
+    def list_tags(self) -> list[dict[str, Any]]:
+        counts: dict[str, int] = {}
+        groups: dict[str, str] = {}
+        for record in self._read_all():
+            metadata = record.metadata or {}
+            tag_groups = metadata.get("tag_groups", {})
+            for tag in metadata.get("tags", []) or []:
+                name = str(tag).strip()
+                if not name:
+                    continue
+                counts[name] = counts.get(name, 0) + 1
+                if isinstance(tag_groups, dict) and name in tag_groups:
+                    groups[name] = str(tag_groups[name])
+        return [
+            {"name": name, "count": count, "group": groups.get(name, "未分组")}
+            for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        ]
 
     def delete_knowledge(self, record_id: str) -> bool:
         records = self._read_all()

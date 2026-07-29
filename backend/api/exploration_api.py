@@ -52,6 +52,50 @@ def create_app(service: ExplorationRunService | None = None, knowledge_store: Kn
         evidence_refs: list[str] = Field(min_length=1)
         run_id: str | None = None
         metadata: dict[str, Any] = Field(default_factory=dict)
+        type: str | None = None
+        business_definition: str | None = None
+        technical_definition: str | None = None
+        formula: str | None = None
+        excluded_scope: str | None = None
+        owner: str | None = None
+        visibility: str | None = None
+        status: str | None = None
+        approvals: list[dict[str, Any]] = Field(default_factory=list)
+        tags: list[str] = Field(default_factory=list)
+        related_tables: list[str] = Field(default_factory=list)
+        related_fields: list[str] = Field(default_factory=list)
+        related_resources: list[str] = Field(default_factory=list)
+        expires_at: str | None = None
+        conflicts: list[str] = Field(default_factory=list)
+        agent_visible: bool | None = None
+        version: str | None = None
+
+    class KnowledgeUpdateBody(BaseModel):
+        title: str | None = None
+        question: str | None = None
+        conclusion: str | None = None
+        scope: str | None = None
+        verification: str | None = None
+        evidence_refs: list[str] | None = None
+        run_id: str | None = None
+        metadata: dict[str, Any] = Field(default_factory=dict)
+        type: str | None = None
+        business_definition: str | None = None
+        technical_definition: str | None = None
+        formula: str | None = None
+        excluded_scope: str | None = None
+        owner: str | None = None
+        visibility: str | None = None
+        status: str | None = None
+        approvals: list[dict[str, Any]] | None = None
+        tags: list[str] | None = None
+        related_tables: list[str] | None = None
+        related_fields: list[str] | None = None
+        related_resources: list[str] | None = None
+        expires_at: str | None = None
+        conflicts: list[str] | None = None
+        agent_visible: bool | None = None
+        version: str | None = None
 
     cors_origins = [
         origin.strip()
@@ -312,8 +356,31 @@ def create_app(service: ExplorationRunService | None = None, knowledge_store: Kn
         }
 
     @app.get("/api/knowledge")
-    def list_knowledge(limit: int = 50) -> dict[str, Any]:
-        return {"records": [asdict(item) for item in configured_knowledge_store.list_knowledge(limit=limit)]}
+    def list_knowledge(
+        limit: int = 50,
+        q: str = "",
+        type: str | None = None,
+        status: str | None = None,
+        tag: str | None = None,
+        owner: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "records": [
+                asdict(item)
+                for item in configured_knowledge_store.search_knowledge(
+                    query=q,
+                    item_type=type,
+                    status=status,
+                    tag=tag,
+                    owner=owner,
+                    limit=limit,
+                )
+            ]
+        }
+
+    @app.get("/api/knowledge/tags")
+    def list_knowledge_tags() -> dict[str, Any]:
+        return {"tags": configured_knowledge_store.list_tags()}
 
     @app.post("/api/knowledge")
     def save_knowledge(body: KnowledgeBody = Body(...)) -> dict[str, Any]:
@@ -325,8 +392,25 @@ def create_app(service: ExplorationRunService | None = None, knowledge_store: Kn
             verification=body.verification,
             evidence_refs=body.evidence_refs,
             run_id=body.run_id,
-            metadata=body.metadata,
+            metadata=_knowledge_metadata_from_body(body),
         )
+        return asdict(record)
+
+    @app.patch("/api/knowledge/{record_id}")
+    def update_knowledge(record_id: str, body: KnowledgeUpdateBody = Body(...)) -> dict[str, Any]:
+        record = configured_knowledge_store.update_knowledge(
+            record_id,
+            title=body.title,
+            question=body.question,
+            conclusion=body.conclusion,
+            scope=body.scope,
+            verification=body.verification,
+            evidence_refs=body.evidence_refs,
+            run_id=body.run_id,
+            metadata=_knowledge_metadata_from_body(body, partial=True),
+        )
+        if not record:
+            raise HTTPException(status_code=404, detail="knowledge_not_found")
         return asdict(record)
 
     @app.delete("/api/knowledge/{record_id}")
@@ -341,6 +425,39 @@ def create_app(service: ExplorationRunService | None = None, knowledge_store: Kn
         return {"deleted_count": configured_knowledge_store.clear_knowledge()}
 
     return app
+
+
+def _knowledge_metadata_from_body(body: Any, *, partial: bool = False) -> dict[str, Any]:
+    metadata = dict(getattr(body, "metadata", {}) or {})
+    field_names = [
+        "type",
+        "business_definition",
+        "technical_definition",
+        "formula",
+        "excluded_scope",
+        "owner",
+        "visibility",
+        "status",
+        "approvals",
+        "tags",
+        "related_tables",
+        "related_fields",
+        "related_resources",
+        "expires_at",
+        "conflicts",
+        "agent_visible",
+        "version",
+    ]
+    for field_name in field_names:
+        value = getattr(body, field_name, None)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            if partial or value:
+                metadata[field_name] = value
+        elif partial or value != "":
+            metadata[field_name] = value
+    return metadata
 
 
 def _is_continuation_trace(trace: Any) -> bool:

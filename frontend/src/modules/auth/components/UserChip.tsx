@@ -15,13 +15,16 @@ export function UserChip() {
 
   return (
     <button className="user-chip" type="button" aria-label="账户，点击退出登录" title="退出登录" onClick={() => signOut()}>
-      {user?.image ? (
-        <img className="user-chip-avatar" src={user.image} alt="" referrerPolicy="no-referrer" />
-      ) : (
-        <span className="user-chip-avatar" aria-hidden="true">
-          {getInitial(user?.name, user?.email)}
-        </span>
-      )}
+      <span className="user-chip-avatar-wrap" aria-hidden="true">
+        {user?.image ? (
+          <img className="user-chip-avatar" src={user.image} alt="" referrerPolicy="no-referrer" />
+        ) : (
+          <span className="user-chip-avatar">{getInitial(user?.name, user?.email)}</span>
+        )}
+        <svg className="user-chip-ring" viewBox="0 0 36 36" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+          <circle cx="18" cy="18" r="16" />
+        </svg>
+      </span>
       <span className="user-chip-meta">
         <span className="user-chip-name">{name}</span>
         <span className="user-chip-role">{role}</span>

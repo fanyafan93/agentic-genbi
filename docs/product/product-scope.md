@@ -39,12 +39,10 @@ Agentic GenBI 是面向数据分析师和运营人员的 AI Agent BI 系统。�
 
 - **我的探索**：探索任务列表。每个任务包含一个探索会话 Agent，用对话方式检索资源库、展示过程、追问用户并形成结论。
 - **资源库**：表、字段、历史 SQL、ETL 代码、报表源文件、Git 记录和样例数据的检索与关联。
-- **知识沉淀**：从探索会话中确认过的稳定结论，包括参考实现、验证方式、适用范围和最后验证时间。
-- **数据源**：Schema、样例数据、列画像和数据质量信息。
-- **语义定义**：指标、维度、术语、关系和权限，作为调查和查询时的受控上下文。
+- **知识库**：管理语义层知识、探索沉淀结论和治理信息，包括指标、维度、业务实体、字段映射、口径公式、报表逻辑、认证、标签、版本和 Agent 可见性。
 
 Agent 优先复用已有实现，再检查表结构和数据；仅在存在具体疑点时追溯 ETL，最后执行、对账和验证查询。
-知识探索当前只沉淀为知识，不直接生成 Artifact 或可复用 Agent；这两类能力仍归属会话、Artifact 和 Agent 中心。
+知识探索当前只保存到知识库，不直接生成 Artifact 或可复用 Agent；这两类能力仍归属会话、Artifact 和 Agent 中心。
 
 ### Agent 中心
 
@@ -68,7 +66,8 @@ Agent 优先复用已有实现，再检查表结构和数据；仅在存在具�
 | `Artifact Version` | Artifact 的不可变历史版本；引用默认跟随最新已发布版本，Run 记录实际使用版本。 |
 | `Automation` | 以 Artifact 或 Agent 为入口的定时或事件触发运行，保留运行历史并产出新结果或更新资产。 |
 | `Agent` | 可复用、可组合、可发布的能力包，具有输入、输出、工具、权限、版本和运行记录。 |
-| `Knowledge Exploration Context` | 提供探索资源、已验证知识、数据源和语义定义，让 Agent 能像 BI 开发人员一样查证、复用和验证。 |
+| `Knowledge Item` | 知识库中的可治理知识资产，可表示指标定义、维度、实体、字段映射、口径公式、业务规则、数据链路、报表逻辑或探索结论。 |
+| `Knowledge Exploration Context` | 提供资源库、知识库和数据库元数据，让 Agent 能像 BI 开发人员一样查证、复用和验证。 |
 
 对象关系：
 
@@ -77,6 +76,7 @@ Conversation → Run → Messages / Plan / Tool Calls / Artifacts
 Artifact → Versions / References / Automations / Agent inputs and outputs
 Agent → 专业分析师 Agent 或工作流 Agent → 可组合调用其他 Agent
 Knowledge Exploration Context → 为 Conversation、Run、Artifact 和 Agent 提供可检索、可验证的业务与数据上下文
+Knowledge Item → Type / Tags / Approvals / Versions / Evidence / Agent usage
 ```
 
 ## 产品原则

@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>topbar-slogan · DATA 发光变体 6 个 demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 40px 24px 60px;
+      background: linear-gradient(135deg, #c5c8cc 0%, #ecebe8 44%, #f5d0c8 100%);
+      font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      color: #1e3a5f;
+      min-height: 100vh;
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; letter-spacing: .5px; }
+    .sub { color: #6b7480; font-size: 13px; margin: 0 0 32px; max-width: 900px; line-height: 1.6; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+      gap: 20px;
+      max-width: 1280px;
+    }
+    .demo {
+      background: rgba(255,255,255,.85);
+      border: 1px solid rgba(30,58,95,.1);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 8px 28px rgba(30,58,95,.06);
+      backdrop-filter: blur(20px);
+    }
+    .demo-tag {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 18px;
+      background: rgba(30,58,95,.04);
+      border-bottom: 1px solid rgba(30,58,95,.08);
+      font-size: 12px; color: #6b7480;
+    }
+    .demo-tag strong { color: #1e3a5f; font-size: 13px; font-weight: 800; }
+    .pill {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      background: rgba(232,104,90,.12); color: #eb5b4f;
+      font-size: 10px; font-weight: 800; letter-spacing: .04em;
+    }
+    .stage {
+      padding: 60px 32px;
+      background: linear-gradient(180deg, #fafaf7 0%, #f0ece4 100%);
+      display: grid;
+      place-items: center;
+      min-height: 200px;
+    }
+    .hint {
+      padding: 10px 18px;
+      background: rgba(30,58,95,.04);
+      border-top: 1px solid rgba(30,58,95,.08);
+      font-size: 11px;
+      color: #6b7480;
+      text-align: center;
+    }
+    .slogan { display: inline-flex; align-items: baseline; gap: .45em; font-family: "Segoe UI", Manrope, "Microsoft YaHei", sans-serif; font-size: 1.55rem; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; white-space: nowrap; }
+    .slogan > span { display: inline-block; }
+
+    /* ========= 1 · 基础：text-shadow 光晕（之前 #6） ========= */
+    .v1 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); animation: v1-glow 2.4s ease-in-out infinite; }
+    @keyframes v1-glow {
+      0%, 100% { text-shadow: 0 0 0 rgba(232,104,90,0); }
+      50%      { text-shadow: 0 0 16px rgba(232,104,90,.55), 0 0 28px rgba(232,104,90,.25); }
+    }
+
+    /* ========= 2 · 双色光晕（coral + navy） ========= */
+    .v2 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); animation: v2-glow 2.6s ease-in-out infinite; }
+    @keyframes v2-glow {
+      0%, 100% { text-shadow: 0 0 0 rgba(232,104,90,0), 0 0 0 rgba(30,58,95,0); }
+      33%      { text-shadow: 0 0 14px rgba(232,104,90,.5), 0 0 0 rgba(30,58,95,0); }
+      66%      { text-shadow: 0 0 0 rgba(232,104,90,0), 0 0 14px rgba(30,58,95,.35); }
+    }
+
+    /* ========= 3 · 多层强光晕（向外扩散） ========= */
+    .v3 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); animation: v3-glow 2.4s ease-in-out infinite; }
+    @keyframes v3-glow {
+      0%, 100% { text-shadow: 0 0 0 transparent, 0 0 0 transparent, 0 0 0 transparent; }
+      50%      { text-shadow: 0 0 8px rgba(232,104,90,.55), 0 0 18px rgba(232,104,90,.35), 0 0 32px rgba(232,104,90,.18); }
+    }
+
+    /* ========= 4 · DATA 颜色微变（coral → 深红） + 光晕 ========= */
+    .v4 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); animation: v4-glow 2.6s ease-in-out infinite; }
+    @keyframes v4-glow {
+      0%, 100% { color: #e8685a; text-shadow: 0 0 0 rgba(232,104,90,0); }
+      50%      { color: #d75b4e; text-shadow: 0 0 16px rgba(232,104,90,.6), 0 0 28px rgba(232,104,90,.25); }
+    }
+
+    /* ========= 5 · 描边发光（text-stroke + text-shadow） ========= */
+    .v5 .dt { color: transparent; -webkit-text-stroke: 1.2px #e8685a; font-style: italic; transform: skewX(-6deg); animation: v5-glow 2.4s ease-in-out infinite; }
+    @keyframes v5-glow {
+      0%, 100% { -webkit-text-stroke-color: #e8685a; text-shadow: 0 0 0 rgba(232,104,90,0); }
+      50%      { -webkit-text-stroke-color: #d75b4e; text-shadow: 0 0 14px rgba(232,104,90,.5), 0 0 24px rgba(232,104,90,.25); }
+    }
+
+    /* ========= 6 · 强光晕 + 微微缩放（光跟着字呼吸） ========= */
+    .v6 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); animation: v6-glow 2.6s ease-in-out infinite; }
+    @keyframes v6-glow {
+      0%, 100% { transform: skewX(-6deg) scale(1); text-shadow: 0 0 0 rgba(232,104,90,0); }
+      50%      { transform: skewX(-6deg) scale(1.05); text-shadow: 0 0 18px rgba(232,104,90,.6), 0 0 30px rgba(232,104,90,.25); }
+    }
+
+    /* ========= 7 · 多字错峰（MAKE / DATA / SENSE 都轻微发光，DATA 最强） ========= */
+    .v7 .mk { animation: v7-soft 3s ease-in-out infinite; color: #1a1a1a; }
+    .v7 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); animation: v7-strong 2.4s ease-in-out infinite; }
+    .v7 .sn { animation: v7-soft 3s ease-in-out 0.6s infinite; color: #1a1a1a; }
+    @keyframes v7-soft {
+      0%, 100% { text-shadow: 0 0 0 rgba(30,58,95,0); }
+      50%      { text-shadow: 0 0 8px rgba(30,58,95,.25); }
+    }
+    @keyframes v7-strong {
+      0%, 100% { text-shadow: 0 0 0 rgba(232,104,90,0); }
+      50%      { text-shadow: 0 0 18px rgba(232,104,90,.65), 0 0 30px rgba(232,104,90,.25); }
+    }
+  </style>
+</head>
+<body>
+  <h1>topbar-slogan · DATA 发光变体 · 7 个 demo</h1>
+  <p class="sub">DATA 持续发光（text-shadow 光晕）的 7 种变体。基础是 16px coral 光晕呼吸。</p>
+
+  <div class="grid">
+
+    <div class="demo">
+      <div class="demo-tag"><strong>1 · 基础（之前 #6）</strong><span class="pill">基线</span></div>
+      <div class="stage">
+        <div class="slogan v1"><span>MAKE</span><span class="dt">DATA</span><span>SENSE</span></div>
+      </div>
+      <div class="hint">0 → 16px coral 光晕 → 0（2.4s 循环）</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>2 · 双色光晕（coral + navy 交替）</strong><span class="pill">变彩</span></div>
+      <div class="stage">
+        <div class="slogan v2"><span>MAKE</span><span class="dt">DATA</span><span>SENSE</span></div>
+      </div>
+      <div class="hint">coral 14px → 0 → navy 14px → 0（2.6s 循环）</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>3 · 多层强光晕（8+18+32px 扩散）</strong><span class="pill">强烈</span></div>
+      <div class="stage">
+        <div class="slogan v3"><span>MAKE</span><span class="dt">DATA</span><span>SENSE</span></div>
+      </div>
+      <div class="hint">3 层 text-shadow 叠加，最外 32px 18% 弱光</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>4 · DATA 颜色变深（coral → 深红）+ 光晕</strong><span class="pill">温感</span></div>
+      <div class="stage">
+        <div class="slogan v4"><span>MAKE</span><span class="dt">DATA</span><span>SENSE</span></div>
+      </div>
+      <div class="hint">色 #e8685a → #d75b4e + 16px 光晕（呼吸感）</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>5 · 描边发光（空心字 + 光晕）</strong><span class="pill">科技</span></div>
+      <div class="stage">
+        <div class="slogan v5"><span>MAKE</span><span class="dt">DATA</span><span>SENSE</span></div>
+      </div>
+      <div class="hint">DATA 透明填充 + coral 描边 + 14px 光晕</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>6 · 强光晕 + 微微缩放（光跟着字呼吸）</strong><span class="pill">推荐</span></div>
+      <div class="stage">
+        <div class="slogan v6"><span>MAKE</span><span class="dt">DATA</span><span>SENSE</span></div>
+      </div>
+      <div class="hint">scale 1↔1.05 + 18px coral 光晕（呼吸感更强）</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>7 · 多字错峰（DATA 强 + MAKE/SENSE 弱）</strong><span class="pill">错落</span></div>
+      <div class="stage">
+        <div class="slogan v7"><span class="mk">MAKE</span><span class="dt">DATA</span><span class="sn">SENSE</span></div>
+      </div>
+      <div class="hint">MAKE/SENSE 8px navy 软光（错峰 0.6s）+ DATA 18px coral 强光</div>
+    </div>
+
+  </div>
+</body>
+</html>
