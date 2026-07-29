@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>登录 · Agentic GenBI</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 0;
+      min-height: 100vh;
+      background: #f5f5f2;
+      font-family: ui-sans-serif, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      color: #1e3a5f;
+      display: grid; place-items: center;
+      padding: 40px 24px;
+    }
+
+    .login-card {
+      width: 100%; max-width: 720px;
+      min-height: 400px;
+      display: grid; grid-template-columns: 1.5fr 1fr;
+      background: #fff;
+      border: 1px solid rgba(30,58,95,.1);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 24px 60px rgba(30,58,95,.10);
+    }
+
+    /* ====== 左：白底表单 ====== */
+    .left {
+      padding: 80px 40px 56px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .brand {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 0;
+    }
+    .feishu-wrap {
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+    }
+    .brand-logo {
+      height: 96px;
+      width: auto;
+      object-fit: contain;
+      mix-blend-mode: multiply;
+      background: transparent;
+    }
+    .title { margin: 0 0 6px; font-size: 1.5rem; font-weight: 800; color: #1e3a5f; }
+    .subtitle { margin: 0 0 28px; color: #6b7480; font-size: .82rem; }
+
+    .feishu-btn {
+      display: flex; align-items: center; justify-content: center;
+      gap: 10px; width: 100%;
+      padding: 12px 16px; border: 0; border-radius: 10px;
+      background: #00d6b9; color: #fff;
+      font: inherit; font-size: .88rem; font-weight: 800;
+      cursor: pointer; transition: 200ms;
+      box-shadow: 0 6px 18px rgba(0,214,185,.28);
+    }
+    .feishu-btn:hover { background: #00b8a0; transform: translateY(-1px); }
+    .feishu-icon { width: 18px; height: 18px; }
+
+    /* ====== 右：搭边浅色块 ====== */
+    .right {
+      position: relative;
+      background: linear-gradient(160deg, #faf6f0 0%, #f0e8dc 100%);
+      padding: 56px 40px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 0;
+      overflow: hidden;
+    }
+    .right::before {
+      content: ""; position: absolute;
+      top: -80px; right: -80px;
+      width: 240px; height: 240px; border-radius: 50%;
+      background: radial-gradient(circle, rgba(30,58,95,.10) 0%, transparent 70%);
+    }
+    .right::after {
+      content: ""; position: absolute;
+      bottom: -70px; left: -70px;
+      width: 200px; height: 200px; border-radius: 50%;
+      background: radial-gradient(circle, rgba(107,143,137,.12) 0%, transparent 70%);
+    }
+    .word {
+      font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      font-size: clamp(2.5rem, 8vw, 5rem);
+      font-weight: 900;
+      letter-spacing: .02em;
+      text-transform: uppercase;
+      line-height: 1;
+      color: var(--accent-navy, #1e3a5f);
+      position: relative;
+      z-index: 1;
+      white-space: nowrap;
+    }
+    .word.accent {
+      color: var(--accent-coral, #e8685a);
+      font-style: italic;
+      transform: skewX(-6deg);
+      transform-origin: left center;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+
+    <!-- 左：白底表单 -->
+    <div class="left">
+      <div class="brand">
+        <img class="brand-logo" src="brand-logo.png" alt="Agentic GenBI" />
+      </div>
+
+      <div class="feishu-wrap">
+        <button class="feishu-btn" type="button">
+          <svg class="feishu-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M20.5 11.4c0-3.6-3.6-6.5-8-6.5s-8 2.9-8 6.5c0 3.2 2.8 5.9 6.6 6.4-.1.5-.4 1.7-.4 2 .1.4.3.4.5.3.2-.1 2.3-1.5 3.2-2.1 2-.2 3.7-1 5-2.2 1.4-1.3 2.1-2.9 2.1-4.4zm-9.7 2.5h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm5.3 0h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm-3.9-2.7c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9zm3.2 0c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9z"/></svg>
+          飞书登录
+        </button>
+      </div>
+    </div>
+
+    <!-- 右：装饰块 -->
+    <div class="right">
+      <div class="word">MAKE</div>
+      <div class="word accent">DATA</div>
+      <div class="word">SENSE</div>
+    </div>
+
+  </div>
+</body>
+</html>

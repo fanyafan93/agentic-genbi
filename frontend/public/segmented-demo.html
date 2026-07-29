@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>segmented 切换 · 3 个方案</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 40px 24px 60px;
+      background: #f5f5f2;
+      font-family: ui-sans-serif, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      color: #1e3a5f;
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; letter-spacing: .5px; }
+    .sub { color: #6b7480; font-size: 13px; margin: 0 0 32px; max-width: 800px; line-height: 1.6; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 24px;
+      max-width: 1180px;
+    }
+    .card {
+      background: #fff;
+      border: 1px solid rgba(30,58,95,.1);
+      border-radius: 14px;
+      padding: 22px 20px 18px;
+      box-shadow: 0 6px 24px rgba(30,58,95,.06);
+    }
+    .card h2 { margin: 0 0 4px; font-size: 14px; font-weight: 800; }
+    .card .desc { margin: 0 0 14px; color: #6b7480; font-size: 12px; line-height: 1.55; min-height: 54px; }
+    .nav {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 2px;
+      padding: 10px 10px 8px;
+      border: 1px solid rgba(30,58,95,.1);
+      border-radius: 8px;
+      background: #fff;
+      margin-bottom: 14px;
+      position: relative;
+      overflow: hidden;
+    }
+    .nav button {
+      min-width: 0;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      padding: 8px 4px;
+      color: #6b7480;
+      font-size: .72rem;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+      font-family: inherit;
+    }
+    .nav button.active { color: #e8685a; }
+    .tag {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(235,91,79,.08);
+      color: #eb5b4f;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .3px;
+    }
+    .controls {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .controls button {
+      padding: 4px 10px;
+      border: 1px solid rgba(30,58,95,.18);
+      border-radius: 6px;
+      background: #fff;
+      color: #1e3a5f;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .controls button:hover { background: rgba(30,58,95,.04); }
+
+    /* ========= 方案 A · 简单 transition ========= */
+    .nav-a button {
+      transition: background-color 220ms cubic-bezier(.4,0,.2,1),
+                  color 220ms cubic-bezier(.4,0,.2,1),
+                  box-shadow 220ms cubic-bezier(.4,0,.2,1);
+    }
+    .nav-a button.active {
+      background: rgba(232,104,90,.12);
+      box-shadow: inset 0 0 0 1px rgba(232,104,90,.18);
+    }
+
+    /* ========= 方案 B · 滑动指示器 ========= */
+    .nav-b {
+      position: relative;
+    }
+    .nav-b .indicator {
+      position: absolute;
+      top: 10px;
+      bottom: 8px;
+      left: 10px;
+      width: calc((100% - 20px) / 3);
+      border-radius: 5px;
+      background: rgba(232,104,90,.12);
+      box-shadow: inset 0 0 0 1px rgba(232,104,90,.18);
+      transform: translateX(0);
+      transition: transform 320ms cubic-bezier(.34,1.56,.64,1);
+      pointer-events: none;
+    }
+    .nav-b button { position: relative; z-index: 1; transition: color 220ms cubic-bezier(.4,0,.2,1); }
+    .nav-b button.active { color: #e8685a; }
+    .nav-b[data-active="0"] .indicator { transform: translateX(0); }
+    .nav-b[data-active="1"] .indicator { transform: translateX(100%); }
+    .nav-b[data-active="2"] .indicator { transform: translateX(200%); }
+
+    /* ========= 方案 C · 渐变 + 微缩放 ========= */
+    .nav-c button {
+      transition: background-color 260ms cubic-bezier(.4,0,.2,1),
+                  color 260ms cubic-bezier(.4,0,.2,1),
+                  transform 260ms cubic-bezier(.34,1.56,.64,1);
+    }
+    .nav-c button.active {
+      background: rgba(232,104,90,.14);
+      color: #e8685a;
+      transform: scale(1.02);
+    }
+  </style>
+</head>
+<body>
+  <h1>segmented 切换 · 3 个方案</h1>
+  <p class="sub">点不同的 tab 看切换效果。鼠标点下面的按钮切换 active 项，对比哪个最丝滑。</p>
+
+  <div class="grid">
+
+    <!-- A -->
+    <div class="card">
+      <h2>A · 简单 transition</h2>
+      <p class="desc">背景 + 颜色 + 阴影 220ms 平滑过渡。Linear / Apple 风格。</p>
+      <div class="nav nav-a" data-active="1">
+        <button class="">我的探索</button>
+        <button class="active">资源库</button>
+        <button class="">知识沉淀</button>
+      </div>
+      <div class="controls">
+        <button onclick="setActive('nav-a', 0)">切到 1</button>
+        <button onclick="setActive('nav-a', 1)">切到 2</button>
+        <button onclick="setActive('nav-a', 2)">切到 3</button>
+      </div>
+      <span class="tag" style="margin-top:12px; display:inline-block;">220ms · 简单</span>
+    </div>
+
+    <!-- B -->
+    <div class="card">
+      <h2>B · 滑动指示器</h2>
+      <p class="desc">一个珊瑚红指示器在三个 tab 之间**滑动**。Notion / Linear segment control。</p>
+      <div class="nav nav-b" data-active="1">
+        <div class="indicator"></div>
+        <button>我的探索</button>
+        <button class="active">资源库</button>
+        <button>知识沉淀</button>
+      </div>
+      <div class="controls">
+        <button onclick="setActive('nav-b', 0)">切到 1</button>
+        <button onclick="setActive('nav-b', 1)">切到 2</button>
+        <button onclick="setActive('nav-b', 2)">切到 3</button>
+      </div>
+      <span class="tag" style="margin-top:12px; display:inline-block;">320ms · 弹性</span>
+    </div>
+
+    <!-- C -->
+    <div class="card">
+      <h2>C · 渐变 + 微缩放</h2>
+      <p class="desc">背景渐入 + 按钮轻微 scale 1.02 (弹性曲线)。最"果冻"。</p>
+      <div class="nav nav-c" data-active="1">
+        <button>我的探索</button>
+        <button class="active">资源库</button>
+        <button>知识沉淀</button>
+      </div>
+      <div class="controls">
+        <button onclick="setActive('nav-c', 0)">切到 1</button>
+        <button onclick="setActive('nav-c', 1)">切到 2</button>
+        <button onclick="setActive('nav-c', 2)">切到 3</button>
+      </div>
+      <span class="tag" style="margin-top:12px; display:inline-block;">260ms · 弹性</span>
+    </div>
+
+  </div>
+
+  <script>
+    function setActive(className, idx) {
+      const navs = document.getElementsByClassName(className);
+      for (const nav of navs) {
+        nav.setAttribute('data-active', idx);
+        const btns = nav.querySelectorAll('button');
+        btns.forEach((b, i) => b.classList.toggle('active', i === idx));
+      }
+    }
+  </script>
+</body>
+</html>

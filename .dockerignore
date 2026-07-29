@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+!.env.example
+.resource-index
+.venv
+__pycache__
+*.pyc
+frontend/node_modules
+frontend/.next
+frontend/tsconfig.tsbuildinfo
+node_modules
+资源库

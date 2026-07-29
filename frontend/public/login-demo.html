@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>登录页 · 5 个风格 demo（搭边版）</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+      background: #f5f5f2;
+      font-family: ui-sans-serif, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      color: #1e3a5f;
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; padding: 32px 24px 0; letter-spacing: .5px; }
+    .sub { color: #6b7480; font-size: 13px; margin: 0 0 28px; padding: 0 24px; max-width: 900px; line-height: 1.6; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 22px;
+      padding: 0 24px 60px;
+      max-width: 1280px;
+    }
+    .demo {
+      border: 1px solid rgba(30,58,95,.12);
+      border-radius: 14px;
+      overflow: hidden;
+      background: #fff;
+      box-shadow: 0 8px 28px rgba(30,58,95,.08);
+    }
+    .demo-tag {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 18px;
+      background: rgba(30,58,95,.04);
+      border-bottom: 1px solid rgba(30,58,95,.08);
+      font-size: 12px;
+      color: #6b7480;
+    }
+    .demo-tag strong { color: #1e3a5f; font-size: 13px; font-weight: 800; }
+    .stage {
+      height: 460px;
+      display: grid;
+      place-items: center;
+      background: #f5f5f2;
+      position: relative;
+      overflow: hidden;
+    }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(232,104,90,.12);
+      color: #eb5b4f;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .04em;
+    }
+
+    /* ========== 共享：和现有 app 一致 ========== */
+    /* 主色 navy #1e3a5f, 辅 coral #e8685a, 背景 #f5f5f2 */
+    /* 圆角 12px, 边框 rgba(30,58,95,.12), 阴影柔和 */
+    /* 字体 粗标题 + 浅小字, 1.55rem letter-spacing 大标题 */
+
+    /* ========== 1 · 居中单卡 (米色背景 + 白卡) ========== */
+    .s1 { background: #f5f5f2; padding: 32px 24px; }
+    .s1-card {
+      width: 360px;
+      background: #fff;
+      border: 1px solid rgba(30,58,95,.1);
+      border-radius: 12px;
+      padding: 36px 32px 28px;
+      box-shadow: 0 12px 32px rgba(30,58,95,.08);
+    }
+    .slogan {
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+      margin: 0 0 24px;
+      font-family: "Segoe UI", Manrope, "Microsoft YaHei", sans-serif;
+      font-size: 1.15rem;
+      font-weight: 900;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: #1e3a5f;
+    }
+    .slogan .connector {
+      color: #e8685a;
+      font-style: italic;
+      transform: skewX(-6deg);
+    }
+    .s1-card h2 {
+      margin: 0 0 4px;
+      font-size: 1.2rem;
+      font-weight: 800;
+      color: #1e3a5f;
+    }
+    .s1-card .sub-title {
+      margin: 0 0 22px;
+      color: #6b7480;
+      font-size: .78rem;
+      line-height: 1.5;
+    }
+    .feishu-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      padding: 12px 16px;
+      border: 0;
+      border-radius: 10px;
+      background: #1e3a5f;          /* 用 navy 而不是飞书绿，跟品牌一致 */
+      color: #fff;
+      font: inherit;
+      font-size: .85rem;
+      font-weight: 750;
+      cursor: pointer;
+      transition: 200ms ease;
+    }
+    .feishu-btn:hover { background: #2a4a73; transform: translateY(-1px); }
+    .feishu-icon { width: 18px; height: 18px; }
+    .legal {
+      margin: 16px 0 0;
+      font-size: .68rem;
+      color: #6b7480;
+      line-height: 1.55;
+      text-align: center;
+    }
+    .legal a { color: #1e3a5f; text-decoration: none; font-weight: 600; }
+    .legal a:hover { color: #e8685a; }
+
+    /* ========== 2 · 顶部 brand + 大卡 (跟 topbar 视觉延续) ========== */
+    .s2 { display: grid; grid-template-rows: 56px 1fr; height: 100%; }
+    .s2-topbar {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 24px;
+      padding: 0 24px;
+      background: rgba(255,255,255,.78);
+      border-bottom: 1px solid rgba(30,58,95,.08);
+      backdrop-filter: blur(24px);
+    }
+    .s2-logo {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 12px; font-weight: 800; color: #1e3a5f;
+    }
+    .s2-logo-mark {
+      width: 28px; height: 28px; border-radius: 7px;
+      background: linear-gradient(135deg, #1e3a5f 0%, #2a4a73 100%);
+      display: grid; place-items: center;
+      color: #00d6b9; font-size: 12px; font-weight: 900;
+    }
+    .s2-slogan {
+      display: inline-flex; align-items: baseline; gap: 4px;
+      font-size: 1rem; font-weight: 900; letter-spacing: .12em;
+      text-transform: uppercase; color: #1e3a5f;
+    }
+    .s2-slogan .connector { color: #e8685a; font-style: italic; transform: skewX(-6deg); }
+    .s2-slogan .emph { color: #1e3a5f; }
+    .s2-topbar-right { display: flex; justify-content: flex-end; }
+    .s2-body { display: grid; place-items: center; padding: 24px; background: #f5f5f2; }
+    .s2 .s1-card { width: 360px; }
+
+    /* ========== 3 · 左 brand 块 (海军蓝大块) + 右卡片 ========== */
+    .s3 { display: grid; grid-template-columns: 1fr 1fr; height: 100%; }
+    .s3-left {
+      background: linear-gradient(135deg, #1e3a5f 0%, #0f1f33 100%);
+      color: #fff;
+      padding: 32px 28px;
+      display: grid;
+      align-content: space-between;
+      position: relative;
+      overflow: hidden;
+    }
+    .s3-left::after {
+      content: "";
+      position: absolute;
+      bottom: -50px; right: -50px;
+      width: 200px; height: 200px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0,214,185,.12) 0%, transparent 70%);
+    }
+    .s3-logo {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 12px; font-weight: 800;
+      position: relative; z-index: 1;
+    }
+    .s3-logo-mark {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: rgba(0,214,185,.18);
+      display: grid; place-items: center;
+      color: #00d6b9; font-weight: 900;
+    }
+    .s3-h3 {
+      margin: 0 0 10px;
+      font-size: 1.6rem; font-weight: 800; line-height: 1.3;
+      position: relative; z-index: 1;
+    }
+    .s3-p {
+      margin: 0;
+      color: rgba(255,255,255,.7);
+      font-size: .8rem; line-height: 1.65;
+      position: relative; z-index: 1;
+    }
+    .s3-foot {
+      font-size: .68rem; color: rgba(255,255,255,.4);
+      position: relative; z-index: 1;
+    }
+    .s3-right {
+      display: grid; place-items: center;
+      padding: 24px;
+      background: #f5f5f2;
+    }
+
+    /* ========== 4 · 大白卡 + 顶部 navy 装饰条 ========== */
+    .s4 { background: #f5f5f2; padding: 32px 24px; }
+    .s4-card {
+      width: 380px;
+      background: #fff;
+      border: 1px solid rgba(30,58,95,.1);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 12px 32px rgba(30,58,95,.08);
+    }
+    .s4-bar {
+      height: 4px;
+      background: linear-gradient(90deg, #1e3a5f 0%, #e8685a 100%);
+    }
+    .s4-body { padding: 28px 32px 26px; }
+    .s4-tag {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 999px;
+      background: rgba(0,214,185,.14);
+      color: #008874;
+      font-size: .65rem;
+      font-weight: 800;
+      letter-spacing: .06em;
+      margin-bottom: 12px;
+    }
+    .s4-card h2 {
+      margin: 0 0 4px;
+      font-size: 1.2rem;
+      font-weight: 800;
+      color: #1e3a5f;
+    }
+
+    /* ========== 5 · split - 左表单 (短) + 右插画/装饰 (长) ========== */
+    .s5 { display: grid; grid-template-columns: 380px 1fr; height: 100%; }
+    .s5-left {
+      display: grid; align-content: center;
+      padding: 40px 32px;
+      background: #fff;
+      border-right: 1px solid rgba(30,58,95,.08);
+    }
+    .s5-right {
+      background: linear-gradient(135deg, #1e3a5f 0%, #2a4a73 50%, #0f1f33 100%);
+      position: relative;
+      overflow: hidden;
+    }
+    .s5-right::before {
+      content: "DATA";
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%) skewX(-6deg);
+      font-size: 7rem;
+      font-weight: 900;
+      font-style: italic;
+      color: rgba(232,104,90,.15);
+      letter-spacing: .1em;
+      white-space: nowrap;
+    }
+    .s5-right::after {
+      content: "SENSE";
+      position: absolute;
+      top: 60%; left: 55%;
+      transform: translate(-50%, -50%);
+      font-size: 4rem;
+      font-weight: 900;
+      color: rgba(255,255,255,.08);
+      letter-spacing: .14em;
+    }
+    .s5-card {
+      width: 100%;
+    }
+    .s5 .s1-card { width: 100%; box-shadow: none; border: 0; padding: 0; }
+  </style>
+</head>
+<body>
+  <h1>登录页 · 5 个风格 demo（搭边版）</h1>
+  <p class="sub">5 种都用了 Agentic GenBI 现有配色（navy + coral + 米色）+ 飞书绿点缀，按钮用 navy 不抢戏。挑一个最贴产品气质的。</p>
+
+  <!-- ========== 1 · 居中单卡 ========== -->
+  <div class="demo">
+    <div class="demo-tag"><strong>1 · 居中单卡</strong><span class="pill">最简</span></div>
+    <div class="stage s1">
+      <div class="s1-card">
+        <p class="slogan">MAKE <span class="connector">DATA</span> SENSE</p>
+        <h2>登录</h2>
+        <p class="sub-title">使用飞书账号继续你的数据分析工作。</p>
+        <button class="feishu-btn" type="button">
+          <svg class="feishu-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M20.5 11.4c0-3.6-3.6-6.5-8-6.5s-8 2.9-8 6.5c0 3.2 2.8 5.9 6.6 6.4-.1.5-.4 1.7-.4 2 .1.4.3.4.5.3.2-.1 2.3-1.5 3.2-2.1 2-.2 3.7-1 5-2.2 1.4-1.3 2.1-2.9 2.1-4.4zm-9.7 2.5h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm5.3 0h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm-3.9-2.7c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9zm3.2 0c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9z"/></svg>
+          飞书登录
+        </button>
+        <p class="legal">登录即表示同意 <a href="#">服务条款</a> 和 <a href="#">隐私政策</a></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 2 · 顶部 brand + 卡片 (跟 topbar 延续) ========== -->
+  <div class="demo">
+    <div class="demo-tag"><strong>2 · 顶部 brand + 卡片</strong><span class="pill">延续 topbar</span></div>
+    <div class="stage s2">
+      <div class="s2-topbar">
+        <div class="s2-logo">
+          <div class="s2-logo-mark">G</div>
+          <span>AGENTIC GENBI</span>
+        </div>
+        <div class="s2-slogan">
+          <span>MAKE</span><span class="connector">DATA</span><span class="emph">SENSE</span>
+        </div>
+        <div class="s2-topbar-right"></div>
+      </div>
+      <div class="s2-body">
+        <div class="s1-card">
+          <h2>欢迎回来</h2>
+          <p class="sub-title">使用飞书账号继续你的数据分析工作。</p>
+          <button class="feishu-btn" type="button">
+            <svg class="feishu-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M20.5 11.4c0-3.6-3.6-6.5-8-6.5s-8 2.9-8 6.5c0 3.2 2.8 5.9 6.6 6.4-.1.5-.4 1.7-.4 2 .1.4.3.4.5.3.2-.1 2.3-1.5 3.2-2.1 2-.2 3.7-1 5-2.2 1.4-1.3 2.1-2.9 2.1-4.4zm-9.7 2.5h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm5.3 0h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm-3.9-2.7c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9zm3.2 0c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9z"/></svg>
+            飞书登录
+          </button>
+          <p class="legal">登录即表示同意 <a href="#">服务条款</a></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 3 · 左 brand 块 + 右卡片 ========== -->
+  <div class="demo">
+    <div class="demo-tag"><strong>3 · 左 navy 块 + 右卡片</strong><span class="pill">沉浸</span></div>
+    <div class="stage s3">
+      <div class="s3-left">
+        <div class="s3-logo">
+          <div class="s3-logo-mark">G</div>
+          <span>AGENTIC GENBI</span>
+        </div>
+        <div>
+          <h3 class="s3-h3">让数据<br/>自己说话</h3>
+          <p class="s3-p">使用飞书账号登录，与你的团队共享数据洞察、知识沉淀与探索结果。</p>
+        </div>
+        <div class="s3-foot">© 2026 Agentic GenBI</div>
+      </div>
+      <div class="s3-right">
+        <div class="s1-card">
+          <p class="slogan">MAKE <span class="connector">DATA</span> SENSE</p>
+          <h2>登录</h2>
+          <p class="sub-title">使用飞书账号继续</p>
+          <button class="feishu-btn" type="button">
+            <svg class="feishu-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M20.5 11.4c0-3.6-3.6-6.5-8-6.5s-8 2.9-8 6.5c0 3.2 2.8 5.9 6.6 6.4-.1.5-.4 1.7-.4 2 .1.4.3.4.5.3.2-.1 2.3-1.5 3.2-2.1 2-.2 3.7-1 5-2.2 1.4-1.3 2.1-2.9 2.1-4.4zm-9.7 2.5h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm5.3 0h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm-3.9-2.7c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9zm3.2 0c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9z"/></svg>
+            飞书登录
+          </button>
+          <p class="legal">登录即表示同意 <a href="#">服务条款</a></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 4 · 大白卡 + 顶部 navy→coral 装饰条 ========== -->
+  <div class="demo">
+    <div class="demo-tag"><strong>4 · 装饰条卡片</strong><span class="pill">细节感</span></div>
+    <div class="stage s1">
+      <div class="s4-card">
+        <div class="s4-bar"></div>
+        <div class="s4-body">
+          <span class="s4-tag">飞书登录</span>
+          <h2>欢迎回来</h2>
+          <p class="sub-title">使用飞书账号继续你的数据分析工作。</p>
+          <button class="feishu-btn" type="button">
+            <svg class="feishu-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M20.5 11.4c0-3.6-3.6-6.5-8-6.5s-8 2.9-8 6.5c0 3.2 2.8 5.9 6.6 6.4-.1.5-.4 1.7-.4 2 .1.4.3.4.5.3.2-.1 2.3-1.5 3.2-2.1 2-.2 3.7-1 5-2.2 1.4-1.3 2.1-2.9 2.1-4.4zm-9.7 2.5h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm5.3 0h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm-3.9-2.7c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9zm3.2 0c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9z"/></svg>
+            飞书登录
+          </button>
+          <p class="legal">登录即表示同意 <a href="#">服务条款</a> 和 <a href="#">隐私政策</a></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 5 · split - 左短表单 + 右 navy 装饰 ========== -->
+  <div class="demo">
+    <div class="demo-tag"><strong>5 · split - 表单 + 装饰</strong><span class="pill">高级</span></div>
+    <div class="stage s5">
+      <div class="s5-left">
+        <div class="s5-card">
+          <p class="slogan">MAKE <span class="connector">DATA</span> SENSE</p>
+          <h2>登录</h2>
+          <p class="sub-title">使用飞书账号继续</p>
+          <button class="feishu-btn" type="button">
+            <svg class="feishu-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M20.5 11.4c0-3.6-3.6-6.5-8-6.5s-8 2.9-8 6.5c0 3.2 2.8 5.9 6.6 6.4-.1.5-.4 1.7-.4 2 .1.4.3.4.5.3.2-.1 2.3-1.5 3.2-2.1 2-.2 3.7-1 5-2.2 1.4-1.3 2.1-2.9 2.1-4.4zm-9.7 2.5h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm5.3 0h-1.4c-.5 0-.9-.4-.9-.9s.4-.9.9-.9h1.4c.5 0 .9.4.9.9s-.4.9-.9.9zm-3.9-2.7c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9zm3.2 0c-.5 0-.9-.4-.9-.9s.4-.9.9-.9.9.4.9.9-.4.9-.9.9z"/></svg>
+            飞书登录
+          </button>
+          <p class="legal">登录即表示同意 <a href="#">服务条款</a></p>
+        </div>
+      </div>
+      <div class="s5-right"></div>
+    </div>
+  </div>
+
+</body>
+</html>
