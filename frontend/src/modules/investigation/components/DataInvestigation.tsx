@@ -990,7 +990,7 @@ export function KnowledgeExploration() {
   } = useExploration();
   const [draft, setDraft] = useState("");
   const activeStopTokenRef = useRef<{ stopped: boolean } | null>(null);
-  const messagesRef = useRef<HTMLDivElement | null>(null);
+  const messagesRef = useRef<HTMLOListElement | null>(null);
   const visibleMessages = useMemo(() => {
     if (!selectedExploration) return [];
     return selectedExploration.messages.filter(shouldShowExplorationMessage);
@@ -1153,14 +1153,25 @@ export function KnowledgeExploration() {
                   )}
                   {shouldRenderConversation && (
                     <>
-                      <div className="disc-messages" ref={isActive ? messagesRef : null}>
+                      <ol className="disc-messages" ref={isActive ? messagesRef : null}>
                         {itemMessages.map((message) => (
-                          <div key={message.id} className={`disc-msg ${message.role}`}>
-                            <span className="disc-av" aria-hidden="true">
-                              {message.role === "user" ? "J" : "A"}
+                          <li key={message.id} className={`exploration-message ${message.role}`}>
+                            <span className={`message-avatar ${message.role === "user" ? "user-avatar" : ""}`} aria-hidden="true">
+                              {message.role === "user" ? (
+                                "J"
+                              ) : (
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                                  <rect x="4" y="7" width="16" height="12" rx="2" />
+                                  <path d="M12 3v4" />
+                                  <circle cx="9" cy="13" r="0.6" fill="currentColor" />
+                                  <circle cx="15" cy="13" r="0.6" fill="currentColor" />
+                                  <path d="M2 12v3" />
+                                  <path d="M22 12v3" />
+                                </svg>
+                              )}
                             </span>
-                            <div className={`disc-bubble ${message.title ? messageTitleClass(message.title) : ""}`}>
-                              {message.title && <strong>{message.title}</strong>}
+                            <div className={`message-bubble ${message.title ? messageTitleClass(message.title) : ""}`}>
+                              {message.title && <strong className={`message-title ${messageTitleClass(message.title)}`}>{message.title}</strong>}
                               <div className="message-body-markdown">
                                 <MarkdownContent>{message.body}</MarkdownContent>
                               </div>
@@ -1185,24 +1196,31 @@ export function KnowledgeExploration() {
                                 </button>
                               )}
                             </div>
-                          </div>
+                          </li>
                         ))}
                         {showExplorationWaiting && (
-                          <div className="disc-msg agent exploration-thinking" aria-live="polite">
-                            <span className="disc-av" aria-hidden="true">
-                              A
+                          <li className="exploration-message agent exploration-thinking" aria-live="polite">
+                            <span className="message-avatar" aria-hidden="true">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                                <rect x="4" y="7" width="16" height="12" rx="2" />
+                                <path d="M12 3v4" />
+                                <circle cx="9" cy="13" r="0.6" fill="currentColor" />
+                                <circle cx="15" cy="13" r="0.6" fill="currentColor" />
+                                <path d="M2 12v3" />
+                                <path d="M22 12v3" />
+                              </svg>
                             </span>
-                            <div className="disc-bubble">
-                              <strong>等待 Agent 返回</strong>
+                            <div className="message-bubble">
+                              <strong className="message-title is-progress">等待 Agent 返回</strong>
                               <div className="message-body-markdown">
                                 <p>Agent 正在调用工具或等待模型输出。</p>
                                 <p className="thinking-note">{waitingContext}</p>
                               </div>
                               <span className="thinking-status-line" aria-hidden="true" />
                             </div>
-                          </div>
+                          </li>
                         )}
-                      </div>
+                      </ol>
 
                       <form className="exploration-composer" onSubmit={submitExploration}>
                         <textarea

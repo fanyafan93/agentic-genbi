@@ -734,13 +734,17 @@ img.user-chip-avatar { object-fit: cover; }
   transform: translateZ(0);
 }
 .disc-card .disc-messages {
-  display: flex; flex-direction: column;
-  flex: 1; overflow-y: auto;
-  margin-top: 16px; padding: 12px;
-  background: rgba(245,245,242,.6);
-  border-radius: 10px;
-  border: 1px solid rgba(30,58,95,.08);
-  gap: 8px;
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-height: 0;
+  margin: 16px 0 0;
+  padding: 22px 24px;
+  overflow-y: auto;
+  list-style: none;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   min-height: 0;
 }
 .disc-card .disc-msg {

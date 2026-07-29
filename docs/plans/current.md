@@ -32,6 +32,7 @@
 - 会话卡片舞台继续收紧横向空隙：主卡片宽度提高到 `min(1080px, 86%)`，卡片内部左右 padding 降低到最大 `46px`，保留少量背景留白但减少内容压缩。
 - 探索会话前端类型新增 `createdAt` 和 `lastMessageAt`；后端运行摘要和事件流映射会保留创建时间、最后会话时间，并显示到分钟。
 - “我的探索”左侧列表按最后会话时间倒序展示，列表时间显示最后会话时间；卡片详情头部显示创建时间。
+- 会话卡片内部消息展示改回主分支的探索消息样式：使用 `exploration-message`、`message-avatar`、`message-bubble` 和 `message-title` 结构；外层电影卡片堆保持不变。
 - 探索保存知识时默认写入治理元数据：`type=verified_conclusion`、`status=pending`、`visibility=team`、`tags=["探索沉淀"]`、`agent_visible=true`。
 - 后端 `KnowledgeStore` 新增知识搜索、更新和标签汇总能力；JSONL 测试存储与 Postgres 存储保持同一接口。
 - 后端 `/api/knowledge` 支持 `q/type/status/tag/owner/limit` 筛选；新增 `PATCH /api/knowledge/{id}` 和 `GET /api/knowledge/tags`。
@@ -50,6 +51,7 @@
 - `cmd /c npm run test -- knowledge-base investigation-events`：3/4 卡片舞台与卡片堆外露调整后，39 个前端相关测试通过。
 - `cmd /c npm run test -- knowledge-base investigation-events`：新建探索草稿卡片与轻量切换渲染调整后，39 个前端相关测试通过。
 - `cmd /c npm run test`：会话时间与卡片间距调整后，4 个前端测试文件、42 个测试通过。
+- `cmd /c npm run test`：卡片内部消息展示改回主分支样式后，4 个前端测试文件、42 个测试通过。
 - `cmd /c npm run test`：4 个前端测试文件、42 个测试通过。
 - `cmd /c npm run build`：方案 A 切换动效落地后，Next.js 构建通过。
 - `cmd /c npm run build`：方案 A 两段式切换调整后，Next.js 构建通过。
@@ -59,6 +61,7 @@
 - `cmd /c npm run build`：3/4 卡片舞台与卡片堆外露调整后，Next.js 构建通过。
 - `cmd /c npm run build`：新建探索草稿卡片与轻量切换渲染调整后，Next.js 构建通过。
 - `cmd /c npm run build`：会话时间与卡片间距调整后，Next.js 构建通过。
+- `cmd /c npm run build`：卡片内部消息展示改回主分支样式后，Next.js 构建通过。
 - `docker compose restart frontend`：前端容器 `agentic-genbi-frontend-1` 已重启并重新启动。
 - `docker compose config --quiet`：Compose 配置可解析；出现 Docker 用户级配置读取权限警告 `C:\Users\Jason\.docker\config.json: Access is denied`，但命令返回成功。
 - Chrome DevTools MCP 可打开 `http://192.168.101.12:3000/`，但当前 Chrome 未登录，只验证到登录页，未完成登录态下的视觉检查。
