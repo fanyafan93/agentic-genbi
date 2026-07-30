@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAgentClient } from "@/modules/analysis/agentClients";
-import type { AgentEvent, AgentInput } from "@/modules/analysis/agentClients";
+import type { AgentEvent, AgentInput, AnalysisMode } from "@/modules/analysis/agentClients";
+import type { ArtifactFolder, ArtifactKind } from "../types/artifact";
 
 export type FlowRole = "user" | "agent" | "ask";
 
@@ -13,25 +14,37 @@ export type FlowNode =
 
 export const STEP_INITIAL = ["识别业务口径", "查询可用数据表", "生成并校验 SQL", "整理图表与结论"];
 
-export function useFlow(sessionKey: string | null, initial: FlowNode[] = []) {
+export function useFlow(conversationKey: string | null, initial: FlowNode[] = []) {
   const agent = useMemo(() => getAgentClient(), []);
-  const [runId, setRunId] = useState<string | null>(sessionKey);
+  const [runId, setRunId] = useState<string | null>(conversationKey);
+  const [conversationId, setConversationId] = useState<string | null>(conversationKey);
   const [nodes, setNodes] = useState<FlowNode[]>(initial);
+  const [artifacts, setArtifacts] = useState<ArtifactFolder[]>([]);
   const [running, setRunning] = useState(false);
 
   useEffect(() => {
     cancelled = false;
-    setRunId(sessionKey);
+    setRunId(conversationKey);
+    setConversationId(conversationKey);
     setNodes([...initial]);
+    setArtifacts([]);
     setRunning(false);
     return () => { cancelled = true; };
-  }, [sessionKey, initial]);
+  }, [conversationKey, initial]);
 
   const applyEvent = useCallback((event: AgentEvent, currentNodes: FlowNode[]): FlowNode[] => {
-    if (event.type === "session-init") {
+    if (event.type === "conversation-init") {
       setRunId(event.runId);
+      setConversationId(event.conversationId ?? event.runId);
       setNodes([]);
+      setArtifacts([]);
       return [];
+    }
+
+    if (event.type === "run-init") {
+      setRunId(event.runId);
+      if (event.conversationId) setConversationId(event.conversationId);
+      return currentNodes;
     }
 
     if (event.type === "user") {
@@ -95,6 +108,20 @@ export function useFlow(sessionKey: string | null, initial: FlowNode[] = []) {
       return next;
     }
 
+    if (event.type === "artifact") {
+      setArtifacts((folders) => upsertArtifact(folders, event.path, event.kind));
+      return currentNodes;
+    }
+
+    if (event.type === "error") {
+      const next: FlowNode[] = [
+        ...currentNodes,
+        { id: `agent-error-${Date.now()}`, role: "agent", content: event.message, mode: "replace" },
+      ];
+      setNodes(next);
+      return next;
+    }
+
     return currentNodes;
   }, []);
 
@@ -112,11 +139,33 @@ export function useFlow(sessionKey: string | null, initial: FlowNode[] = []) {
     }
   }, [agent, applyEvent, nodes]);
 
-  const start = useCallback((question?: string) => consume({ kind: "start", question }), [consume]);
-  const send = useCallback((content: string) => consume({ kind: "message", content }), [consume]);
-  const reply = useCallback((optionId: string) => consume({ kind: "reply", optionId }), [consume]);
+  const start = useCallback((question?: string, analysisMode?: AnalysisMode) => consume({ kind: "start", question, analysisMode }), [consume]);
+  const send = useCallback((content: string, analysisMode?: AnalysisMode) => consume({ kind: "message", content, analysisMode }), [consume]);
+  const reply = useCallback((optionId: string, analysisMode?: AnalysisMode) => consume({ kind: "reply", optionId, analysisMode }), [consume]);
 
-  return { runId, nodes, running, start, send, reply };
+  return { runId, conversationId, nodes, artifacts, running, start, send, reply };
 }
 
 let cancelled = false;
+
+function upsertArtifact(folders: ArtifactFolder[], path: string, kind: ArtifactKind): ArtifactFolder[] {
+  const [folderName = "assets", fileName = path] = path.split("/");
+  const fileId = path.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const next = folders.map((folder) => ({
+    ...folder,
+    children: folder.children.map((file) => ({ ...file })),
+  }));
+  let folder = next.find((item) => item.id === folderName);
+  if (!folder) {
+    folder = { id: folderName, name: folderName, children: [] };
+    next.push(folder);
+  }
+  const existing = folder.children.findIndex((file) => file.id === fileId);
+  const file = { id: fileId, name: fileName, kind };
+  if (existing >= 0) {
+    folder.children[existing] = file;
+  } else {
+    folder.children.push(file);
+  }
+  return next;
+}

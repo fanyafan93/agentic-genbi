@@ -1,5 +1,8 @@
+export type AnalysisMode = "quick" | "deep";
+
 export type AgentEvent =
-  | { type: "session-init"; runId: string; question?: string }
+  | { type: "conversation-init"; runId: string; conversationId?: string; question?: string }
+  | { type: "run-init"; runId: string; conversationId?: string }
   | { type: "user"; nodeId: string; content: string }
   | { type: "agent"; nodeId: string; content: string; mode?: "delta" | "replace" }
   | { type: "step"; label: string; state: "queued" | "running" | "done"; nodeId?: string }
@@ -10,9 +13,9 @@ export type AgentEvent =
   | { type: "done" };
 
 export type AgentInput =
-  | { kind: "start"; suggestionId?: string; question?: string }
-  | { kind: "message"; content: string }
-  | { kind: "reply"; optionId: string }
+  | { kind: "start"; suggestionId?: string; question?: string; analysisMode?: AnalysisMode }
+  | { kind: "message"; content: string; analysisMode?: AnalysisMode }
+  | { kind: "reply"; optionId: string; analysisMode?: AnalysisMode }
   | { kind: "reset" };
 
 export interface AgentClient {

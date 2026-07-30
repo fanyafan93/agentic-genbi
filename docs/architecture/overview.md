@@ -2,10 +2,12 @@
 
 ## 当前实现
 
-当前仓库是前端 only、mock-first 的 Next.js 原型。
+当前仓库是前端优先、mock-first 演进中的 Next.js 原型；知识探索和分析任务已开始按相同后端事件边界替换局部 mock 能力。
 
 - `frontend/src/app/page.tsx` 挂载分析工作台。
-- `modules/analysis` 提供会话 UI、mock Agent 客户端、Run 事件折叠、Artifact mock 与图表展示。
+- `modules/analysis` 提供分析任务 UI、mock Agent 客户端、可选真实后端 Agent 客户端、Run 事件折叠、分析资产库 mock 与图表展示；当前前端已支持 `analysisMode: "quick" | "deep"` 的快速分析/深度分析模式。
+- `backend/analysis/run_service.py` 提供分析任务首个真实后端 Run 服务：按统一事件对象产生 `run.created`、`analysis.problem.classified`、`analysis.retrieval.plan`、`agent.message.created`、`agent.question.requested`、`artifact.created/updated` 和 `run.completed`；该服务复用现有 Run trace/event store 做审计与离线存储。未配置 LLM 时使用确定性后端编排，配置 `GENBI_ANALYSIS_RUNTIME=openai` 或 `llm` 后可调用 OpenAI Agents SDK 分析 Runner。
+- `backend/analysis/agent_runner.py` 提供分析任务 OpenAI Agents SDK 适配层：定义 Analysis Task Agent 提示词、`GENBI_ANALYSIS_MODEL` / `GENBI_ANALYSIS_MAX_TURNS` 配置、OpenAI-compatible provider 复用和 SDK stream 事件标准化。当前分析 Runner 先产出 Agent 回复；真实语义模型工具、SQL 工具和 Artifact 持久化工具仍待接入。
 - `modules/investigation` 提供知识探索 UI、领域类型、探索过程事件映射和运行环境状态提示；提交探索问题时调用配置的后端 API，服务未配置或失败时明确显示后端不可用，不再模拟探索结果。
 - `modules/knowledge-base` 提供知识库 UI、领域类型、mock 数据、筛选/映射逻辑和知识库 API 客户端；当前挂载在知识探索的“知识库”tab 中。
 - `ChartSpec -> ECharts` 是当前图表渲染链路。
@@ -16,7 +18,7 @@
 - `backend/exploration/run_trace_store.py` 和 `backend/exploration/run_event_store.py` 保留最小本地 JSONL 存储作为测试与离线开发存储；Docker 真实后端默认通过 `backend/persistence/postgres_stores.py` 把探索 Run trace、Run events 和知识沉淀写入 PostgreSQL。
 - `backend/exploration/agent_runner.py` 提供 `LLMAgentRunner` 适配器；通过 `GENBI_EXPLORATION_RUNTIME=openai` 或 `llm` 启用，默认 provider 是 OpenAI，也可用 `GENBI_LLM_PROVIDER=minimax` 走 OpenAI-compatible endpoint；支持 `GENBI_EXPLORATION_MODEL`、`GENBI_EXPLORATION_MAX_TURNS` 和 `Runner.run_streamed()` 事件实时转发。
 - `backend/config/env.py` 负责加载项目 `.env` 或 `GENBI_ENV_FILE` 指向的 env 文件；LLM provider key、模型配置和 MySQL 连接信息均从 env 读取。MySQL 可使用 `GENBI_DB_*` 专用字段，也可从 `DATABASE_URL=mysql+pymysql://...` 解析，专用字段优先；`doctor` 用于确认 LLM Runner、MySQL 只读连接、资源库、前端 API 地址和成本估算配置是否就绪。
-- `backend/api/exploration_api.py` 提供 FastAPI 入口，暴露健康检查、运行环境状态、探索过程/SSE、兼容 Run API、资源库状态/搜索/详情/重建索引、知识列表/筛选/保存/更新/删除/清空/标签接口；开发期允许 `localhost:3000`、`127.0.0.1:3000` 以及环境变量声明的前端来源跨域访问，启动前需要安装 `backend/requirements.txt`。
+- `backend/api/exploration_api.py` 提供 FastAPI 入口，暴露健康检查、运行环境状态、分析任务 Run API/SSE、探索过程/SSE、兼容 Run API、资源库状态/搜索/详情/重建索引、知识列表/筛选/保存/更新/删除/清空/标签接口；开发期允许 `localhost:3000`、`127.0.0.1:3000` 以及环境变量声明的前端来源跨域访问，启动前需要安装 `backend/requirements.txt`。
 - 前端已接入 Auth.js v5：`frontend/src/auth.ts` 使用自定义飞书 OAuth provider，读取 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 和 `AUTH_*` 环境变量；`frontend/src/app/api/auth/[...nextauth]/route.ts` 暴露 Auth.js 路由；首页未登录时展示飞书登录页，登录后进入工作台。
 - Auth 状态使用 Prisma + PostgreSQL DB session：`frontend/prisma/schema.prisma` 定义 Auth.js `User`、`Account`、`Session` 和 `VerificationToken` 表，迁移文件位于 `frontend/prisma/migrations/`。`User.role` 先保留为最小角色字段，默认 `user`。
 - 知识探索前端会从 Auth session 取得 `session.user.id`，请求探索任务列表与创建过程消息时传递 `user_id`；后端探索列表 API 支持按 `user_id` 过滤，用于当前 demo 的多用户探索列表隔离。
@@ -47,9 +49,9 @@ flowchart LR
 
 ## 前端架构
 
-一级导航遵循产品入口：`workbench`、`conversations`、`knowledge-exploration`、`agent-center`、`system`。横向能力不强行变成一级导航：
+一级导航遵循产品入口：`workbench`、`analysis-tasks`、`knowledge-exploration`、`agent-center`、`system`。横向能力不强行变成一级导航：
 
-- `Artifact Studio` 从会话右侧资产栏和 Artifact 详情页进入，提供预览、编辑、版本、依赖、引用和自动化入口。
+- `Artifact Studio` 从分析任务右侧分析资产库和 Artifact 详情页进入，提供预览、编辑、版本、依赖、引用和自动化入口。
 - `Automation Studio` 是 Artifact 或 Agent 的配置与运行历史视图。
 - `Agent Studio` 是 Agent 中心内从 Run / Artifact 提炼、编辑、测试和发布 Agent 的工作区。
 
@@ -84,9 +86,13 @@ flowchart LR
 
 知识探索 Agent 从 OpenAI Agents SDK 适配层起步：`build_data_exploration_agent` 使用中文系统提示词约束探索顺序、证据引用、追问边界和安全边界，并通过 `function_tool` 注册受控工具。`LLMAgentRunner` 可调用真实 `Runner.run()`，也可把 `Runner.run_streamed()` 的 SDK 事件通过 async iterator 实时转换为现有 Run 事件；默认 provider 使用 OpenAI，MiniMax 先按 OpenAI-compatible Chat Completions model 接入，后续 provider 不应重写探索业务逻辑。一次性 API 仍可收集完整事件后返回。SDK raw event 中的 token usage 会被保留到 Run 事件 payload，供追踪记录汇总。Agent 当前只负责探索和沉淀知识，不直接生成 Artifact 或可复用 Agent。
 
-底层 `Conversation` 是通用多轮交互能力，不直接作为所有模块的 UI 名称。知识探索模块的业务对象叫“探索任务”，主区展示“探索过程”：一个探索过程有连续消息历史，用户继续发消息时，后端按同一个 `conversation_id` 读取历史事件，把上下文交给同一个知识探索 Agent，并允许 Agent 继续调用同一组受控工具回答。新建探索任务会生成独立 `conv_*`，每次用户提问或追问都会生成新的内部 `run_*`；一个 `conv_*` 可挂多个 `run_*`。`run_*` 只作为内部单次执行审计 ID 保留，用来记录工具调用、模型事件、token、错误和调试追踪，不作为前端主标题展示。Docker 真实后端默认使用 PostgreSQL 持久化：`exploration_run_traces` 保存单次执行汇总，`exploration_run_events` 保存完整事件流，`verified_knowledge` 保存已沉淀知识。继续追问仍记录为新的可审计执行记录，但通过 `conversation_id` 归属到同一探索过程；前端只发送用户本轮真实输入，不再拼接历史 prompt。没有真实 Agent Runner 时后端直接返回失败，不再走本地资源检索模拟。`RunTraceStore`、`RunEventStore` 和 `KnowledgeStore` 的 JSONL 实现仍作为测试与离线开发存储保留。已有 `.resource-index/*.jsonl` 可通过 `python -m backend.scripts.migrate_file_stores_to_postgres` 迁入 Postgres。成本估算依赖 `GENBI_MODEL_INPUT_USD_PER_1M` 和 `GENBI_MODEL_OUTPUT_USD_PER_1M`，没有 token usage 或价格配置时成本字段保持空值。
+底层 `Conversation` 是通用多轮交互能力，不直接作为所有模块的 UI 名称。分析任务和知识探索任务都可以复用同一个 Conversation / Run / Message 基座，区别在于绑定的 Agent、可用工具、上下文和资产沉淀目标不同。知识探索模块的业务对象叫“探索任务”，主区展示“探索过程”：一个探索过程有连续消息历史，用户继续发消息时，后端按同一个 `conversation_id` 读取历史事件，把上下文交给同一个知识探索 Agent，并允许 Agent 继续调用同一组受控工具回答。新建探索任务会生成独立 `conv_*`，每次用户提问或追问都会生成新的内部 `run_*`；一个 `conv_*` 可挂多个 `run_*`。`run_*` 只作为内部单次执行审计 ID 保留，用来记录工具调用、模型事件、token、错误和调试追踪，不作为前端主标题展示。Docker 真实后端默认使用 PostgreSQL 持久化：`exploration_run_traces` 保存单次执行汇总，`exploration_run_events` 保存完整事件流，`verified_knowledge` 保存已沉淀知识。继续追问仍记录为新的可审计执行记录，但通过 `conversation_id` 归属到同一探索过程；前端只发送用户本轮真实输入，不再拼接历史 prompt。没有真实 Agent Runner 时后端直接返回失败，不再走本地资源检索模拟。`RunTraceStore`、`RunEventStore` 和 `KnowledgeStore` 的 JSONL 实现仍作为测试与离线开发存储保留。已有 `.resource-index/*.jsonl` 可通过 `python -m backend.scripts.migrate_file_stores_to_postgres` 迁入 Postgres。成本估算依赖 `GENBI_MODEL_INPUT_USD_PER_1M` 和 `GENBI_MODEL_OUTPUT_USD_PER_1M`，没有 token usage 或价格配置时成本字段保持空值。
 
-现有 `modules/analysis/components/AnalysisWorkspace.tsx` 继续作为会话 Demo 的组合容器。新增工作台、知识探索、Agent 中心、系统或独立 Artifact 能力时，应在对应领域目录创建组件、类型、mock 和测试；不要持续向该容器堆叠领域逻辑。
+现有 `modules/analysis/components/AnalysisWorkspace.tsx` 继续作为分析任务 Demo 的组合容器。当前 mock 事件使用通用 `conversation-init` 表示底层会话初始化；UI 上的“分析任务”是该会话基座在分析场景里的业务投影。新增工作台、知识探索、Agent 中心、系统或独立 Artifact 能力时，应在对应领域目录创建组件、类型、mock 和测试；不要持续向该容器堆叠领域逻辑。
+
+分析任务前端当前默认仍采用虚拟后端事件推进持续工作流，也可设置 `NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME=backend` 和 `NEXT_PUBLIC_GENBI_API_BASE_URL` 切换到真实分析任务后端。真实后端首个切片提供 HTTP Run API 和 SSE 事件流：快速分析少追问并直接生成报告、SQL、图表配置和假设说明等草稿资产；深度分析先展示问题分类、报表级语义模型、MySQL/Doris 元数据、金蝶字典、ETL 血缘和知识库经验检索计划，再追问用户补齐口径。用户继续发消息时，后端会产生资产更新事件，并可按用户要求生成 `SKILL.md` 或 Python 分析脚本资产。配置 `GENBI_ANALYSIS_RUNTIME=openai` 或 `llm` 时，分析任务后端会把问题、分析模式、问题类型和候选语义模型交给 OpenAI Agents SDK Analysis Task Agent，并把 SDK stream 事件继续转成现有 Run 事件。当前还没有接真实语义模型工具、真实 SQL 生成或 Artifact 持久化；后续接工具时应复用同一 `AnalysisMode`、`AgentEvent.artifact` 和底层 Conversation/Run/Message 语义，不把浏览器端模式选择当作权限或 SQL 安全边界。
+
+分析资产库当前有两种前端视角：任务内文件树/预览区，以及共享资产库 mock 列表。右侧 `AnalysisAssetLibrary` 通过局部视图切换区分“当前任务资产”和“共享资产库”：前者展示本任务生成的草稿、保存请求和文件树，后者展示可复用资产索引和回到来源任务继续的入口。共享列表消费前端领域契约 `AnalysisAssetLibraryEntry`，当前条目仍由 `buildMockAnalysisAssetLibraryEntries` 从当前任务生成的 asset cards 派生，用于验证保存、发布、打开资产和回到原分析任务继续的交互。`frontend/src/modules/analysis/api/analysis-asset-library-service.ts` 提供前端 service facade，暴露 `listEntries`、`saveAsset` 和 `reopenEntry`，让 UI 先依赖服务边界而不是直接依赖 mock 构造细节。保存动作通过 service 构造 `AnalysisAssetSaveRequest`，并在 UI 中显示保存 payload；当 `NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME=backend` 且 `NEXT_PUBLIC_GENBI_API_BASE_URL` 已配置时，前端会把同一个保存请求提交到 `POST /api/analysis/assets`。后端当前提供最小开发期 JSONL 资产索引 `AnalysisAssetStore` 和 `GET /api/analysis/assets`、`GET /api/analysis/assets/{asset_id}`、`POST /api/analysis/assets`、`POST /api/analysis/assets/{asset_id}/reopen`，字段包含 `assetId`、`artifactVersionId`、`sourceTaskId`、`sourceConversationId`、`sourceRunId`、`assetType`、`visibility`、`status`、`latestVersion` 和 `reopenContext`。这只是最小持久化契约，不代表完整跨用户共享、权限、审批、版本治理或真实 Artifact 对象存储已经完成；前端不得用本地保存状态冒充真实共享资产或权限判断。
 
 ## 领域与事件契约
 
@@ -126,6 +132,17 @@ run.failed
 ```
 
 事件、对象和错误必须有 TypeScript schema；真实 API 建立后用 OpenAPI 与对应 schema 校验保持一致。
+
+### Skill 发布契约方向
+
+分析任务把一次成功分析沉淀为 `SKILL.md` 时，真实后端不应只保存一份 Markdown 文件，而应保存可治理的发布对象：
+
+- `SkillDraft`：草稿章节、适用场景、需要确认项、推荐步骤、作者、更新时间和草稿版本。
+- `SkillPublication`：发布状态、可见范围、目标 Agent Center 条目、发布版本、审批状态和审批记录。
+- `SkillLineage`：来源分析任务 ID、来源 Conversation ID、来源 Run ID、引用的 Artifact Version ID、语义模型引用和知识库引用。
+- `SkillApproval`：业务口径确认、适用场景确认、复用权限确认、审批人、审批时间和撤回/废弃记录。
+
+当前前端只提供本地 mock：保存草稿、勾选发布准备项、模拟发布和展示元数据预览。后续真实 API 需要把这些字段纳入持久化、权限校验、审计和 Agent Center 注册流程，不能依赖浏览器端勾选作为真实审批。
 
 ## 真实后端演进
 

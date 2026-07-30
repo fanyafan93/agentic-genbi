@@ -1,0 +1,255 @@
+import type { ArtifactKind } from "@/modules/analysis/types/artifact";
+import type { AgentClient, AgentEvent, AgentInput, AnalysisMode } from "./types";
+
+export type BackendRunEvent = {
+  type: string;
+  run_id: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+const artifactKinds = new Set<ArtifactKind>(["html", "sql", "python", "csv", "markdown", "json"]);
+const DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS = 95_000;
+
+export class BackendAnalysisAgentClient implements AgentClient {
+  private conversationId: string | null = null;
+  private abortController: AbortController | null = null;
+
+  constructor(private readonly apiBaseUrl: string) {}
+
+  async *send(input: AgentInput): AsyncIterable<AgentEvent> {
+    if (input.kind === "reset") {
+      this.cancel();
+      this.conversationId = null;
+      yield { type: "conversation-init", runId: "analysis-reset" };
+      return;
+    }
+
+    const question = getInputQuestion(input);
+    if (!question) {
+      yield { type: "done" };
+      return;
+    }
+
+    this.abortController = new AbortController();
+    let timedOut = false;
+    const timeoutId = globalThis.setTimeout(() => {
+      timedOut = true;
+      this.abortController?.abort();
+    }, getBackendAnalysisRequestTimeoutMs());
+    try {
+      const response = await fetch(`${this.apiBaseUrl}/api/analysis/tasks/runs/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          conversation_id: input.kind === "start" ? undefined : this.conversationId,
+          analysis_mode: getAnalysisMode(input),
+          turn_kind: input.kind,
+          metadata: { frontend_client: "analysis_task" },
+        }),
+        signal: this.abortController.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`Analysis SSE API returned ${response.status}`);
+      }
+      for await (const backendEvent of readAnalysisSse(response)) {
+        const conversationId = asString(backendEvent.payload.conversation_id);
+        if (conversationId) this.conversationId = conversationId;
+        for (const event of mapBackendEvents([backendEvent], input.kind)) {
+          yield event;
+        }
+      }
+      globalThis.clearTimeout(timeoutId);
+    } catch (error) {
+      if ((error as Error).name === "AbortError" && !timedOut) {
+        globalThis.clearTimeout(timeoutId);
+        return;
+      }
+      globalThis.clearTimeout(timeoutId);
+      if (timedOut) {
+        yield {
+          type: "error",
+          message: "Analysis backend request timed out. Please retry or switch to quick analysis.",
+        };
+        yield { type: "done" };
+        return;
+      }
+      yield {
+        type: "error",
+        message: error instanceof Error ? error.message : "分析任务后端调用失败",
+      };
+      yield { type: "done" };
+    }
+  }
+
+  cancel(): void {
+    this.abortController?.abort();
+    this.abortController = null;
+  }
+}
+
+export function shouldUseBackendAnalysisClient(): boolean {
+  return (
+    process.env.NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME === "backend" &&
+    Boolean(process.env.NEXT_PUBLIC_GENBI_API_BASE_URL)
+  );
+}
+
+export function getBackendAnalysisApiBaseUrl(): string | null {
+  return process.env.NEXT_PUBLIC_GENBI_API_BASE_URL ?? null;
+}
+
+export function getBackendAnalysisRequestTimeoutMs(): number {
+  const raw = process.env.NEXT_PUBLIC_ANALYSIS_AGENT_TIMEOUT_MS;
+  const parsed = raw ? Number(raw) : DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS;
+}
+
+export async function* readAnalysisSse(response: Response): AsyncIterable<BackendRunEvent> {
+  if (!response.body) {
+    yield* parseAnalysisSse(await response.text());
+    return;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const parts = buffer.split(/\r?\n\r?\n/);
+    buffer = parts.pop() ?? "";
+    for (const part of parts) {
+      yield* parseAnalysisSse(part);
+    }
+    if (done) break;
+  }
+  yield* parseAnalysisSse(buffer);
+}
+
+export function parseAnalysisSse(text: string): BackendRunEvent[] {
+  return text
+    .split(/\r?\n\r?\n/)
+    .map((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data: ")))
+    .filter((lines) => lines.length > 0)
+    .map((lines) => lines.map((line) => line.slice(6)).join("\n"))
+    .map((data) => JSON.parse(data) as BackendRunEvent);
+}
+
+function getInputQuestion(input: AgentInput): string {
+  if (input.kind === "start") return input.question || "分析一下渠道销售占比";
+  if (input.kind === "message") return input.content;
+  if (input.kind === "reply") return input.optionId;
+  return "";
+}
+
+function getAnalysisMode(input: AgentInput): AnalysisMode {
+  if (input.kind === "start" || input.kind === "message" || input.kind === "reply") return input.analysisMode ?? "quick";
+  return "quick";
+}
+
+export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInput["kind"]): Iterable<AgentEvent> {
+  let currentAgentNodeId: string | null = null;
+  for (const event of events) {
+    if (event.type === "run.created") {
+      const runId = event.run_id;
+      const conversationId = asString(event.payload.conversation_id);
+      const question = asString(event.payload.question);
+      if (inputKind === "start") {
+        yield { type: "conversation-init", runId, conversationId: conversationId || undefined };
+      } else {
+        yield { type: "run-init", runId, conversationId: conversationId || undefined };
+      }
+      if (question) {
+        yield { type: "user", nodeId: `user-${runId}`, content: question };
+      }
+      continue;
+    }
+
+    if (event.type === "analysis.problem.classified") {
+      currentAgentNodeId ||= `agent-${event.run_id}`;
+      yield { type: "agent", nodeId: currentAgentNodeId, content: "", mode: "delta" };
+      yield {
+        type: "step",
+        label: `识别问题类型：${asString(event.payload.label) || "业务分析"}`,
+        state: "done",
+        nodeId: currentAgentNodeId,
+      };
+      continue;
+    }
+
+    if (event.type === "analysis.retrieval.plan") {
+      currentAgentNodeId ||= `agent-${event.run_id}`;
+      yield { type: "agent", nodeId: currentAgentNodeId, content: "", mode: "delta" };
+      for (const item of asRecordArray(event.payload.items)) {
+        yield {
+          type: "step",
+          label: `检索${asString(item.label) || "语义模型"}`,
+          state: "done",
+          nodeId: currentAgentNodeId,
+        };
+      }
+      continue;
+    }
+
+    if (event.type === "agent.message.created") {
+      currentAgentNodeId ||= `agent-${event.run_id}`;
+      yield {
+        type: "agent",
+        nodeId: currentAgentNodeId,
+        content: asString(event.payload.content),
+        mode: "replace",
+      };
+      continue;
+    }
+
+    if (event.type === "agent.question.requested") {
+      yield {
+        type: "ask",
+        nodeId: `ask-${event.run_id}`,
+        question: asString(event.payload.question),
+        options: asRecordArray(event.payload.options).map((item) => ({
+          id: asString(item.id) || asString(item.label),
+          label: asString(item.label) || asString(item.id),
+        })),
+      };
+      continue;
+    }
+
+    if (event.type === "artifact.created" || event.type === "artifact.updated") {
+      const kind = asString(event.payload.kind);
+      const path = asString(event.payload.path);
+      if (isArtifactKind(kind) && path) {
+        yield {
+          type: "artifact",
+          path,
+          kind,
+        };
+      }
+      continue;
+    }
+
+    if (event.type === "run.failed") {
+      yield { type: "error", message: asString(event.payload.detail) || asString(event.payload.error) };
+      yield { type: "done" };
+      continue;
+    }
+
+    if (event.type === "run.completed") {
+      yield { type: "done" };
+    }
+  }
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function asRecordArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object") : [];
+}
+
+function isArtifactKind(value: string): value is ArtifactKind {
+  return artifactKinds.has(value as ArtifactKind);
+}
