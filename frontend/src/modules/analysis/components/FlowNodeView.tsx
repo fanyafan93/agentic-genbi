@@ -1,5 +1,8 @@
 "use client";
 
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
 import type { FlowNode as FlowNodeData } from "../hooks/use-flow";
 
 const UserAvatar = () => (
@@ -59,7 +62,9 @@ export function FlowNodeView({ node, onReply }: Props) {
           </div>
         </div>
         <div className="flow-card">
-          <p>{node.content || "\u00A0"}</p>
+          <div className="message-body-markdown flow-content">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{node.content || "\u00A0"}</ReactMarkdown>
+          </div>
           {steps.length > 0 && (
             <ol className="timeline" role="list">
               {steps.map((step, index) => (

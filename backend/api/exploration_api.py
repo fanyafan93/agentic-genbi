@@ -6,6 +6,9 @@ from typing import Any
 from uuid import uuid4
 
 from backend.config import check_runtime_env, load_project_env
+from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
+from backend.analysis.agent_runner import OpenAIAnalysisAgentRunner
+from backend.analysis.run_service import AnalysisRunRequest, AnalysisRunService
 from backend.exploration.agent_runner import LLMAgentRunner
 from backend.exploration.run_event_store import RunEventStore
 from backend.exploration.run_service import ExplorationRunRequest, ExplorationRunService
@@ -24,7 +27,12 @@ from backend.resource_library.tools import (
 )
 
 
-def create_app(service: ExplorationRunService | None = None, knowledge_store: KnowledgeStore | None = None) -> Any:
+def create_app(
+    service: ExplorationRunService | None = None,
+    knowledge_store: KnowledgeStore | None = None,
+    analysis_service: AnalysisRunService | None = None,
+    analysis_asset_store: AnalysisAssetStore | None = None,
+) -> Any:
     load_project_env()
     try:
         from fastapi import Body, FastAPI, HTTPException, Query
@@ -38,6 +46,40 @@ def create_app(service: ExplorationRunService | None = None, knowledge_store: Kn
         question: str = Field(min_length=1)
         conversation_id: str | None = None
         user_id: str | None = None
+        metadata: dict[str, Any] = Field(default_factory=dict)
+
+    class AnalysisRunBody(BaseModel):
+        question: str = Field(min_length=1)
+        conversation_id: str | None = None
+        user_id: str | None = None
+        analysis_mode: str = "quick"
+        turn_kind: str = "start"
+        metadata: dict[str, Any] = Field(default_factory=dict)
+
+    class AnalysisAssetReopenContextBody(BaseModel):
+        sourceTaskId: str = Field(min_length=1)
+        sourceConversationId: str = Field(min_length=1)
+        sourceRunId: str = Field(min_length=1)
+        continuationPrompt: str = Field(min_length=1)
+        targetFileId: str | None = None
+
+    class AnalysisAssetBody(BaseModel):
+        assetId: str = Field(min_length=1)
+        artifactVersionId: str = Field(min_length=1)
+        sourceTaskId: str = Field(min_length=1)
+        sourceTaskTitle: str = Field(min_length=1)
+        sourceConversationId: str = Field(min_length=1)
+        sourceRunId: str = Field(min_length=1)
+        assetType: str = Field(min_length=1)
+        title: str = Field(min_length=1)
+        label: str | None = None
+        description: str | None = None
+        visibility: str = "team"
+        status: str = "saved"
+        latestVersion: str = "v1-draft"
+        fileId: str | None = None
+        saveReason: str | None = None
+        reopenContext: AnalysisAssetReopenContextBody
         metadata: dict[str, Any] = Field(default_factory=dict)
 
     class ResourceReindexBody(BaseModel):
@@ -123,6 +165,8 @@ def create_app(service: ExplorationRunService | None = None, knowledge_store: Kn
         configured_knowledge_store = knowledge_store or KnowledgeStore()
     else:
         run_service, configured_knowledge_store = build_default_service_with_stores()
+    configured_analysis_service = analysis_service or build_default_analysis_service(run_service)
+    configured_analysis_asset_store = analysis_asset_store or AnalysisAssetStore()
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -131,6 +175,105 @@ def create_app(service: ExplorationRunService | None = None, knowledge_store: Kn
     @app.get("/api/runtime/status")
     def runtime_status() -> dict[str, Any]:
         return check_runtime_env()
+
+    @app.post("/api/analysis/tasks/runs")
+    def create_analysis_task_run(body: AnalysisRunBody = Body(...)) -> dict[str, Any]:
+        conversation_id = body.conversation_id or _new_analysis_conversation_id()
+        return _create_analysis_run_payload(configured_analysis_service, body, conversation_id=conversation_id)
+
+    @app.post("/api/analysis/tasks/runs/stream")
+    def stream_analysis_task_run(body: AnalysisRunBody = Body(...)) -> StreamingResponse:
+        conversation_id = body.conversation_id or _new_analysis_conversation_id()
+        request = _analysis_request_from_body(body, conversation_id=conversation_id)
+
+        async def event_stream() -> Any:
+            async for event in configured_analysis_service.astream_events(request):
+                yield event.to_sse()
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    @app.get("/api/analysis/tasks/runs/{run_id}")
+    def get_analysis_task_run(run_id: str) -> dict[str, Any]:
+        trace = configured_analysis_service.trace_store.get_trace(run_id) if configured_analysis_service.trace_store else None
+        events = configured_analysis_service.event_store.list_events(run_id) if configured_analysis_service.event_store else []
+        if not trace and not events:
+            raise HTTPException(status_code=404, detail="analysis_run_not_found")
+        return {
+            "run": asdict(trace) if trace else None,
+            "events_url": f"/api/analysis/tasks/runs/{run_id}/events",
+            "events": [asdict(event) for event in events],
+        }
+
+    @app.get("/api/analysis/tasks/runs/{run_id}/events")
+    def get_analysis_task_run_events(run_id: str) -> StreamingResponse:
+        async def event_stream() -> Any:
+            async for event in configured_analysis_service.astream_run_events(run_id):
+                yield event.to_sse()
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    @app.get("/api/analysis/assets")
+    def list_analysis_assets(
+        limit: int = Query(default=50, ge=1, le=200),
+        source_task_id: str | None = None,
+        q: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "assets": [
+                asdict(item)
+                for item in configured_analysis_asset_store.list_assets(
+                    limit=limit,
+                    source_task_id=source_task_id,
+                    q=q,
+                )
+            ]
+        }
+
+    @app.post("/api/analysis/assets")
+    def save_analysis_asset(body: AnalysisAssetBody = Body(...)) -> dict[str, Any]:
+        context = AnalysisAssetReopenContext(
+            sourceTaskId=body.reopenContext.sourceTaskId,
+            sourceConversationId=body.reopenContext.sourceConversationId,
+            sourceRunId=body.reopenContext.sourceRunId,
+            continuationPrompt=body.reopenContext.continuationPrompt,
+            targetFileId=body.reopenContext.targetFileId,
+        )
+        try:
+            record = configured_analysis_asset_store.save_asset(
+                asset_id=body.assetId,
+                artifact_version_id=body.artifactVersionId,
+                source_task_id=body.sourceTaskId,
+                source_task_title=body.sourceTaskTitle,
+                source_conversation_id=body.sourceConversationId,
+                source_run_id=body.sourceRunId,
+                asset_type=body.assetType,
+                title=body.title,
+                label=body.label or body.assetType,
+                description=body.description or body.title,
+                visibility=body.visibility,
+                status=body.status,
+                latest_version=body.latestVersion,
+                file_id=body.fileId or body.reopenContext.targetFileId,
+                reopen_context=context,
+                metadata={**body.metadata, **({"saveReason": body.saveReason} if body.saveReason else {})},
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"asset": asdict(record), "savedAt": record.updatedAt}
+
+    @app.get("/api/analysis/assets/{asset_id}")
+    def get_analysis_asset(asset_id: str) -> dict[str, Any]:
+        record = configured_analysis_asset_store.get_asset(asset_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="analysis_asset_not_found")
+        return {"asset": asdict(record)}
+
+    @app.post("/api/analysis/assets/{asset_id}/reopen")
+    def reopen_analysis_asset(asset_id: str) -> dict[str, Any]:
+        result = configured_analysis_asset_store.reopen_asset(asset_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="analysis_asset_not_found")
+        return result
 
     @app.post("/api/explorations/conversations")
     def create_exploration_conversation_turn(body: ExplorationRunBody = Body(...)) -> dict[str, Any]:
@@ -490,6 +633,39 @@ def _create_exploration_run_payload(run_service: ExplorationRunService, body: An
     }
 
 
+def _create_analysis_run_payload(analysis_service: AnalysisRunService, body: Any, *, conversation_id: str) -> dict[str, Any]:
+    request = _analysis_request_from_body(body, conversation_id=conversation_id)
+    run_id = analysis_service.create_run(request)
+    events = list(analysis_service.stream_run_events(run_id))
+    return {
+        "conversation_id": conversation_id,
+        "latest_run_id": run_id,
+        "run_id": run_id,
+        "events_url": f"/api/analysis/tasks/runs/{run_id}/events",
+        "events": [asdict(event) for event in events],
+    }
+
+
+def _analysis_request_from_body(body: Any, *, conversation_id: str) -> AnalysisRunRequest:
+    mode = str(getattr(body, "analysis_mode", "quick") or "quick").strip().lower()
+    if mode not in {"quick", "deep"}:
+        mode = "quick"
+    turn_kind = str(getattr(body, "turn_kind", "start") or "start").strip().lower()
+    if turn_kind not in {"start", "message", "reply"}:
+        turn_kind = "message"
+    metadata = dict(getattr(body, "metadata", {}) or {})
+    metadata.setdefault("domain", "analysis_task")
+    metadata.setdefault("conversation_root", not bool(getattr(body, "conversation_id", None)))
+    return AnalysisRunRequest(
+        question=body.question,
+        conversation_id=conversation_id,
+        user_id=getattr(body, "user_id", None),
+        analysis_mode=mode,  # type: ignore[arg-type]
+        turn_kind=turn_kind,  # type: ignore[arg-type]
+        metadata=metadata,
+    )
+
+
 def _list_root_run_traces(run_service: ExplorationRunService, *, limit: int, user_id: str | None = None) -> list[dict[str, Any]]:
     if not run_service.trace_store:
         return []
@@ -522,6 +698,10 @@ def _new_conversation_id() -> str:
     return f"conv_{uuid4().hex[:12]}"
 
 
+def _new_analysis_conversation_id() -> str:
+    return f"conv_analysis_{uuid4().hex[:12]}"
+
+
 def _conversation_metadata(metadata: dict[str, Any] | None, *, conversation_id: str | None, is_root: bool) -> dict[str, Any]:
     next_metadata = dict(metadata or {})
     if conversation_id and is_root:
@@ -538,6 +718,18 @@ def _modified_at(path: Path) -> str:
 def build_default_service() -> ExplorationRunService:
     service, _knowledge_store = build_default_service_with_stores()
     return service
+
+
+def build_default_analysis_service(run_service: ExplorationRunService) -> AnalysisRunService:
+    load_project_env()
+    analysis_runner = None
+    if os.getenv("GENBI_ANALYSIS_RUNTIME", "local").lower() in {"openai", "llm"}:
+        analysis_runner = OpenAIAnalysisAgentRunner.from_env()
+    return AnalysisRunService(
+        agent_runner=analysis_runner,
+        trace_store=run_service.trace_store,
+        event_store=run_service.event_store,
+    )
 
 
 def build_default_service_with_stores() -> tuple[ExplorationRunService, KnowledgeStore]:

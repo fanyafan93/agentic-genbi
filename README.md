@@ -1,8 +1,8 @@
 # Agentic GenBI
 
-Agentic GenBI 是面向数据分析师和运营人员的 AI Agent BI 工作台。用户在会话中与 Agent 协作分析，持续生成、更新和复用可核对的分析资产（Artifact）；资产可以自动刷新，并可进一步提炼和发布为可复用 Agent。
+Agentic GenBI 是面向数据分析师和运营人员的 AI Agent BI 工作台。用户在分析任务中与 Agent 协作解决业务问题，持续生成、更新和复用可核对的分析资产（Artifact）；资产可以自动刷新，并可进一步提炼和发布为可复用 Agent。
 
-当前仓库是 **前端优先、mock-first** 的产品原型：用可交互的界面和虚拟后端厘清系统边界，后续再逐步接入真实 API、数据源、Agent Runtime 与持久化。
+当前仓库是 **前端优先、mock-first** 演进中的产品原型：用可交互的界面和虚拟后端厘清系统边界，并逐步替换为真实 API、数据源、Agent Runtime 与持久化。
 
 ## 文档入口
 
@@ -14,7 +14,8 @@ Agentic GenBI 是面向数据分析师和运营人员的 AI Agent BI 工作台�
 ## 当前能力
 
 - Next.js + TypeScript 分析工作台。
-- 会话左中右布局：会话列表、对话与 mock Run 过程、Artifact 预览区。
+- 分析任务左中右布局：分析任务列表、对话/真实后端 Run 事件、分析资产库预览区；分析资产保存已具备最小后端 JSONL API，但共享库视图、跨用户权限和完整 Artifact 持久化仍在演进中。
+- 分析任务后端已提供首个真实 Run API / SSE 纵切，可按快速分析/深度分析产生问题分类、语义模型检索计划、Agent 消息、追问和资产事件；前端可通过环境变量切换到该后端客户端。后端已预留 OpenAI Agents SDK 分析 Runner，配置后可由真实 Runner 生成分析回复。
 - 本地 mock Agent 事件流、追问和基础图表渲染。
 - 知识探索页面已按探索会话事件契约接入真实探索 API；不可用时明确失败，不再回退本地模拟事件。
 - 飞书单点登录已按 Auth.js v5 接入前端，使用 Prisma + Docker Postgres 保存 DB session；知识探索列表会按登录用户隔离。
@@ -63,6 +64,22 @@ docker compose up -d --no-build
 
 ```bash
 set NEXT_PUBLIC_GENBI_API_BASE_URL=http://localhost:8000
+```
+
+前端分析任务接真实后端时额外配置：
+
+```bash
+set NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME=backend
+set NEXT_PUBLIC_GENBI_API_BASE_URL=http://localhost:8000
+```
+
+分析任务后端启用 OpenAI Agents SDK Runner：
+
+```bash
+set GENBI_ANALYSIS_RUNTIME=openai
+set GENBI_ANALYSIS_MODEL=gpt-4.1-mini
+set GENBI_ANALYSIS_MAX_TURNS=30
+set OPENAI_API_KEY=...
 ```
 
 检查本地真实运行环境：

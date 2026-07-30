@@ -10,7 +10,7 @@ export function Suggestions({ onSelect }: Props) {
   return (
     <section className="suggestions" aria-label="建议问题">
       <header>
-        <span>开始一个会话</span>
+        <span>开始一个分析任务</span>
         <strong>问一下，或直接输入你的问题</strong>
       </header>
       <ul>

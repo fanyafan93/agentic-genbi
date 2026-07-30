@@ -1,4 +1,4 @@
-import type { AgentClient, AgentEvent, AgentInput } from "./types";
+import type { AgentClient, AgentEvent, AgentInput, AnalysisMode } from "./types";
 import { channelScript } from "./scripts/channel";
 
 function delay(ms: number) {
@@ -14,11 +14,17 @@ async function* streamText(text: string, perChar = 22): AsyncGenerator<AgentEven
   }
 }
 
-async function* streamSteps(labels: string[]): AsyncGenerator<AgentEvent> {
+async function* streamAnalysis(text: string, labels: string[], perChar = 22): AsyncGenerator<AgentEvent> {
+  const nodeId = `agent-${Date.now()}`;
+  yield { type: "agent", nodeId, content: "", mode: "delta" };
   for (const label of labels) {
-    yield { type: "step", label, state: "running" };
+    yield { type: "step", label, state: "running", nodeId };
     await delay(420);
-    yield { type: "step", label, state: "done" };
+    yield { type: "step", label, state: "done", nodeId };
+  }
+  for (const char of text) {
+    await delay(perChar);
+    yield { type: "tokens", nodeId, text: char };
   }
 }
 
@@ -30,36 +36,66 @@ type RuntimeState = {
   runId: string;
   askCount: number;
   lastUser: string;
+  analysisMode: AnalysisMode;
   askQueue: { question: string; options: { id: string; label: string }[] }[];
 };
 
 export class MockAgentClient implements AgentClient {
-  private state: RuntimeState = { runId: "demo", askCount: 0, lastUser: "", askQueue: [] };
+  private state: RuntimeState = { runId: "demo", askCount: 0, lastUser: "", analysisMode: "quick", askQueue: [] };
 
   async *send(input: AgentInput): AsyncIterable<AgentEvent> {
     if (input.kind === "reset") {
-      this.state = { runId: newId("run"), askCount: 0, lastUser: "", askQueue: [] };
-      yield { type: "session-init", runId: this.state.runId };
+      this.state = { runId: newId("run"), askCount: 0, lastUser: "", analysisMode: "quick", askQueue: [] };
+      yield { type: "conversation-init", runId: this.state.runId };
       return;
     }
 
     if (input.kind === "start") {
-      this.state = { runId: newId("run"), askCount: 0, lastUser: input.question ?? channelScript.startQuestion, askQueue: [] };
-      yield { type: "session-init", runId: this.state.runId };
+      this.state = { runId: newId("run"), askCount: 0, lastUser: input.question ?? channelScript.startQuestion, analysisMode: input.analysisMode ?? "quick", askQueue: [] };
+      yield { type: "conversation-init", runId: this.state.runId };
       yield { type: "user", nodeId: newId("user"), content: this.state.lastUser };
 
-      yield* streamSteps(["识别业务口径", "查询可用数据表", "生成并校验 SQL", "整理图表与结论"]);
-      yield* streamText("我先理解需求、查询口径，并生成可校验 SQL。", 22);
-      yield { type: "ask", nodeId: newId("ask"), question: channelScript.nodes.firstAsk.question, options: channelScript.nodes.firstAsk.options };
-      this.state.askQueue.push(channelScript.nodes.firstAsk);
+      if (this.state.analysisMode === "deep") {
+        yield* streamAnalysis("我会按深度分析推进。这个问题需要先补齐口径，再生成 SQL、图表、报告和可复用资产。", ["理解业务问题类型", "检索报表级语义模型", "检索 MySQL / Doris 元数据", "检索知识库已确认经验", "列出待确认口径"]);
+        yield { type: "ask", nodeId: newId("ask"), question: channelScript.nodes.firstAsk.question, options: channelScript.nodes.firstAsk.options };
+        this.state.askQueue.push(channelScript.nodes.firstAsk);
+      } else {
+        yield* streamAnalysis("我先按快速分析给出可用初稿：已基于现有语义模型和知识库生成 SQL、图表、报告摘要，并把未确认口径标成假设。", ["理解业务问题", "快速检索语义模型", "生成候选 SQL", "生成图表和初稿报告", "标注假设与风险"]);
+        yield { type: "artifact", path: "reports/quick_report.html", kind: "html" };
+        yield { type: "artifact", path: "queries/quick_candidate.sql", kind: "sql" };
+        yield { type: "artifact", path: "charts/channel_share.chart.json", kind: "json" };
+        yield { type: "artifact", path: "notes/assumptions.md", kind: "markdown" };
+        yield { type: "artifact", path: "definitions/channel_sales_metric.md", kind: "markdown" };
+        yield { type: "artifact", path: "rules/order_scope_rule.md", kind: "markdown" };
+        yield { type: "artifact", path: "paths/channel_analysis_path.md", kind: "markdown" };
+        yield { type: "artifact", path: "dashboards/channel_overview.dashboard.json", kind: "json" };
+      }
       yield { type: "done" };
       return;
     }
 
     if (input.kind === "message") {
       this.state.lastUser = input.content;
+      this.state.analysisMode = input.analysisMode ?? this.state.analysisMode;
       yield { type: "user", nodeId: newId("user"), content: input.content };
-      yield* streamText("我接着展开分析。先核对一下数据范围，再继续给出建议。", 22);
+      if (/skill\.md|skill|技能|复用/.test(input.content.toLowerCase())) {
+        yield* streamAnalysis("我会把这次成功分析整理成 Skill.md 草稿：先明确适用场景，再列出必须确认的口径、推荐步骤、可引用资产和复用权限。", ["整理适用场景", "提取需要确认的业务口径", "引用 SQL / 图表 / 报告资产", "生成 Skill.md 草稿", "标注复用权限"]);
+        yield { type: "artifact", path: "skills/analysis_skill.md", kind: "markdown" };
+        yield { type: "done" };
+        return;
+      }
+      yield* streamAnalysis(this.state.analysisMode === "deep"
+        ? "我会在当前分析任务里继续改资产：先保留已有 SQL 和图表版本，再补充证据，最后更新报告与 Skill 草稿。"
+        : "我先直接改当前资产草稿，并把仍未确认的业务假设继续保留在说明里。",
+        this.state.analysisMode === "deep"
+          ? ["读取当前资产版本", "补充语义模型证据", "修改 SQL / 图表 / 报告", "更新资产版本记录"]
+          : ["读取当前资产", "快速修改图表和结论", "更新资产草稿"]);
+      yield { type: "artifact", path: "reports/updated_report.html", kind: "html" };
+      yield { type: "artifact", path: "queries/revised_query.sql", kind: "sql" };
+      yield { type: "artifact", path: "paths/channel_analysis_path.md", kind: "markdown" };
+      if (/python|预测|异常|聚类|相关/.test(input.content.toLowerCase())) {
+        yield { type: "artifact", path: "scripts/analysis_notebook.py", kind: "python" };
+      }
       yield { type: "done" };
       return;
     }
@@ -77,8 +113,7 @@ export class MockAgentClient implements AgentClient {
       yield* streamText("好的，按你的选择继续展开。", 22);
 
       if (current.question === channelScript.nodes.firstAsk.question) {
-        yield* streamSteps(["读取数据表", "校验口径", "生成 SQL", "渲染图表"]);
-        yield* streamText("关键发现：线上直营占比 42.0%，社交电商同比增速 44.7%（基数小）。", 22);
+        yield* streamAnalysis("关键发现：线上直营占比 42.0%，社交电商同比增速 44.7%（基数小）。", ["读取数据表", "校验口径", "生成 SQL", "渲染图表"]);
         yield { type: "ask", nodeId: newId("ask"), question: channelScript.nodes.followAsk.question, options: channelScript.nodes.followAsk.options };
         this.state.askQueue.push(channelScript.nodes.followAsk);
       } else if (current.question === channelScript.nodes.followAsk.question) {

@@ -1,7 +1,7 @@
 import type { ArtifactFolder } from "../../types/artifact";
 import type { FlowNode } from "../../hooks/use-flow";
 
-export type SessionScript = {
+export type AnalysisTaskScript = {
   id: string;
   title: string;
   messages: FlowNode[];
@@ -109,13 +109,13 @@ const monthlyMessages: FlowNode[] = [
   { id: "agent-1", role: "agent", content: "已生成月度复盘要点，关键指标摘要附在报告里。" },
 ];
 
-export const sessionScripts: SessionScript[] = [
+export const analysisTaskScripts: AnalysisTaskScript[] = [
   { id: "channel", title: "渠道销售占比分析", messages: channelMessages, artifacts: channelArtifacts },
   { id: "inventory", title: "库存周转异常排查", messages: inventoryMessages, artifacts: inventoryArtifacts },
   { id: "region", title: "华东区域 GMV 趋势", messages: regionMessages, artifacts: regionArtifacts },
   { id: "monthly", title: "月度经营复盘", messages: monthlyMessages, artifacts: monthlyArtifacts },
 ];
 
-export function findSessionByTitle(title: string): SessionScript | undefined {
-  return sessionScripts.find((s) => s.title === title);
+export function findAnalysisTaskByTitle(title: string): AnalysisTaskScript | undefined {
+  return analysisTaskScripts.find((task) => task.title === title);
 }
