@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>卡片顶视 · x 轴滑动版</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+      background: linear-gradient(135deg, #c5c8cc 0%, #ecebe8 44%, #f5d0c8 100%);
+      font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      color: #1e3a5f;
+      display: grid;
+      grid-template-columns: 240px 1fr;
+    }
+
+    /* ============ 左侧：会话列表 (不变) ============ */
+    .sidebar {
+      background: rgba(255,255,255,.7);
+      backdrop-filter: blur(20px);
+      border-right: 1px solid rgba(30,58,95,.08);
+      padding: 18px 12px;
+      overflow-y: auto;
+    }
+    .sidebar h3 { margin: 0 0 12px; font-size: 12px; color: #1e3a5f; letter-spacing: .12em; text-transform: uppercase; }
+    .session-item {
+      display: block; width: 100%; text-align: left;
+      padding: 10px 12px; margin-bottom: 6px;
+      border: 1px solid transparent; border-radius: 10px;
+      background: transparent; cursor: pointer; font: inherit;
+      color: #1e3a5f;
+      transition: 180ms ease;
+    }
+    .session-item:hover { background: rgba(30,58,95,.06); }
+    .session-item.active { background: rgba(232,104,90,.12); border-color: rgba(232,104,90,.3); }
+    .session-item .title { font-weight: 700; font-size: .85rem; }
+    .session-item .meta { font-size: .68rem; color: #6b7480; margin-top: 3px; display: flex; gap: 6px; align-items: center; }
+    .session-item .status { display: inline-block; padding: 1px 6px; border-radius: 999px; font-size: .6rem; font-weight: 700; }
+    .status.done { background: rgba(107,143,137,.18); color: #4a6963; }
+    .status.pending { background: rgba(232,104,90,.14); color: #d75b4e; }
+    .status.running { background: rgba(30,58,95,.12); color: #1e3a5f; }
+
+    /* ============ 右侧：x 轴滑动舞台 ============ */
+    .stage {
+      position: relative;
+      overflow: hidden;
+      padding: 40px 0;
+    }
+    /* deck：横向排列所有卡，整列滑动 */
+    .deck {
+      display: flex;
+      align-items: stretch;
+      gap: 24px;
+      padding: 40px 60px;
+      height: 580px;
+      transition: transform 800ms cubic-bezier(.22,1.1,.36,1);
+      will-change: transform;
+    }
+    /* 单张卡片 */
+    .disc {
+      flex: 0 0 520px;
+      background: rgba(255,255,255,.95);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(30,58,95,.14);
+      border-radius: 16px;
+      padding: 32px 36px;
+      box-shadow: 0 24px 60px rgba(30,58,95,.16);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      transition: box-shadow 500ms ease, border-color 400ms ease, opacity 500ms ease, filter 500ms ease;
+      opacity: 0.35;
+      filter: blur(5px) saturate(0.6);
+    }
+    .disc:hover { opacity: 0.6; filter: blur(3px) saturate(0.8); }
+    /* 选中：x 轴不动，整列滑到中心；卡片本身不变大 */
+    .disc.active {
+      opacity: 1;
+      filter: blur(0) saturate(1);
+      border-color: rgba(232,104,90,.4);
+      box-shadow: 0 36px 100px rgba(30,58,95,.28);
+    }
+
+    .disc .kicker {
+      display: inline-block; padding: 3px 10px;
+      border-radius: 999px;
+      background: rgba(232,104,90,.12); color: #d75b4e;
+      font-size: .66rem; font-weight: 700; letter-spacing: .12em;
+      margin-bottom: 12px;
+      align-self: flex-start;
+    }
+    .disc h2 { margin: 0 0 14px; font-size: 1.5rem; font-weight: 800; color: #1e3a5f; line-height: 1.3; }
+    .disc p { margin: 0 0 14px; color: #6b7480; font-size: .88rem; line-height: 1.6; }
+    .disc .meta { display: flex; gap: 10px; align-items: center; font-size: .7rem; color: #6b7480; flex-wrap: wrap; }
+    .disc .badge { padding: 2px 8px; border-radius: 999px; font-size: .64rem; font-weight: 700; }
+    .badge.done { background: rgba(107,143,137,.18); color: #4a6963; }
+    .badge.pending { background: rgba(232,104,90,.14); color: #d75b4e; }
+    .badge.running { background: rgba(30,58,95,.12); color: #1e3a5f; }
+
+    /* 消息列表：整张卡虚化就够了，消息本身不再虚化 */
+    .disc .messages {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      overflow-y: auto;
+      margin-top: 18px;
+      padding: 14px;
+      background: rgba(245,245,242,.6);
+      border-radius: 10px;
+      border: 1px solid rgba(30,58,95,.08);
+      gap: 10px;
+      transition: filter 500ms ease, opacity 500ms ease;
+    }
+
+    .msg {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      font-size: .78rem;
+      line-height: 1.5;
+    }
+    .msg .av {
+      flex-shrink: 0;
+      width: 24px; height: 24px; border-radius: 50%;
+      display: grid; place-items: center;
+      font-size: .65rem; font-weight: 800;
+      color: #fff;
+    }
+    .msg.user .av { background: #1e3a5f; }
+    .msg.agent .av { background: #e8685a; }
+    .msg .bubble {
+      padding: 8px 12px;
+      border-radius: 10px;
+      background: #fff;
+      border: 1px solid rgba(30,58,95,.08);
+      flex: 1;
+      color: #1e3a5f;
+    }
+    .msg.user .bubble { background: rgba(30,58,95,.04); }
+    .msg.agent .bubble { background: rgba(232,104,90,.06); border-color: rgba(232,104,90,.18); }
+    .msg .bubble strong { display: block; font-size: .7rem; color: #d75b4e; margin-bottom: 4px; font-weight: 800; }
+
+    /* 提示 */
+    .hint {
+      position: absolute; bottom: 14px; left: 0; right: 0;
+      text-align: center; font-size: .7rem; color: #6b7480;
+    }
+  </style>
+</head>
+<body>
+  <!-- ============ 左侧：会话列表 (永远不变) ============ -->
+  <aside class="sidebar">
+    <h3>探索任务 · 11 项</h3>
+    <button class="session-item" data-idx="0"><div class="title">首购后 30 天复购率</div><div class="meta"><span class="status done">已完成</span><span>2026-07-29</span></div></button>
+    <button class="session-item" data-idx="1"><div class="title">哈</div><div class="meta"><span class="status done">已完成</span><span>2026-07-28</span></div></button>
+    <button class="session-item" data-idx="2"><div class="title">你好</div><div class="meta"><span class="status done">已完成</span><span>2026-07-28</span></div></button>
+    <button class="session-item" data-idx="3"><div class="title">嘿</div><div class="meta"><span class="status done">已完成</span><span>2026-07-28</span></div></button>
+    <button class="session-item" data-idx="4"><div class="title">嘿 (二)</div><div class="meta"><span class="status done">已完成</span><span>2026-07-28</span></div></button>
+    <button class="session-item active" data-idx="5"><div class="title">嘿 (三)</div><div class="meta"><span class="status pending">待确认</span><span>2026-07-28</span></div></button>
+    <button class="session-item" data-idx="6"><div class="title">嘿 (四)</div><div class="meta"><span class="status pending">待确认</span><span>2026-07-28</span></div></button>
+    <button class="session-item" data-idx="7"><div class="title">测试连接</div><div class="meta"><span class="status pending">待确认</span><span>2026-07-28</span></div></button>
+    <button class="session-item" data-idx="8"><div class="title">首购后 30 天复购率</div><div class="meta"><span class="status running">进行中</span><span>刚刚</span></div></button>
+    <button class="session-item" data-idx="9"><div class="title">库存周转异常 SKU</div><div class="meta"><span class="status pending">待确认</span><span>今天 10:18</span></div></button>
+    <button class="session-item" data-idx="10"><div class="title">华东 GMV 下滑原因</div><div class="meta"><span class="status done">已完成</span><span>昨天</span></div></button>
+  </aside>
+
+  <!-- ============ 右侧：x 轴滑动舞台 ============ -->
+  <main class="stage">
+    <div class="deck" id="deck">
+
+      <article class="disc" data-idx="0">
+        <div><span class="kicker">RUN_A1B2C3</span><h2>首购后 30 天复购率</h2></div>
+        <div class="meta"><span class="badge done">已完成</span><span>2026-07-29</span><span>5 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">首购后 30 天复购率怎么算？</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble"><strong>口径</strong>首购后 30 天内同用户再次支付订单数 ÷ 首购订单数。已找到 3 个口径分歧点。</div></div>
+        </div>
+      </article>
+
+      <article class="disc" data-idx="1">
+        <div><span class="kicker">RUN_B2C3D4</span><h2>哈</h2></div>
+        <div class="meta"><span class="badge done">已完成</span><span>2026-07-28</span><span>2 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">哈</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble">嗨你好！我是 Agentic GenBI 知识探索 Agent，能帮你查证已有报表、SQL、ETL、Hop 文件和业务口径。</div></div>
+        </div>
+      </article>
+
+      <article class="disc" data-idx="2">
+        <div><span class="kicker">RUN_C3D4E5</span><h2>你好</h2></div>
+        <div class="meta"><span class="badge done">已完成</span><span>2026-07-28</span><span>3 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">你好</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble">你好！我是 Agentic GenBI 知识探索 Agent，主要面向 BI 分析师和运营人员。</div></div>
+          <div class="msg user"><span class="av">J</span><div class="bubble">你能做什么？</div></div>
+        </div>
+      </article>
+
+      <article class="disc" data-idx="3">
+        <div><span class="kicker">RUN_D4E5F6</span><h2>嘿</h2></div>
+        <div class="meta"><span class="badge done">已完成</span><span>2026-07-28</span><span>2 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">嘿</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble">嘿！需要我帮你探索什么？</div></div>
+        </div>
+      </article>
+
+      <article class="disc" data-idx="4">
+        <div><span class="kicker">RUN_E5F6A7</span><h2>嘿 (二)</h2></div>
+        <div class="meta"><span class="badge done">已完成</span><span>2026-07-28</span><span>2 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">嘿</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble">嗨！有什么业务问题想查证？</div></div>
+        </div>
+      </article>
+
+      <article class="disc active" data-idx="5">
+        <div><span class="kicker">RUN_F6A7B8</span><h2>嘿 (三)</h2></div>
+        <div class="meta"><span class="badge pending">待确认</span><span>2026-07-28</span><span>2 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">嘿</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble"><strong>探索未完成</strong>原因：Error code: 429 - Token Plan 用量上限。已保留当前发现，可继续追问或重新运行。</div></div>
+        </div>
+      </article>
+
+      <article class="disc" data-idx="6">
+        <div><span class="kicker">RUN_A7B8C9</span><h2>嘿 (四)</h2></div>
+        <div class="meta"><span class="badge pending">待确认</span><span>2026-07-28</span><span>2 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">嘿</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble"><strong>探索未完成</strong>Token 配额不足 (429)。</div></div>
+        </div>
+      </article>
+
+      <article class="disc" data-idx="7">
+        <div><span class="kicker">RUN_B8C9D0</span><h2>测试连接</h2></div>
+        <div class="meta"><span class="badge pending">待确认</span><span>2026-07-28</span><span>2 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">测试连接，只回答是否能连接模型</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble"><strong>未连接</strong>Token 配额不足 (429)，无法响应。</div></div>
+        </div>
+      </article>
+
+      <article class="disc" data-idx="8">
+        <div><span class="kicker">RUN_C9D0E1</span><h2>首购后 30 天复购率 (二)</h2></div>
+        <div class="meta"><span class="badge running">进行中</span><span>刚刚</span><span>2 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">首购后 30 天复购率</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble">正在搜索资源库...</div></div>
+        </div>
+      </article>
+
+      <article class="disc" data-idx="9">
+        <div><span class="kicker">RUN_D0E1F2</span><h2>库存周转异常 SKU</h2></div>
+        <div class="meta"><span class="badge pending">待确认</span><span>今天 10:18</span><span>4 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">库存周转异常 SKU？</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble">找到 3 个候选 SKU：SKU-A、SKU-B、SKU-C。请确认时间窗口（近 7 / 30 / 90 天）。</div></div>
+          <div class="msg user"><span class="av">J</span><div class="bubble">30 天</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble">正在分析 30 天窗口...</div></div>
+        </div>
+      </article>
+
+      <article class="disc" data-idx="10">
+        <div><span class="kicker">RUN_E1F2A3</span><h2>华东 GMV 下滑原因</h2></div>
+        <div class="meta"><span class="badge done">已完成</span><span>昨天</span><span>8 条消息</span></div>
+        <div class="messages">
+          <div class="msg user"><span class="av">J</span><div class="bubble">华东 GMV 下滑原因？</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble">定位到 3 个原因：① 客单价 ② 复购率 ③ 退货率</div></div>
+          <div class="msg agent"><span class="av">A</span><div class="bubble"><strong>沉淀</strong>已写入知识库。</div></div>
+        </div>
+      </article>
+
+    </div>
+    <div class="hint">← 点左侧任意一项，**整列**在 x 轴滑动到对应卡片 →</div>
+  </main>
+
+  <script>
+    const deck = document.getElementById('deck');
+    const sessionItems = document.querySelectorAll('.session-item');
+    const discs = Array.from(deck.children);
+
+    function activate(idx) {
+      const i = Number(idx);
+      sessionItems.forEach((el, j) => el.classList.toggle('active', j === i));
+      discs.forEach((el, j) => el.classList.toggle('active', j === i));
+      // x 轴滑动：把整列 translateX 使目标卡中心对齐视图中心
+      const target = deck.children[i];
+      if (target) {
+        const deckRect = deck.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        const offset = (targetRect.left + targetRect.width / 2) - (deckRect.left + deckRect.width / 2);
+        deck.style.transform = `translateX(${-offset}px)`;
+      }
+    }
+
+    sessionItems.forEach((el, i) => el.addEventListener('click', () => activate(i)));
+    discs.forEach((el, i) => el.addEventListener('click', () => activate(i)));
+
+    window.addEventListener('load', () => activate(5));
+  </script>
+</body>
+</html>

@@ -10,7 +10,7 @@ export type ExplorationMessage = {
     label: string;
     items: string[];
   }[];
-  action?: "沉淀为知识";
+  action?: "保存到知识库";
 };
 
 export type Exploration = {
@@ -19,6 +19,8 @@ export type Exploration = {
   agent: string;
   status: ExplorationStatus;
   updatedAt: string;
+  createdAt?: string;
+  lastMessageAt?: string;
   resources: number;
   summary: string;
   messages: ExplorationMessage[];

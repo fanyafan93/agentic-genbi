@@ -70,6 +70,36 @@ class KnowledgeStoreTest(unittest.TestCase):
             self.assertEqual(store.clear_knowledge(), 1)
             self.assertEqual(store.list_knowledge(), [])
 
+    def test_search_update_and_tags_for_knowledge_base(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = KnowledgeStore(Path(temp_dir) / "knowledge.jsonl")
+            record = store.save_verified_knowledge(
+                title="毛利率",
+                question="毛利率怎么算？",
+                conclusion="毛利额 / 收入净额。",
+                scope="财务指标",
+                verification="财务报表核验",
+                evidence_refs=["dm.dm_fina_sales_profit_sum"],
+                metadata={
+                    "type": "metric_definition",
+                    "status": "pending",
+                    "owner": "财务 BI 组",
+                    "tags": ["财务指标", "报表口径"],
+                },
+            )
+
+            matched = store.search_knowledge(query="收入净额", item_type="metric_definition", tag="财务指标")
+            updated = store.update_knowledge(
+                record.id,
+                metadata={"status": "approved", "approvals": [{"role": "财务", "status": "approved"}]},
+            )
+            tags = store.list_tags()
+
+            self.assertEqual([item.id for item in matched], [record.id])
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated.metadata["status"], "approved")
+            self.assertEqual({tag["name"] for tag in tags}, {"财务指标", "报表口径"})
+
 
 if __name__ == "__main__":
     unittest.main()

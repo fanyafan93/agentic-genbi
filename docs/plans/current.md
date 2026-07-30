@@ -5,70 +5,99 @@
 ## 当前状态
 
 - 仓库：`E:\my_repo\agentic genbi`
-- 分支：`feature/data-investigation-frontend`
-- 当前切片：把知识探索的用户侧命名收口为“探索任务/探索过程”，底层 `Conversation` 只作为通用多轮交互能力，`run_*` 只保留为内部审计执行记录。
-- 工作区注意：当前工作区已有大量历史未跟踪/已修改文件，本轮只处理知识探索继续追问链路、相关测试和文档，不回退无关改动。
+- 分支：`feature/knowledge-base-ui`
+- 当前切片：把知识探索里的“知识沉淀”扩展为可交互的“知识库”模块，并补基础后端知识资产 API。
+- 工作区注意：本轮改动集中在知识库 UI、知识库 API、测试和边界文档。
 
 ## 本轮变更
 
-- 新增 PostgreSQL 持久化实现：
-  - `exploration_run_traces`：保存探索 Run 汇总。
-  - `exploration_run_events`：保存探索 Run 完整事件流。
-  - `verified_knowledge`：保存知识沉淀记录。
-- 保留原 JSONL store 作为测试与离线开发存储，不作为知识探索运行时降级路径。
-- `docker-compose.yml` 中 backend 默认启用 `GENBI_PERSISTENCE=postgres`，并通过 `GENBI_DATABASE_URL` 连接同一个 Postgres。
-- 新增迁移脚本：`python -m backend.scripts.migrate_file_stores_to_postgres`，用于把 `.resource-index/*.jsonl` 迁入 Postgres。
-- API 默认服务现在把同一个 knowledge store 注入给 Agent 工具和 `/api/knowledge`，避免写入和读取不一致。
-- 新增后端依赖：`psycopg[binary]`。
-- 知识探索继续追问不再由前端构造“这是同一个知识探索会话...”的合成问题；前端只发送用户本轮真实输入。
-- 后端 `RunTraceStore`/Postgres trace store 新增按 `conversation_id` 查找最近关联 Run 的能力。
-- 真实 Agent Runner 调用前，后端会读取同一探索会话的历史事件，整理为受控上下文，再附加本轮追问。
-- 后端新增探索会话 API：`POST/GET/DELETE /api/explorations/conversations` 和 `POST /api/explorations/conversations/stream`；旧 `/api/explorations/runs/*` 保留兼容。
-- 新建探索任务现在生成独立 `conv_*`，每次提问/追问生成单独 `run_*`；一个 `conv_*` 下可聚合多个 `run_*`。
-- 前端知识探索改为调用 conversation API；恢复会话详情时会聚合同一 `conversation_id` 下的多轮用户消息和 Agent 输出。
-- 前端探索页标题区小标签展示当前探索 ID；知识探索左侧仍是“探索任务”，内部 `run_*` 改为用户可见的“执行追踪”。
-- 架构文档补充命名边界：底层 `Conversation` 可复用于分析、知识探索、Agent 调试等模块，但知识探索 UI 不泛称“会话”。
-- 去掉“你好/你能干什么”等固定短路回复；有真实 Agent Runner 时统一进入 Agent 链路。
-- 去掉知识探索本地模拟降级：未配置真实 Agent Runtime 或后端不可用时明确失败，不再生成本地模拟搜索、证据或追问。
-- 前端会自动过滤旧浏览器缓存中的 `local-*` 探索任务，避免历史本地占位继续出现在探索列表。
-- SDK `message_output_created` 流事件不再额外渲染为“探索进展”，避免最终回答同时显示成进展和结论。
-- 资源库索引已用当前本机 `E:\my_repo\agentic genbi\资源库` 重建，当前索引包含 3450 个资源。
-- `ResourceLibrary` 读取资源原文片段时会优先使用索引 root；如果索引 root 在当前运行环境不可用，则回退到 `GENBI_RESOURCE_LIBRARY_ROOT` 或项目下 `资源库`，避免本机路径与 Docker 容器路径互相影响。
+- 新增 `frontend/src/modules/knowledge-base/` 领域模块：
+  - `types.ts`：统一 `KnowledgeBaseItem`，覆盖语义层、探索沉淀和治理字段。
+  - `mock.ts`：提供指标、字段映射、报表逻辑、维度和冲突口径的演示知识。
+  - `logic.ts`：提供筛选、标签汇总、后端记录映射和保存 payload 构建。
+  - `api.ts`：读取、创建、更新知识库记录，并读取后端标签。
+  - `components/KnowledgeBase.tsx`：实现知识库三栏 UI。
+- 知识库 UI 提供 5 个主 tab：`全部知识`、`语义层`、`探索沉淀`、`认证中心`、`标签体系`。
+- 知识库 UI 提供左侧分类/标签/状态/负责人筛选，中间知识列表，右侧详情与编辑面板。
+- 知识详情包含概览、语义定义、证据与来源、关联对象、认证记录、版本历史和 Agent 使用记录。
+- 支持新建知识、编辑知识、切换认证状态、按当前分类新建、标签体系跳转筛选。
+- 知识探索第三个 tab 从“知识沉淀”改为“知识库”；探索中的保存动作文案改为“保存到知识库”。
+- 清理了知识探索旧动作名，前端消息 action 只保留“保存到知识库”。
+- 知识探索右侧主区切换采用方案 A：保留现有探索、资源库、知识库各自 UI，不统一工作区外壳；主区切换时旧内容先淡出、新内容再淡入，并支持 `prefers-reduced-motion`。
+- “我的探索”任务切换改为会话卡片堆：选中探索会话滚到前景，其他探索会话以偏移、缩放和透明度堆叠在后方；保留消息详情、等待状态和“保存到知识库”动作。
+- 会话卡片堆新增视觉选中态步进：真实选中会话立即更新，前景卡片按相邻索引快速滚动到目标会话，并在落位时淡入标题、消息和输入框。
+- 会话卡片堆过渡加大为电影卡片效果：前景卡片会按方向横向滑出，目标卡片从后方高亮放大进入，后方卡片堆同步错位。
+- 会话卡片舞台比例调整：保留背景作为舞台，主卡片约占背景宽度 3/4；卡片堆允许在主卡容器外露出边缘，以恢复电影卡片的层叠切换感。
+- 新建探索时会把草稿探索临时插入卡片堆，立即展示一张完整空会话卡片和提示；切换动画期间只渲染轻量卡片封面，目标卡片落位后再渲染完整会话内容，降低卡顿。
+- 会话卡片舞台继续收紧横向空隙：主卡片宽度提高到 `min(1080px, 86%)`，卡片内部左右 padding 降低到最大 `46px`，保留少量背景留白但减少内容压缩。
+- 探索会话前端类型新增 `createdAt` 和 `lastMessageAt`；后端运行摘要和事件流映射会保留创建时间、最后会话时间，并显示到分钟。
+- “我的探索”左侧列表按最后会话时间倒序展示，列表时间显示最后会话时间；卡片详情头部显示创建时间。
+- 会话卡片内部消息展示改回主分支的探索消息样式：使用 `exploration-message`、`message-avatar`、`message-bubble` 和 `message-title` 结构；外层电影卡片堆保持不变。
+- 探索保存知识时默认写入治理元数据：`type=verified_conclusion`、`status=pending`、`visibility=team`、`tags=["探索沉淀"]`、`agent_visible=true`。
+- 后端 `KnowledgeStore` 新增知识搜索、更新和标签汇总能力；JSONL 测试存储与 Postgres 存储保持同一接口。
+- 后端 `/api/knowledge` 支持 `q/type/status/tag/owner/limit` 筛选；新增 `PATCH /api/knowledge/{id}` 和 `GET /api/knowledge/tags`。
+- Postgres 仍复用 `verified_knowledge.metadata JSONB` 承载知识库扩展字段，未引入新表或迁移。
 
 ## 已验证
 
-- `python -m unittest backend.tests.test_exploration_api -v`：11 个探索 API 测试通过，包含会话 API 聚合多轮执行记录。
-- `python -m unittest discover -s backend\tests -v`：71 个后端测试通过。
-- `python -m compileall -q backend`：通过。
-- `cmd /c npm run test -- investigation-events`：33 个前端事件映射测试通过。
-- `cmd /c npm run build`：Next.js 构建通过。
-- `docker compose config --quiet`：Compose 配置可解析。
-- `docker compose up -d --build backend frontend`：backend、frontend、postgres 均已启动。
-- 最后一次 `docker compose ps` 确认 `agentic-genbi-backend-1`、`agentic-genbi-frontend-1` 和 `agentic-genbi-postgres-1` 均在运行。
-- 已通过 `POST /api/explorations/conversations` 直接验证新建探索返回 `conv_*`，连续两轮消息会在同一个 `conv_*` 下产生多个 `run_*` 并聚合；临时验证记录已删除。
-- 已执行迁移脚本，迁移结果：
-  - `run_traces`: 72
-  - `run_events`: 20814
-  - `knowledge_records`: 4
-- 已直接查询 Postgres，三张表计数与迁移结果一致。
-- `GET http://192.168.101.12:8000/api/explorations/runs?limit=3` 可从后端返回已迁移 Run。
-- `GET http://192.168.101.12:8000/api/knowledge?limit=3` 可从后端返回已迁移知识。
-- 已通过 `/api/knowledge` 创建并删除临时记录 `kn_7645534f8a45`，验证新写入路径也走 Postgres。
-- 后端容器中已确认 `GENBI_PERSISTENCE=postgres`，且 `GENBI_DATABASE_URL` 已配置（未输出连接串）。
-- `python -m unittest backend.tests.test_resource_tools -v`：5 个资源库工具测试通过，包含索引 root 不可用时回退到运行环境资源目录的用例。
-- `python -m backend.resource_library.tools search "推广总览明细表" --limit 3`：命中 `res_1c3d8e6e772a0f52`。
-- `python -m backend.resource_library.tools excerpt res_1c3d8e6e772a0f52 --section match --query dm_adv_tm_total --max-lines 40`：可读取 `推广总览明细表.cpt` 中受控 SQL 片段。
+- `python -m unittest backend.tests.test_knowledge_store backend.tests.test_exploration_api -v`：16 个后端相关测试通过。
+- `python -m unittest discover -s backend\tests -v`：74 个后端测试通过。
+- `cmd /c npm run test -- knowledge-base investigation-events`：39 个前端相关测试通过。
+- `cmd /c npm run test -- knowledge-base investigation-events`：方案 A 切换动效落地后，39 个前端相关测试通过。
+- `cmd /c npm run test -- knowledge-base investigation-events`：方案 A 两段式切换调整后，39 个前端相关测试通过。
+- `cmd /c npm run test -- knowledge-base investigation-events`：探索会话卡片堆调整后，39 个前端相关测试通过。
+- `cmd /c npm run test -- knowledge-base investigation-events`：会话卡片堆步进过渡调整后，39 个前端相关测试通过。
+- `cmd /c npm run test -- knowledge-base investigation-events`：电影卡片式过渡加大后，39 个前端相关测试通过。
+- `cmd /c npm run test -- knowledge-base investigation-events`：3/4 卡片舞台与卡片堆外露调整后，39 个前端相关测试通过。
+- `cmd /c npm run test -- knowledge-base investigation-events`：新建探索草稿卡片与轻量切换渲染调整后，39 个前端相关测试通过。
+- `cmd /c npm run test`：会话时间与卡片间距调整后，4 个前端测试文件、42 个测试通过。
+- `cmd /c npm run test`：卡片内部消息展示改回主分支样式后，4 个前端测试文件、42 个测试通过。
+- `cmd /c npm run test`：4 个前端测试文件、42 个测试通过。
+- `cmd /c npm run build`：方案 A 切换动效落地后，Next.js 构建通过。
+- `cmd /c npm run build`：方案 A 两段式切换调整后，Next.js 构建通过。
+- `cmd /c npm run build`：探索会话卡片堆调整后，Next.js 构建通过。
+- `cmd /c npm run build`：会话卡片堆步进过渡调整后，Next.js 构建通过。
+- `cmd /c npm run build`：电影卡片式过渡加大后，Next.js 构建通过。
+- `cmd /c npm run build`：3/4 卡片舞台与卡片堆外露调整后，Next.js 构建通过。
+- `cmd /c npm run build`：新建探索草稿卡片与轻量切换渲染调整后，Next.js 构建通过。
+- `cmd /c npm run build`：会话时间与卡片间距调整后，Next.js 构建通过。
+- `cmd /c npm run build`：卡片内部消息展示改回主分支样式后，Next.js 构建通过。
+- `docker compose restart frontend`：前端容器 `agentic-genbi-frontend-1` 已重启并重新启动。
+- `docker compose config --quiet`：Compose 配置可解析；出现 Docker 用户级配置读取权限警告 `C:\Users\Jason\.docker\config.json: Access is denied`，但命令返回成功。
+- Chrome DevTools MCP 可打开 `http://192.168.101.12:3000/`，但当前 Chrome 未登录，只验证到登录页，未完成登录态下的视觉检查。
 
 ## 边界与风险
 
-- 资源库原文件、结构摘要和搜索索引本轮不迁入数据库；它们仍是可重建的本地文件索引与受控片段读取能力。
-- 当前 PostgreSQL 表由后端启动时 `CREATE TABLE IF NOT EXISTS` 创建，尚未接入正式 Alembic/Prisma 迁移治理。
-- 当前已提供用户侧 `conv_*`，但数据库仍沿用 run trace/event 聚合同一 `conversation_id`；尚未建立正式 `Conversation` / `Message` 表。
-- 完整会话、Artifact、Agent、Automation、权限、审计和对象存储仍未迁移。
-- `GET /api/runtime/status` 仍提示缺少模型成本估算价格；Run trace 会保留 token，但成本字段可能为空。
+- 当前知识库后端基础能力复用 `verified_knowledge.metadata`；这是适合 demo 的演进方式，但未来正式知识库仍需要独立表结构、索引、权限和版本表。
+- 知识库 UI 有完整交互，但导入、批量打标、细粒度权限、正式审批流和 Agent 引用审计仍是前端占位或本地状态。
+- 当前未完成登录态浏览器视觉验证，需要用户登录后再用 Chrome DevTools 或 Playwright 做一次真实页面检查。
 
 ## 下一步
 
-1. 后续把探索会话的用户权限校验下沉到后端，而不是只依赖前端传 `user_id`。
-2. 为知识探索补正式 `Conversation` / `Message` 模型，替代当前基于 Run trace 的聚合实现。
-3. 为 PostgreSQL 持久化补正式迁移体系和最小集成测试。
+1. 登录态下验证知识库页面布局和交互，按实际观感微调密度与按钮位置。
+2. 设计正式知识库数据库模型：`knowledge_items`、`knowledge_versions`、`knowledge_approvals`、`knowledge_tags`、`knowledge_usage_events`。
+3. 把知识探索里的“保存到知识库”改成可选择保存类型的弹层，而不是默认保存为探索结论。
+## 2026-07-29 handoff note
+
+- Added a resource-library inventory overview tool after `conv_53d0a32799c7`: `summarize_resource_library` now returns total resources, type counts, top-level and second-level directory counts, demo vs business resource counts, and non-demo samples. The Knowledge Exploration Agent prompt now requires this tool for resource-library overview questions instead of inferring from keyword search hits. Added `GET /api/resources/overview` for direct inspection and the Chinese tool label `查看资源库总览`. Verification: `python -m unittest backend.tests.test_resource_tools -v`, `python -m unittest backend.tests.test_exploration_api -v`, `docker compose restart backend`, `python -m backend.resource_library.tools overview --sample-limit 5`, and `GET /api/resources/overview?sample_limit=5` passed; the live index reports 3450 resources, 2829 business resources, and 621 demo resources.
+- Optimized the Knowledge Exploration card switch path to reduce visible stutter.
+- The active card now transitions directly to the selected conversation after one animation window instead of stepping through every intermediate conversation.
+- During card switching, hidden cards are not rendered and message Markdown is only filtered/rendered for the active target card.
+- CSS card transitions now avoid animated shadow changes and use layout/paint containment for the card deck and cards.
+- Verification: `cmd /c npm test` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Removed the Knowledge Exploration sidebar helper sentence because the product direction no longer needs that explanatory copy. Verification: `cmd /c npm test` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Fixed resource search type filtering after `conv_87fe571647fa`: Agent had searched CPT resources with `resource_type=cpt`, while indexed FineReport files use `finereport_cpt`; added aliases for common human resource type names such as `cpt`, `.cpt`, `finereport`, `hpl`, and `hwf`. Verification: `python -m unittest backend.tests.test_resource_tools -v`, `python -m unittest backend.tests.test_exploration_api -v`, and `cmd /c npm test` passed; `docker compose restart backend` restarted `agentic-genbi-backend-1`; direct API search for `q=抖音销售明细表&resource_type=cpt` now returns `抖音销售明细表.cpt`.
+- Rechecked the missing Knowledge Base report: the `frontend/src/modules/knowledge-base/` module and `feat: add knowledge base workspace` commit still exist, but `DataInvestigation.tsx` was still rendering the older verified-knowledge detail panel for the knowledge tab. Restored the Knowledge Base tab label and mounted `KnowledgeBase` in the main knowledge tab. Verification: `cmd /c npm run test -- knowledge-base investigation-events` and `cmd /c npm run build` passed in `frontend`.
+- Adjusted the Knowledge Base tab presentation after user feedback: `KnowledgeBase` is now mounted inside a dedicated stage with centered width, breathing room, and two subtle rear layers so it reads closer to the layered “我的探索” card stage instead of a full-bleed flat page. Verification: `cmd /c npm run test -- knowledge-base investigation-events` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Widened the Knowledge Base stage from `min(1180px, 88%)` to `min(1320px, 94%)` so the layered layout keeps its depth but gives the three-column workspace more room. Verification: `cmd /c npm run test -- knowledge-base investigation-events` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Removed the two rear pseudo-card layers from the Knowledge Base stage per user feedback; the Knowledge Base now keeps the wider centered stage and single main workspace card only. Verification: `cmd /c npm run test -- knowledge-base investigation-events` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Adjusted the active exploration card after browser comments: widened the card deck from `min(1080px, 86%)` to `min(1180px, 92%)`, reduced active card side padding, and reduced message-list side padding so the title starts further left and the message area expands horizontally. Verification: `cmd /c npm run test -- knowledge-base investigation-events` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Restored the original option-A tab transition wrapper for Knowledge Exploration main content: `explorations/resources/knowledge` now render through `exploration-tab-transition` with a short leave phase before switching `renderedTab`, then enter animation. Verification: `cmd /c npm run test -- knowledge-base investigation-events` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Adjusted the “我的探索” conversation card stack toward the user-provided reference: the active conversation remains a large centered card, while neighboring conversations shift farther left/right, hide their internal text, and read as exposed rear card edges instead of small readable previews. Verification: `cmd /c npm run test -- knowledge-base investigation-events` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Fixed the card-stack edge exposure for first/last conversations: neighboring card offsets now wrap around the exploration list, so the first selected conversation still shows the last conversation on the left and the second on the right; rear card borders/shadows were also strengthened. Verification: `cmd /c npm run test -- knowledge-base investigation-events` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Reworked the exploration card stack motion toward a horizontal carousel: neighboring conversations now sit left/right using percentage translation and smaller scale, while the active conversation translates to center and scales up; old extra offset/rotation rules were removed so switching reads as horizontal pan plus zoom. Verification: `cmd /c npm run test -- knowledge-base investigation-events` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Refined the carousel into an overlapping stack after user screenshots: neighboring cards now translate only `22%/36%` and scale to `.95/.9`, so they sit close behind the active card instead of flying to far left/right; the active exiting card now moves to the side stack instead of being pinned by the active transform. Verification: `cmd /c npm run test -- knowledge-base investigation-events` and `cmd /c npm run build` passed in `frontend`; `docker compose restart frontend` restarted `agentic-genbi-frontend-1`.
+- Corrected the exploration carousel after live browser verification: removed paint containment that clipped all exposed rear-card edges, kept lightweight shells for every conversation, and anchored layout to the target card so the outgoing and incoming cards pan and scale in the same transition. The idle state now exposes two rear layers on both sides; the transition cover keeps the target summary visible instead of showing a blank card. The carousel retains a short `260ms` transform transition when the in-app browser reports `prefers-reduced-motion: reduce`, because this interaction explicitly depends on directional motion. Verification: `cmd /c npm run test -- knowledge-base investigation-events` passed with 39 tests, `cmd /c npm run build` passed, `docker compose restart frontend` restarted `agentic-genbi-frontend-1`, and signed-in in-app browser inspection confirmed four visible rear cards, a non-zero transform transition, and a visible target summary during the moving state.
+- Removed the carousel's delayed conversation cover after user feedback: the selected card now renders its full message list and composer as soon as it starts moving, and the active card becomes fully opaque immediately while preserving transform motion. Conversation changes now set the message list to its maximum scroll position in a layout effect, so the first visible frame shows the latest message; later messages within the same conversation still use smooth follow scrolling. Verification: `cmd /c npm run test -- knowledge-base investigation-events` passed with 39 tests, `cmd /c npm run build` passed, `docker compose restart frontend` restarted `agentic-genbi-frontend-1`, and signed-in browser inspection during `is-moving` measured `scrollTop=857`, `maxScrollTop=857`, and `distanceFromBottom=0`.
+- Reframed the Knowledge Exploration second tab from “资源库” to “语义模型” without changing the existing resource-search API contract. The UI now presents FineReport reports as report-level semantic models, tables as data-element semantic models, ETL as lineage semantic models, and SQL as query semantic models; its detail panel explains the model source and what an Agent can understand. Added hover/focus descriptions for all three top-level tabs: “我的探索” resolves concrete questions with people, “语义模型” helps Agents understand data and systems, and “知识库” retains confirmed business experience. Verification: `cmd /c npm run test -- knowledge-base investigation-events` passed with 39 tests; `cmd /c npm run build` passed; signed-in in-app browser confirmed the new tab label, semantic-model detail content, and all three accessible description strings. The frontend was already serving the changed code through hot update, so no manual container restart was required.
+- Corrected the top-level Tab description overlays after feedback: the first tooltip now opens to the right and the last opens to the left, so both remain inside the Knowledge Exploration sidebar instead of being covered by adjacent vertical rails. Verification: `cmd /c npm run test -- knowledge-base investigation-events` passed with 39 tests; `cmd /c npm run build` passed; signed-in browser geometry inspection confirmed all three tooltip bounds sit within the navigation width.

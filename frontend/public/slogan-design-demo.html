@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>topbar-slogan 设计升级 · 5 个 demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 40px 24px 60px;
+      background: linear-gradient(135deg, #c5c8cc 0%, #ecebe8 44%, #f5d0c8 100%);
+      font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      color: #1e3a5f;
+      min-height: 100vh;
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; letter-spacing: .5px; }
+    .sub { color: #6b7480; font-size: 13px; margin: 0 0 32px; max-width: 900px; line-height: 1.6; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+      gap: 20px;
+      max-width: 1280px;
+    }
+    .demo {
+      background: rgba(255,255,255,.85);
+      border: 1px solid rgba(30,58,95,.1);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 8px 28px rgba(30,58,95,.06);
+      backdrop-filter: blur(20px);
+    }
+    .demo-tag {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 18px;
+      background: rgba(30,58,95,.04);
+      border-bottom: 1px solid rgba(30,58,95,.08);
+      font-size: 12px; color: #6b7480;
+    }
+    .demo-tag strong { color: #1e3a5f; font-size: 13px; font-weight: 800; }
+    .pill {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      background: rgba(232,104,90,.12); color: #eb5b4f;
+      font-size: 10px; font-weight: 800; letter-spacing: .04em;
+    }
+    .stage {
+      padding: 60px 32px;
+      background: linear-gradient(180deg, #fafaf7 0%, #f0ece4 100%);
+      display: grid;
+      place-items: center;
+      min-height: 200px;
+    }
+    .hint {
+      padding: 10px 18px;
+      background: rgba(30,58,95,.04);
+      border-top: 1px solid rgba(30,58,95,.08);
+      font-size: 11px;
+      color: #6b7480;
+      text-align: center;
+    }
+    .slogan { display: inline-flex; align-items: baseline; gap: .45em; font-family: "Segoe UI", Manrope, "Microsoft YaHei", sans-serif; font-size: 1.55rem; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; white-space: nowrap; }
+
+    /* ========= 1 · 整句浮动 + DATA 脉动（基线） ========= */
+    .v1 { animation: v1-float 3.2s ease-in-out infinite; }
+    .v1 .dt { animation: v1-pulse 2.6s ease-in-out infinite; }
+    @keyframes v1-float {
+      0%, 100% { transform: translateY(0); }
+      50%      { transform: translateY(-3px); }
+    }
+    @keyframes v1-pulse {
+      0%, 100% { transform: skewX(-6deg) scale(1); color: #e8685a; }
+      50%      { transform: skewX(-6deg) scale(1.08); color: #d75b4e; }
+    }
+
+    /* ========= 2 · 下划线扫光（白线在字下穿过） ========= */
+    .v2 { position: relative; padding: 0 4px 6px; }
+    .v2::after {
+      content: ""; position: absolute;
+      left: 0; right: 0; bottom: 0; height: 1.5px;
+      background: linear-gradient(90deg, transparent 0%, #1e3a5f 30%, #e8685a 50%, #1e3a5f 70%, transparent 100%);
+      background-size: 200% 100%;
+      animation: v2-slide 3.2s linear infinite;
+    }
+    .v2 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); display: inline-block; animation: v2-pulse 2.6s ease-in-out infinite; }
+    @keyframes v2-slide { to { background-position: -200% 0; } }
+    @keyframes v2-pulse {
+      0%, 100% { transform: skewX(-6deg) scale(1); }
+      50%      { transform: skewX(-6deg) scale(1.08); }
+    }
+
+    /* ========= 3 · 字下方小数据点（dot 装饰） ========= */
+    .v3 .mk, .v3 .dt, .v3 .sn { position: relative; display: inline-block; padding-bottom: 8px; }
+    .v3 .mk::after, .v3 .sn::after { content: ""; position: absolute; left: 50%; bottom: 0; width: 4px; height: 4px; border-radius: 50%; background: #1e3a5f; transform: translateX(-50%); }
+    .v3 .dt::after { content: ""; position: absolute; left: 50%; bottom: 0; width: 6px; height: 6px; border-radius: 50%; background: #e8685a; transform: translateX(-50%); box-shadow: 0 0 0 3px rgba(232,104,90,.18); animation: v3-dot 2.4s ease-in-out infinite; }
+    .v3 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); display: inline-block; animation: v3-pulse 2.6s ease-in-out infinite; }
+    @keyframes v3-dot { 0%, 100% { box-shadow: 0 0 0 3px rgba(232,104,90,.18); } 50% { box-shadow: 0 0 0 6px rgba(232,104,90,.08); } }
+    @keyframes v3-pulse { 0%, 100% { transform: skewX(-6deg) scale(1); } 50% { transform: skewX(-6deg) scale(1.08); } }
+
+    /* ========= 4 · 引号装饰 + 整句浮动 ========= */
+    .v4 { position: relative; padding: 0 8px; animation: v4-float 3.2s ease-in-out infinite; }
+    .v4::before, .v4::after {
+      position: absolute; top: -2px; font-family: Georgia, serif; font-size: 2.2rem; line-height: 1; color: rgba(30,58,95,.32); font-weight: 700;
+    }
+    .v4::before { content: "“"; left: -22px; top: -8px; }
+    .v4::after  { content: "”"; right: -22px; top: -8px; }
+    .v4 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); display: inline-block; animation: v4-pulse 2.6s ease-in-out infinite; }
+    @keyframes v4-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+    @keyframes v4-pulse { 0%, 100% { transform: skewX(-6deg) scale(1); } 50% { transform: skewX(-6deg) scale(1.08); } }
+
+    /* ========= 5 · 中间分割线（DATA 两侧各 1 根 coral 短线） ========= */
+    .v5 .mk, .v5 .sn { position: relative; }
+    .v5 .mk::after, .v5 .sn::before { content: ""; position: absolute; top: 50%; width: 14px; height: 1.5px; background: rgba(232,104,90,.5); transform: translateY(-50%); }
+    .v5 .mk::after { right: -22px; }
+    .v5 .sn::before { left: -22px; }
+    .v5 { animation: v5-float 3.2s ease-in-out infinite; }
+    .v5 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); display: inline-block; animation: v5-pulse 2.6s ease-in-out infinite; }
+    @keyframes v5-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+    @keyframes v5-pulse { 0%, 100% { transform: skewX(-6deg) scale(1); } 50% { transform: skewX(-6deg) scale(1.08); } }
+
+    /* ========= 6 · 角标上标点（3 字顶部 3 个小 coral 点） ========= */
+    .v6 .mk, .v6 .dt, .v6 .sn { position: relative; padding-top: 8px; display: inline-block; }
+    .v6 .mk::before, .v6 .dt::before, .v6 .sn::before {
+      content: ""; position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+      width: 4px; height: 4px; border-radius: 50%; background: #e8685a; opacity: .7;
+    }
+    .v6 .dt::before { width: 5px; height: 5px; background: #e8685a; box-shadow: 0 0 0 3px rgba(232,104,90,.18); animation: v6-dot 2.4s ease-in-out infinite; }
+    .v6 { animation: v6-float 3.2s ease-in-out infinite; }
+    .v6 .dt { color: #e8685a; font-style: italic; transform: skewX(-6deg); animation: v6-pulse 2.6s ease-in-out infinite; }
+    @keyframes v6-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+    @keyframes v6-pulse { 0%, 100% { transform: skewX(-6deg) scale(1); } 50% { transform: skewX(-6deg) scale(1.08); } }
+    @keyframes v6-dot { 0%, 100% { box-shadow: 0 0 0 3px rgba(232,104,90,.18); } 50% { box-shadow: 0 0 0 6px rgba(232,104,90,.06); } }
+  </style>
+</head>
+<body>
+  <h1>topbar-slogan 设计升级 · 6 个 demo</h1>
+  <p class="sub">基于「整句浮动 + DATA 脉动」加 5 种**额外设计**：下划线扫光 / 字下数据点 / 引号装饰 / 分割短线 / 字上小点。</p>
+
+  <div class="grid">
+
+    <div class="demo">
+      <div class="demo-tag"><strong>1 · 基线（整句浮动 + DATA 脉动）</strong><span class="pill">基线</span></div>
+      <div class="stage">
+        <div class="slogan v1">
+          <span>MAKE</span><span class="dt">DATA</span><span>SENSE</span>
+        </div>
+      </div>
+      <div class="hint">整句上浮 3px + DATA 1.08× 脉动 + 颜色微变</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>2 · 下划线扫光</strong><span class="pill">流动</span></div>
+      <div class="stage">
+        <div class="slogan v2">
+          <span>MAKE</span><span class="dt">DATA</span><span>SENSE</span>
+        </div>
+      </div>
+      <div class="hint">底部 1.5px navy→coral→navy 渐变线永远从左往右滑过</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>3 · 字下数据点</strong><span class="pill">数据感</span></div>
+      <div class="stage">
+        <div class="slogan v3">
+          <span class="mk">MAKE</span><span class="dt">DATA</span><span class="sn">SENSE</span>
+        </div>
+      </div>
+      <div class="hint">每字下方 1 个小点，DATA 的点 6px + 3px coral 光晕呼吸</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>4 · 引号装饰</strong><span class="pill">强调</span></div>
+      <div class="stage">
+        <div class="slogan v4">
+          <span>MAKE</span><span class="dt">DATA</span><span>SENSE</span>
+        </div>
+      </div>
+      <div class="hint">左右两侧 Georgia 衬线引号，navy 32% 半透明</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>5 · DATA 两侧分割短线</strong><span class="pill">结构感</span></div>
+      <div class="stage">
+        <div class="slogan v5">
+          <span class="mk">MAKE</span><span class="dt">DATA</span><span class="sn">SENSE</span>
+        </div>
+      </div>
+      <div class="hint">DATA 两侧 14×1.5px coral 短横线（像 / 切分 /）</div>
+    </div>
+
+    <div class="demo">
+      <div class="demo-tag"><strong>6 · 字上小点（4 个角标风格）</strong><span class="pill">数据标签</span></div>
+      <div class="stage">
+        <div class="slogan v6">
+          <span class="mk">MAKE</span><span class="dt">DATA</span><span class="sn">SENSE</span>
+        </div>
+      </div>
+      <div class="hint">每字顶部居中小圆点，DATA 的点带 3px coral 光晕呼吸</div>
+    </div>
+
+  </div>
+</body>
+</html>

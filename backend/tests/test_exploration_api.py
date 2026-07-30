@@ -132,6 +132,51 @@ class ExplorationApiTest(unittest.TestCase):
             self.assertEqual(cleared.status_code, 200)
             self.assertEqual(cleared.json()["deleted_count"], 1)
 
+    def test_knowledge_base_metadata_search_update_and_tags_api(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cwd = Path.cwd()
+            try:
+                import os
+
+                os.chdir(temp_dir)
+                app = create_app(ExplorationRunService())
+                client = TestClient(app)
+
+                saved = client.post(
+                    "/api/knowledge",
+                    json={
+                        "title": "毛利率",
+                        "question": "毛利率怎么算？",
+                        "conclusion": "毛利额 / 收入净额。",
+                        "scope": "财务指标",
+                        "verification": "财务报表核验",
+                        "evidence_refs": ["dm.dm_fina_sales_profit_sum"],
+                        "type": "metric_definition",
+                        "status": "pending",
+                        "owner": "财务 BI 组",
+                        "tags": ["财务指标", "报表口径"],
+                        "related_tables": ["dm.dm_fina_sales_profit_sum"],
+                        "agent_visible": True,
+                    },
+                )
+                record_id = saved.json()["id"]
+                searched = client.get("/api/knowledge", params={"q": "收入净额", "type": "metric_definition", "tag": "财务指标"})
+                updated = client.patch(
+                    f"/api/knowledge/{record_id}",
+                    json={"status": "approved", "approvals": [{"role": "财务", "status": "approved", "approver": "财务负责人"}]},
+                )
+                tags = client.get("/api/knowledge/tags")
+            finally:
+                os.chdir(cwd)
+
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(saved.json()["metadata"]["type"], "metric_definition")
+            self.assertEqual(searched.status_code, 200)
+            self.assertEqual(searched.json()["records"][0]["id"], record_id)
+            self.assertEqual(updated.status_code, 200)
+            self.assertEqual(updated.json()["metadata"]["status"], "approved")
+            self.assertEqual({item["name"] for item in tags.json()["tags"]}, {"财务指标", "报表口径"})
+
     def test_run_trace_api_lists_created_run_trace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             trace_store = RunTraceStore(Path(temp_dir) / "run-traces.jsonl")

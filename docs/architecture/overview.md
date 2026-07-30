@@ -7,6 +7,7 @@
 - `frontend/src/app/page.tsx` 挂载分析工作台。
 - `modules/analysis` 提供会话 UI、mock Agent 客户端、Run 事件折叠、Artifact mock 与图表展示。
 - `modules/investigation` 提供知识探索 UI、领域类型、探索过程事件映射和运行环境状态提示；提交探索问题时调用配置的后端 API，服务未配置或失败时明确显示后端不可用，不再模拟探索结果。
+- `modules/knowledge-base` 提供知识库 UI、领域类型、mock 数据、筛选/映射逻辑和知识库 API 客户端；当前挂载在知识探索的“知识库”tab 中。
 - `ChartSpec -> ECharts` 是当前图表渲染链路。
 - `backend/resource_library` 提供本地资源库扫描器和结构摘要器，生成被 Git 忽略的资源索引 JSON 与结构摘要 JSON；当前只记录文件元信息、类型、大小、修改时间、hash、XML 标签计数、候选参数/数据集、SQL 读写表、输出字段和表达式候选等结构信号，不展示完整业务正文。
 - `backend/resource_library/exploration_agent.py` 提供 OpenAI Agents SDK 适配层：把资源库工具、数据库只读工具和本地知识沉淀包装成 Knowledge Exploration Agent 的 function tools；未安装 SDK 时返回明确依赖错误。
@@ -15,7 +16,7 @@
 - `backend/exploration/run_trace_store.py` 和 `backend/exploration/run_event_store.py` 保留最小本地 JSONL 存储作为测试与离线开发存储；Docker 真实后端默认通过 `backend/persistence/postgres_stores.py` 把探索 Run trace、Run events 和知识沉淀写入 PostgreSQL。
 - `backend/exploration/agent_runner.py` 提供 `LLMAgentRunner` 适配器；通过 `GENBI_EXPLORATION_RUNTIME=openai` 或 `llm` 启用，默认 provider 是 OpenAI，也可用 `GENBI_LLM_PROVIDER=minimax` 走 OpenAI-compatible endpoint；支持 `GENBI_EXPLORATION_MODEL`、`GENBI_EXPLORATION_MAX_TURNS` 和 `Runner.run_streamed()` 事件实时转发。
 - `backend/config/env.py` 负责加载项目 `.env` 或 `GENBI_ENV_FILE` 指向的 env 文件；LLM provider key、模型配置和 MySQL 连接信息均从 env 读取。MySQL 可使用 `GENBI_DB_*` 专用字段，也可从 `DATABASE_URL=mysql+pymysql://...` 解析，专用字段优先；`doctor` 用于确认 LLM Runner、MySQL 只读连接、资源库、前端 API 地址和成本估算配置是否就绪。
-- `backend/api/exploration_api.py` 提供 FastAPI 入口，暴露健康检查、运行环境状态、探索过程/SSE、兼容 Run API、资源库状态/搜索/详情/重建索引、知识列表/保存/删除/清空接口；开发期允许 `localhost:3000`、`127.0.0.1:3000` 以及环境变量声明的前端来源跨域访问，启动前需要安装 `backend/requirements.txt`。
+- `backend/api/exploration_api.py` 提供 FastAPI 入口，暴露健康检查、运行环境状态、探索过程/SSE、兼容 Run API、资源库状态/搜索/详情/重建索引、知识列表/筛选/保存/更新/删除/清空/标签接口；开发期允许 `localhost:3000`、`127.0.0.1:3000` 以及环境变量声明的前端来源跨域访问，启动前需要安装 `backend/requirements.txt`。
 - 前端已接入 Auth.js v5：`frontend/src/auth.ts` 使用自定义飞书 OAuth provider，读取 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 和 `AUTH_*` 环境变量；`frontend/src/app/api/auth/[...nextauth]/route.ts` 暴露 Auth.js 路由；首页未登录时展示飞书登录页，登录后进入工作台。
 - Auth 状态使用 Prisma + PostgreSQL DB session：`frontend/prisma/schema.prisma` 定义 Auth.js `User`、`Account`、`Session` 和 `VerificationToken` 表，迁移文件位于 `frontend/prisma/migrations/`。`User.role` 先保留为最小角色字段，默认 `user`。
 - 知识探索前端会从 Auth session 取得 `session.user.id`，请求探索任务列表与创建过程消息时传递 `user_id`；后端探索列表 API 支持按 `user_id` 过滤，用于当前 demo 的多用户探索列表隔离。
@@ -67,13 +68,15 @@ flowchart LR
 
 页面和组件只依赖领域类型与 API Service；mock 与真实服务返回相同的 HTTP/SSE 结构，不将 mock 脚本细节泄漏到 UI。
 
-知识探索不是“指标库优先”的页面，而是 BI 调查工作区：左二栏承载我的探索、资源库和知识沉淀；主区在选择探索任务时呈现一个探索过程。该过程由知识探索 Agent 驱动，以消息流展示检索过程、追问、证据折叠块和可沉淀结论。当前知识探索只沉淀为知识，不直接生成 Artifact 或可复用 Agent。语义定义是其中一项受控上下文能力。
+知识探索不是“指标库优先”的页面，而是 BI 调查工作区：左二栏承载我的探索、资源库和知识库；主区在选择探索任务时呈现一个探索过程。该过程由知识探索 Agent 驱动，以消息流展示检索过程、追问、证据折叠块和可保存到知识库的结论。当前知识探索只保存到知识库，不直接生成 Artifact 或可复用 Agent。
+
+知识库是独立领域模块，当前 UI 已提供 `全部知识`、`语义层`、`探索沉淀`、`认证中心` 和 `标签体系` 五个主视图。底层统一使用 `KnowledgeBaseItem` 表达指标定义、维度定义、业务实体、字段映射、口径公式、业务规则、数据链路、报表逻辑和探索结论，并记录创建人、负责人、可见范围、标签、认证、版本、冲突、证据和 Agent 可见性。当前后端基础能力仍复用 `verified_knowledge.metadata JSONB` 承载扩展字段；正式化时应拆出知识、版本、认证、标签和使用记录表。
 
 前端知识探索通过 `NEXT_PUBLIC_GENBI_API_BASE_URL` 接入真实探索 API；未配置或请求失败时明确显示后端不可用，不再生成本地模拟探索过程。前端创建探索或继续追问时优先调用 `POST /api/explorations/conversations/stream` 并按 SSE event 增量更新当前探索过程；失败时回退到一次性 `POST /api/explorations/conversations`，再失败则展示错误状态。登录态存在时，探索列表与新建消息会携带当前 Auth session 的用户 ID；这只隔离当前探索列表，不替代服务端数据权限。旧的 `/api/explorations/runs/*` 仍保留为兼容和内部排查入口。
 
 前端知识探索还会读取 `GET /api/runtime/status`，把 env doctor 的结果呈现为标题区运行状态：后端未连接、后端已连接但配置待补、或关键配置已就绪。这个状态只用于开发期可见性，不替代服务端鉴权、审计或生产可观测性。
 
-资源库和知识沉淀也通过同一后端接入：前端启动后会尝试调用 `GET /api/resources/status`、`GET /api/resources/search` 和 `GET /api/knowledge`；失败时可保留静态演示列表，但探索过程本身不再使用本地模拟结果。探索过程中的“沉淀为知识”会把用户问题、结论、范围和证据引用整理后调用 `POST /api/knowledge`；后端失败时应显示失败状态，不伪造成已沉淀。资源库重建由 `POST /api/resources/reindex` 执行，默认读取 `GENBI_RESOURCE_LIBRARY_ROOT` 或项目 `资源库/`。资源详情页可通过 `GET /api/resources/{resource_id}` 查看结构摘要分组，并通过 `GET /api/resources/{resource_id}/excerpt` 读取受控片段；服务端限制 section、行数和字节数，不提供完整文件浏览。结构摘要会把 FineReport 参数、数据集、读写表、输出字段、表达式候选，以及 Apache Hop 节点、读写表和字段候选作为可搜索信号。
+资源库和知识库也通过同一后端接入：前端启动后会尝试调用 `GET /api/resources/status`、`GET /api/resources/search`、`GET /api/knowledge` 和 `GET /api/knowledge/tags`；失败时可保留静态演示列表，但探索过程本身不再使用本地模拟结果。探索过程中的“保存到知识库”会把用户问题、结论、范围和证据引用整理后调用 `POST /api/knowledge`，并默认写入探索结论类型、待认证状态和 Agent 可见性；后端失败时应显示失败状态，不伪造成已保存。知识库编辑使用 `PATCH /api/knowledge/{id}`。资源库重建由 `POST /api/resources/reindex` 执行，默认读取 `GENBI_RESOURCE_LIBRARY_ROOT` 或项目 `资源库/`。资源详情页可通过 `GET /api/resources/{resource_id}` 查看结构摘要分组，并通过 `GET /api/resources/{resource_id}/excerpt` 读取受控片段；服务端限制 section、行数和字节数，不提供完整文件浏览。结构摘要会把 FineReport 参数、数据集、读写表、输出字段、表达式候选，以及 Apache Hop 节点、读写表和字段候选作为可搜索信号。
 
 资源库后端从本地索引器、结构摘要器和受控资源工具起步：扫描 allowlist 根目录，默认识别 `.cpt`、`.frm`、`.hpl`、`.hwf`、`.sql`、`.xml`、文档和样例数据等文件类型。索引与摘要文件仅作为本地运行产物，不提交 Git。Agent 和前端只通过 `search_resources`、`inspect_resource` 和 `read_resource_excerpt` 访问资源；搜索和摘要不返回完整正文，片段读取必须限定资源、字节数和行数。
 
@@ -93,7 +96,8 @@ flowchart LR
 Conversation → Run → Messages / Plan / Tool Calls / Artifacts
 Artifact → Versions / References / Automations
 Agent → Definition / Tools / Inputs / Outputs / Runs
-Knowledge Exploration Task → Exploration Process / Messages / Internal Runs / Resource Library / Validated Knowledge / Semantic Definitions
+Knowledge Exploration Task → Exploration Process / Messages / Internal Runs / Resource Library / Knowledge Base
+Knowledge Item → Type / Semantic Definition / Evidence / Approvals / Tags / Versions / Agent Usage
 ```
 
 Run 采用事件流表达状态变化。最小事件集合：

@@ -204,7 +204,9 @@ export async function readExplorationRun(runId: string): Promise<Exploration | n
       return payload.run
         ? {
             ...exploration,
-            updatedAt: formatTraceUpdatedAt(payload.run.completed_at || payload.run.started_at),
+            createdAt: payload.run.started_at || exploration.createdAt,
+            lastMessageAt: payload.run.completed_at || payload.run.started_at || exploration.lastMessageAt,
+            updatedAt: formatTraceUpdatedAt(payload.run.completed_at || payload.run.started_at || exploration.lastMessageAt || null),
           }
         : exploration;
     }
@@ -483,6 +485,11 @@ export function buildKnowledgePayload(exploration: Exploration, message: Explora
     run_id: exploration.id,
     metadata: {
       source: "knowledge_exploration_ui",
+      type: "verified_conclusion",
+      status: "pending",
+      visibility: "team",
+      tags: ["探索沉淀"],
+      agent_visible: true,
       message_id: message.id,
       agent: exploration.agent,
     },
@@ -613,12 +620,16 @@ export function mapRunTraceSummary(trace: RunTraceResponse): RunTraceSummary {
 
 function mapRunTraceToExplorationSummary(trace: RunTraceResponse): Exploration {
   const explorationId = trace.conversation_id || trace.run_id;
+  const createdAt = trace.started_at || trace.completed_at || null;
+  const lastMessageAt = trace.completed_at || trace.started_at || null;
   return {
     id: explorationId,
     title: trace.title || explorationId,
     agent: "知识探索 Agent",
     status: mapTraceStatusToExplorationStatus(trace.status),
-    updatedAt: formatTraceUpdatedAt(trace.completed_at || trace.started_at),
+    updatedAt: formatTraceUpdatedAt(lastMessageAt),
+    createdAt: createdAt || undefined,
+    lastMessageAt: lastMessageAt || undefined,
     resources: trace.tool_call_count,
     summary: trace.error || trace.question,
     messages: [
@@ -657,7 +668,14 @@ function mapTraceStatusToExplorationStatus(status: string): Exploration["status"
 
 function formatTraceUpdatedAt(value: string | null) {
   if (!value) return "未知";
-  return value.slice(0, 10);
+  return formatTraceDateTime(value);
+}
+
+function formatTraceDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.slice(0, 16);
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function getApiBaseUrl() {
@@ -683,6 +701,8 @@ function buildLocalRuntimeStatus(): RuntimeStatus {
 
 export function mapRunEventsToExploration(question: string, events: ExplorationRunEvent[]): Exploration {
   const rootRunId = events[0]?.run_id ?? `unavailable_${Date.now()}`;
+  const createdAt = events[0]?.created_at || null;
+  const lastMessageAt = events.at(-1)?.created_at || createdAt;
   const conversationId = stringValue(events.find((event) => event.type === "run.created")?.payload.conversation_id);
   const explorationId = conversationId || rootRunId;
   const title = getStringPayload(events, "agent.title.generated", "title") || generateLocalTitle(question);
@@ -853,6 +873,8 @@ export function mapRunEventsToExploration(question: string, events: ExplorationR
     title,
     agent: "知识探索 Agent",
     status,
+    createdAt: createdAt || undefined,
+    lastMessageAt: lastMessageAt || undefined,
     updatedAt: "刚刚",
     resources,
     summary: getStringPayload(events, "run.completed", "next_action") || getStringPayload(events, "run.failed", "detail") || "探索过程已创建。",
