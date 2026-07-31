@@ -41,12 +41,12 @@ describe("analysis backend client event mapping", () => {
       ),
     );
 
-    expect(events[0]).toEqual({
+    expect(events[0]).toMatchObject({
       type: "conversation-init",
       runId: "run_analysis_123",
       conversationId: "conv_analysis_456",
     });
-    expect(events[1]).toEqual({
+    expect(events[1]).toMatchObject({
       type: "user",
       nodeId: "user-run_analysis_123",
       content: "首购后 30 天复购率怎么定义？",
@@ -90,16 +90,68 @@ describe("analysis backend client event mapping", () => {
       ),
     );
 
-    expect(events[0]).toEqual({
+    expect(events[0]).toMatchObject({
       type: "run-init",
       runId: "run_analysis_789",
       conversationId: "conv_analysis_456",
     });
-    expect(events[1]).toEqual({
+    expect(events[1]).toMatchObject({
       type: "user",
       nodeId: "user-run_analysis_789",
       content: "continue question",
     });
+  });
+
+  test("maps streamed assistant deltas to token events on the final agent node", () => {
+    const events = Array.from(
+      mapBackendEvents(
+        [
+          {
+            type: "agent.message.delta",
+            run_id: "run_analysis_stream",
+            created_at: "2026-07-30T00:01:00Z",
+            payload: {
+              run_id: "run_analysis_stream",
+              thread_id: "conv_analysis_stream",
+              turn_id: "turn_analysis_stream",
+              delta: "你好，",
+            },
+          },
+          {
+            type: "agent.message.created",
+            run_id: "run_analysis_stream",
+            created_at: "2026-07-30T00:01:01Z",
+            payload: {
+              run_id: "run_analysis_stream",
+              thread_id: "conv_analysis_stream",
+              turn_id: "turn_analysis_stream",
+              content: "你好，完整回复。",
+            },
+          },
+        ],
+        "message",
+      ),
+    );
+
+    expect(events).toEqual([
+      {
+        type: "tokens",
+        nodeId: "agent-run_analysis_stream",
+        text: "你好，",
+        runId: "run_analysis_stream",
+        threadId: "conv_analysis_stream",
+        turnId: "turn_analysis_stream",
+      },
+      {
+        type: "agent",
+        nodeId: "agent-run_analysis_stream",
+        content: "你好，完整回复。",
+        mode: "replace",
+        runId: "run_analysis_stream",
+        threadId: "conv_analysis_stream",
+        turnId: "turn_analysis_stream",
+      },
+    ]);
   });
 
   test("sends the stored conversation id on continuation messages", async () => {
@@ -146,7 +198,7 @@ describe("analysis backend client event mapping", () => {
     expect(startBody.conversation_id).toBeUndefined();
     expect(messageBody.conversation_id).toBe("conv_analysis_456");
     expect(messageBody.turn_kind).toBe("message");
-    expect(messageEvents[0]).toEqual({
+    expect(messageEvents[0]).toMatchObject({
       type: "run-init",
       runId: "run_analysis_789",
       conversationId: "conv_analysis_456",
@@ -194,7 +246,7 @@ describe("analysis backend client event mapping", () => {
     expect(replyBody.conversation_id).toBe("conv_analysis_deep");
     expect(replyBody.turn_kind).toBe("reply");
     expect(replyBody.analysis_mode).toBe("deep");
-    expect(replyEvents[0]).toEqual({
+    expect(replyEvents[0]).toMatchObject({
       type: "run-init",
       runId: "run_analysis_deep_reply",
       conversationId: "conv_analysis_deep",

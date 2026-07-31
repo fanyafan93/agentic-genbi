@@ -76,6 +76,8 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
         if (target.role === "agent") {
           next[idx] = { ...target, content: target.content + event.text };
         }
+      } else {
+        next.push({ id: event.nodeId, role: "agent", content: event.text, mode: "delta", steps: [] });
       }
       setNodes(next);
       return next;

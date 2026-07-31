@@ -11,9 +11,11 @@ from backend.analysis.agent_runner import OpenAIAnalysisAgentRunner
 from backend.analysis.run_service import AnalysisRunRequest, AnalysisRunService
 from backend.exploration.agent_runner import LLMAgentRunner
 from backend.exploration.run_event_store import RunEventStore
-from backend.exploration.run_service import ExplorationRunRequest, ExplorationRunService
+from backend.exploration.run_service import ExplorationRunEvent, ExplorationRunRequest, ExplorationRunService
 from backend.exploration.run_trace_store import RunTraceStore
-from backend.persistence.postgres_stores import build_postgres_stores, postgres_persistence_enabled
+from backend.harness.codex_sdk_runner import CodexSdkAnalysisRunner
+from backend.harness.thread_store import ThreadStore
+from backend.persistence.postgres_stores import build_postgres_stores, build_postgres_thread_store, postgres_persistence_enabled
 from backend.resource_library.database_tools import DatabaseConfig, ReadonlyDatabaseTools
 from backend.resource_library.indexer import ResourceIndexer
 from backend.resource_library.inspector import inspect_index
@@ -32,6 +34,7 @@ def create_app(
     knowledge_store: KnowledgeStore | None = None,
     analysis_service: AnalysisRunService | None = None,
     analysis_asset_store: AnalysisAssetStore | None = None,
+    thread_store: ThreadStore | None = None,
 ) -> Any:
     load_project_env()
     try:
@@ -167,6 +170,9 @@ def create_app(
         run_service, configured_knowledge_store = build_default_service_with_stores()
     configured_analysis_service = analysis_service or build_default_analysis_service(run_service)
     configured_analysis_asset_store = analysis_asset_store or AnalysisAssetStore()
+    configured_thread_store = thread_store or getattr(configured_analysis_service, "thread_store", None) or ThreadStore()
+    if getattr(configured_analysis_service, "thread_store", None) is None:
+        configured_analysis_service.thread_store = configured_thread_store
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -196,13 +202,36 @@ def create_app(
     def get_analysis_task_run(run_id: str) -> dict[str, Any]:
         trace = configured_analysis_service.trace_store.get_trace(run_id) if configured_analysis_service.trace_store else None
         events = configured_analysis_service.event_store.list_events(run_id) if configured_analysis_service.event_store else []
-        if not trace and not events:
+        system_run = configured_thread_store.get_run(run_id)
+        if not events and system_run:
+            events = [
+                ExplorationRunEvent(
+                    type=str(item["type"]),
+                    run_id=str(item["run_id"]),
+                    payload=dict(item.get("payload") or {}),
+                    created_at=str(item["created_at"]),
+                )
+                for item in configured_thread_store.get_run_events(run_id)
+            ]
+        if not trace and not events and not system_run:
             raise HTTPException(status_code=404, detail="analysis_run_not_found")
         return {
             "run": asdict(trace) if trace else None,
+            "systemRun": system_run,
             "events_url": f"/api/analysis/tasks/runs/{run_id}/events",
             "events": [asdict(event) for event in events],
         }
+
+    @app.get("/api/analysis/threads")
+    def list_analysis_threads(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+        return {"threads": configured_thread_store.list_threads(limit=limit, product_kind="analysis_task")}
+
+    @app.get("/api/analysis/threads/{thread_id}")
+    def get_analysis_thread(thread_id: str) -> dict[str, Any]:
+        thread = configured_thread_store.get_thread(thread_id)
+        if not thread:
+            raise HTTPException(status_code=404, detail="analysis_thread_not_found")
+        return thread
 
     @app.get("/api/analysis/tasks/runs/{run_id}/events")
     def get_analysis_task_run_events(run_id: str) -> StreamingResponse:
@@ -723,12 +752,14 @@ def build_default_service() -> ExplorationRunService:
 def build_default_analysis_service(run_service: ExplorationRunService) -> AnalysisRunService:
     load_project_env()
     analysis_runner = None
-    if os.getenv("GENBI_ANALYSIS_RUNTIME", "local").lower() in {"openai", "llm"}:
+    analysis_runtime = os.getenv("GENBI_ANALYSIS_RUNTIME", "local").lower()
+    if analysis_runtime == "codex":
+        analysis_runner = CodexSdkAnalysisRunner.from_env()
+    elif analysis_runtime in {"openai", "llm"}:
         analysis_runner = OpenAIAnalysisAgentRunner.from_env()
     return AnalysisRunService(
         agent_runner=analysis_runner,
-        trace_store=run_service.trace_store,
-        event_store=run_service.event_store,
+        thread_store=_build_default_thread_store(),
     )
 
 
@@ -764,6 +795,16 @@ def _build_default_persistence_stores() -> tuple[RunTraceStore, RunEventStore, K
             if os.getenv("GENBI_PERSISTENCE", "").strip():
                 raise
     return RunTraceStore(), RunEventStore(), KnowledgeStore()
+
+
+def _build_default_thread_store() -> ThreadStore:
+    if postgres_persistence_enabled():
+        try:
+            return build_postgres_thread_store()
+        except Exception:
+            if os.getenv("GENBI_PERSISTENCE", "").strip():
+                raise
+    return ThreadStore()
 
 
 def main() -> None:

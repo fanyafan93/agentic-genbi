@@ -9,12 +9,17 @@ from uuid import uuid4
 
 from backend.exploration.run_event_store import RunEventStore
 from backend.exploration.run_trace_store import RunCost, RunTrace, RunTraceStore, TokenUsage, build_run_trace
+from backend.harness.thread_store import ItemRecord, RunRecord, ThreadRecord, ThreadStore, TurnRecord
 from backend.resource_library.knowledge_store import KnowledgeRecord, KnowledgeStore
 
 
 POSTGRES_TRACE_TABLE = "exploration_run_traces"
 POSTGRES_EVENT_TABLE = "exploration_run_events"
 POSTGRES_KNOWLEDGE_TABLE = "verified_knowledge"
+POSTGRES_THREAD_TABLE = "analysis_threads"
+POSTGRES_TURN_TABLE = "analysis_turns"
+POSTGRES_RUN_TABLE = "analysis_runs"
+POSTGRES_ITEM_TABLE = "analysis_items"
 
 
 def postgres_persistence_enabled() -> bool:
@@ -40,6 +45,13 @@ def build_postgres_stores() -> tuple["PostgresRunTraceStore", "PostgresRunEventS
         PostgresRunEventStore(database_url),
         PostgresKnowledgeStore(database_url),
     )
+
+
+def build_postgres_thread_store() -> "PostgresThreadStore":
+    database_url = get_postgres_database_url()
+    if not database_url:
+        raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres ThreadStore persistence.")
+    return PostgresThreadStore(database_url)
 
 
 class PostgresRunTraceStore(RunTraceStore):
@@ -264,6 +276,172 @@ class PostgresRunEventStore(RunEventStore):
                 "event": _jsonb(payload),
             },
         )
+
+
+class PostgresThreadStore(ThreadStore):
+    def __init__(self, database_url: str) -> None:
+        self.database_url = _normalize_postgres_url(database_url)
+        self.ensure_schema()
+
+    def ensure_schema(self) -> None:
+        with _connect(self.database_url) as conn:
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_THREAD_TABLE} (
+                    id TEXT PRIMARY KEY,
+                    product_kind TEXT NOT NULL,
+                    title TEXT,
+                    user_id TEXT,
+                    status TEXT NOT NULL,
+                    created_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ,
+                    metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_TURN_TABLE} (
+                    id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL REFERENCES {POSTGRES_THREAD_TABLE}(id) ON DELETE CASCADE,
+                    input_kind TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    run_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    created_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ,
+                    metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_RUN_TABLE} (
+                    id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL REFERENCES {POSTGRES_THREAD_TABLE}(id) ON DELETE CASCADE,
+                    turn_id TEXT NOT NULL REFERENCES {POSTGRES_TURN_TABLE}(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    started_at TIMESTAMPTZ,
+                    completed_at TIMESTAMPTZ,
+                    event_count INTEGER NOT NULL DEFAULT 0,
+                    item_count INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_ITEM_TABLE} (
+                    id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL REFERENCES {POSTGRES_THREAD_TABLE}(id) ON DELETE CASCADE,
+                    turn_id TEXT NOT NULL REFERENCES {POSTGRES_TURN_TABLE}(id) ON DELETE CASCADE,
+                    run_id TEXT NOT NULL REFERENCES {POSTGRES_RUN_TABLE}(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    created_at TIMESTAMPTZ
+                )
+                """
+            )
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_updated ON {POSTGRES_THREAD_TABLE} (updated_at DESC NULLS LAST)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_product ON {POSTGRES_THREAD_TABLE} (product_kind)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_thread ON {POSTGRES_TURN_TABLE} (thread_id, created_at)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_RUN_TABLE}_thread ON {POSTGRES_RUN_TABLE} (thread_id, started_at)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ITEM_TABLE}_run ON {POSTGRES_ITEM_TABLE} (run_id, created_at)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ITEM_TABLE}_thread ON {POSTGRES_ITEM_TABLE} (thread_id, created_at)")
+
+    def _write_state(self, state: dict[str, Any]) -> None:
+        with _connect(self.database_url) as conn:
+            for thread in state["threads"].values():
+                conn.execute(
+                    f"""
+                    INSERT INTO {POSTGRES_THREAD_TABLE} (id, product_kind, title, user_id, status, created_at, updated_at, metadata)
+                    VALUES (%(id)s, %(product_kind)s, %(title)s, %(user_id)s, %(status)s, %(created_at)s, %(updated_at)s, %(metadata)s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        product_kind = EXCLUDED.product_kind,
+                        title = EXCLUDED.title,
+                        user_id = EXCLUDED.user_id,
+                        status = EXCLUDED.status,
+                        updated_at = EXCLUDED.updated_at,
+                        metadata = EXCLUDED.metadata
+                    """,
+                    _thread_params(thread),
+                )
+            for turn in state["turns"].values():
+                conn.execute(
+                    f"""
+                    INSERT INTO {POSTGRES_TURN_TABLE} (id, thread_id, input_kind, question, status, run_ids, created_at, updated_at, metadata)
+                    VALUES (%(id)s, %(thread_id)s, %(input_kind)s, %(question)s, %(status)s, %(run_ids)s, %(created_at)s, %(updated_at)s, %(metadata)s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        input_kind = EXCLUDED.input_kind,
+                        question = EXCLUDED.question,
+                        status = EXCLUDED.status,
+                        run_ids = EXCLUDED.run_ids,
+                        updated_at = EXCLUDED.updated_at,
+                        metadata = EXCLUDED.metadata
+                    """,
+                    _turn_params(turn),
+                )
+            for run in state["runs"].values():
+                conn.execute(
+                    f"""
+                    INSERT INTO {POSTGRES_RUN_TABLE} (
+                        id, thread_id, turn_id, status, started_at, completed_at, event_count, item_count, error, metadata
+                    )
+                    VALUES (
+                        %(id)s, %(thread_id)s, %(turn_id)s, %(status)s, %(started_at)s, %(completed_at)s,
+                        %(event_count)s, %(item_count)s, %(error)s, %(metadata)s
+                    )
+                    ON CONFLICT (id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        completed_at = EXCLUDED.completed_at,
+                        event_count = EXCLUDED.event_count,
+                        item_count = EXCLUDED.item_count,
+                        error = EXCLUDED.error,
+                        metadata = EXCLUDED.metadata
+                    """,
+                    _run_record_params(run),
+                )
+                conn.execute(f"DELETE FROM {POSTGRES_ITEM_TABLE} WHERE run_id = %(run_id)s", {"run_id": run.id})
+            for item in state["items"]:
+                conn.execute(
+                    f"""
+                    INSERT INTO {POSTGRES_ITEM_TABLE} (id, thread_id, turn_id, run_id, kind, event_type, payload, created_at)
+                    VALUES (%(id)s, %(thread_id)s, %(turn_id)s, %(run_id)s, %(kind)s, %(event_type)s, %(payload)s, %(created_at)s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        kind = EXCLUDED.kind,
+                        event_type = EXCLUDED.event_type,
+                        payload = EXCLUDED.payload,
+                        created_at = EXCLUDED.created_at
+                    """,
+                    _item_params(item),
+                )
+
+    def _read_state(self) -> dict[str, Any]:
+        with _connect(self.database_url) as conn:
+            threads = {
+                str(row["id"]): _thread_record_from_row(row)
+                for row in conn.execute(f"SELECT * FROM {POSTGRES_THREAD_TABLE}").fetchall()
+            }
+            turns = {
+                str(row["id"]): _turn_record_from_row(row)
+                for row in conn.execute(f"SELECT * FROM {POSTGRES_TURN_TABLE}").fetchall()
+            }
+            runs = {
+                str(row["id"]): _run_record_from_row(row)
+                for row in conn.execute(f"SELECT * FROM {POSTGRES_RUN_TABLE}").fetchall()
+            }
+            items = [_item_record_from_row(row) for row in conn.execute(f"SELECT * FROM {POSTGRES_ITEM_TABLE}").fetchall()]
+        return {"threads": threads, "turns": turns, "runs": runs, "items": items}
+
+    def clear(self) -> int:
+        with _connect(self.database_url) as conn:
+            item_count = conn.execute(f"DELETE FROM {POSTGRES_ITEM_TABLE}").rowcount or 0
+            conn.execute(f"DELETE FROM {POSTGRES_RUN_TABLE}")
+            conn.execute(f"DELETE FROM {POSTGRES_TURN_TABLE}")
+            conn.execute(f"DELETE FROM {POSTGRES_THREAD_TABLE}")
+            return item_count
 
 
 class PostgresKnowledgeStore(KnowledgeStore):
@@ -528,6 +706,61 @@ def _knowledge_params(record: KnowledgeRecord) -> dict[str, Any]:
     }
 
 
+def _thread_params(record: ThreadRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "product_kind": record.productKind,
+        "title": record.title,
+        "user_id": record.userId,
+        "status": record.status,
+        "created_at": record.createdAt,
+        "updated_at": record.updatedAt,
+        "metadata": _jsonb(record.metadata),
+    }
+
+
+def _turn_params(record: TurnRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "thread_id": record.threadId,
+        "input_kind": record.inputKind,
+        "question": record.question,
+        "status": record.status,
+        "run_ids": _jsonb(record.runIds),
+        "created_at": record.createdAt,
+        "updated_at": record.updatedAt,
+        "metadata": _jsonb(record.metadata),
+    }
+
+
+def _run_record_params(record: RunRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "thread_id": record.threadId,
+        "turn_id": record.turnId,
+        "status": record.status,
+        "started_at": record.startedAt,
+        "completed_at": record.completedAt,
+        "event_count": record.eventCount,
+        "item_count": record.itemCount,
+        "error": record.error,
+        "metadata": _jsonb(record.metadata),
+    }
+
+
+def _item_params(record: ItemRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "thread_id": record.threadId,
+        "turn_id": record.turnId,
+        "run_id": record.runId,
+        "kind": record.kind,
+        "event_type": record.eventType,
+        "payload": _jsonb(record.payload),
+        "created_at": record.createdAt,
+    }
+
+
 def _trace_from_row(row: dict[str, Any]) -> RunTrace:
     return RunTrace(
         run_id=str(row["run_id"]),
@@ -547,6 +780,61 @@ def _trace_from_row(row: dict[str, Any]) -> RunTrace:
         cost=RunCost(**dict(row.get("cost") or {})),
         error=row.get("error"),
         metadata=dict(row.get("metadata") or {}),
+    )
+
+
+def _thread_record_from_row(row: dict[str, Any]) -> ThreadRecord:
+    return ThreadRecord(
+        id=str(row["id"]),
+        productKind=str(row["product_kind"]),  # type: ignore[arg-type]
+        title=row.get("title"),
+        userId=row.get("user_id"),
+        status=str(row["status"]),
+        createdAt=_iso(row.get("created_at")) or "",
+        updatedAt=_iso(row.get("updated_at")) or "",
+        metadata=dict(row.get("metadata") or {}),
+    )
+
+
+def _turn_record_from_row(row: dict[str, Any]) -> TurnRecord:
+    return TurnRecord(
+        id=str(row["id"]),
+        threadId=str(row["thread_id"]),
+        inputKind=str(row["input_kind"]),  # type: ignore[arg-type]
+        question=str(row["question"]),
+        status=str(row["status"]),
+        runIds=[str(item) for item in row.get("run_ids") or []],
+        createdAt=_iso(row.get("created_at")) or "",
+        updatedAt=_iso(row.get("updated_at")) or "",
+        metadata=dict(row.get("metadata") or {}),
+    )
+
+
+def _run_record_from_row(row: dict[str, Any]) -> RunRecord:
+    return RunRecord(
+        id=str(row["id"]),
+        threadId=str(row["thread_id"]),
+        turnId=str(row["turn_id"]),
+        status=str(row["status"]),
+        startedAt=_iso(row.get("started_at")),
+        completedAt=_iso(row.get("completed_at")),
+        eventCount=int(row.get("event_count") or 0),
+        itemCount=int(row.get("item_count") or 0),
+        error=row.get("error"),
+        metadata=dict(row.get("metadata") or {}),
+    )
+
+
+def _item_record_from_row(row: dict[str, Any]) -> ItemRecord:
+    return ItemRecord(
+        id=str(row["id"]),
+        threadId=str(row["thread_id"]),
+        turnId=str(row["turn_id"]),
+        runId=str(row["run_id"]),
+        kind=str(row["kind"]),
+        eventType=str(row["event_type"]),
+        payload=dict(row.get("payload") or {}),
+        createdAt=_iso(row.get("created_at")) or "",
     )
 
 

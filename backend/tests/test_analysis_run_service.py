@@ -7,9 +7,34 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from backend.analysis.agent_runner import AnalysisAgentRunResult
 from backend.analysis.run_service import AnalysisRunRequest, AnalysisRunService, classify_analysis_problem
 from backend.exploration.run_event_store import RunEventStore
+from backend.exploration.run_service import ExplorationRunEvent
 from backend.exploration.run_trace_store import RunTraceStore
+from backend.harness.thread_store import ThreadStore
+
+
+class _CodexThreadRecordingRunner:
+    runtime_name = "openai-codex"
+
+    def __init__(self) -> None:
+        self.contexts: list[dict] = []
+
+    def stream(self, prompt: str, *, context: dict):
+        self.contexts.append(dict(context))
+        codex_thread_id = context.get("codex_thread_id") or "codex_thread_created"
+        yield ExplorationRunEvent(
+            type="agent.runner.raw",
+            run_id=str(context.get("genbi_run_id") or "run_test"),
+            payload={
+                "runtime": "openai-codex",
+                "phase": "thread.opened",
+                "codex_thread_id": codex_thread_id,
+                "resumed": bool(context.get("codex_thread_id")),
+            },
+        )
+        yield AnalysisAgentRunResult(final_output="Codex ok", raw_result_type="FakeCodex", events=[])
 
 
 class AnalysisRunServiceTest(unittest.TestCase):
@@ -19,6 +44,7 @@ class AnalysisRunServiceTest(unittest.TestCase):
             service = AnalysisRunService(
                 trace_store=RunTraceStore(root / "traces.jsonl"),
                 event_store=RunEventStore(root / "events.jsonl"),
+                thread_store=ThreadStore(root / "thread-store.jsonl"),
             )
             events = service.run(
                 AnalysisRunRequest(
@@ -38,11 +64,26 @@ class AnalysisRunServiceTest(unittest.TestCase):
             self.assertIn("run.completed", event_types)
             self.assertIn("reports/quick_report.html", artifact_paths)
             self.assertIn("queries/quick_candidate.sql", artifact_paths)
+            first = events[0]
+            self.assertEqual(first.payload["thread_id"], "conv_analysis_test")
+            self.assertTrue(str(first.payload["turn_id"]).startswith("turn_analysis_"))
+            self.assertEqual(first.payload["item_kind"], "message")
+            self.assertTrue(str(first.payload["item_id"]).startswith("item_analysis_"))
+            artifact = next(event for event in events if event.payload.get("path") == "queries/quick_candidate.sql")
+            self.assertEqual(artifact.payload["item_kind"], "sql")
+            self.assertEqual(artifact.payload["thread_id"], "conv_analysis_test")
+            self.assertEqual(artifact.payload["turn_id"], first.payload["turn_id"])
 
-            traces = service.trace_store.list_traces()
-            self.assertEqual(len(traces), 1)
-            self.assertEqual(traces[0].metadata["domain"], "analysis_task")
-            self.assertEqual(traces[0].metadata["analysis_mode"], "quick")
+            self.assertEqual(service.trace_store.list_traces(), [])
+            self.assertEqual(service.event_store.list_events(events[0].run_id), [])
+
+            thread = service.thread_store.get_thread("conv_analysis_test")
+            self.assertIsNotNone(thread)
+            assert thread is not None
+            self.assertEqual(thread["thread"]["productKind"], "analysis_task")
+            self.assertEqual(thread["turns"][0]["inputKind"], "start")
+            self.assertEqual(thread["runs"][0]["id"], events[0].run_id)
+            self.assertIn("sql", [item["kind"] for item in thread["items"]])
 
     def test_deep_analysis_requests_business_clarification(self) -> None:
         service = AnalysisRunService()
@@ -68,6 +109,39 @@ class AnalysisRunServiceTest(unittest.TestCase):
 
         self.assertEqual(classification.type, "metric_diagnosis")
         self.assertEqual(classification.label, "异常归因")
+
+
+    def test_codex_thread_id_is_persisted_and_restored_for_followup_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            runner = _CodexThreadRecordingRunner()
+            service = AnalysisRunService(agent_runner=runner, thread_store=thread_store)
+
+            first = service.run(
+                AnalysisRunRequest(
+                    question="first analysis question",
+                    conversation_id="thread_codex_resume",
+                    analysis_mode="quick",
+                )
+            )
+            second = service.run(
+                AnalysisRunRequest(
+                    question="continue this analysis",
+                    conversation_id="thread_codex_resume",
+                    analysis_mode="quick",
+                    turn_kind="message",
+                )
+            )
+
+            thread = thread_store.get_thread("thread_codex_resume")
+
+            self.assertIsNotNone(thread)
+            assert thread is not None
+            self.assertEqual(thread["thread"]["metadata"]["codex_thread_id"], "codex_thread_created")
+            self.assertIsNone(runner.contexts[0]["codex_thread_id"])
+            self.assertEqual(runner.contexts[1]["codex_thread_id"], "codex_thread_created")
+            self.assertFalse(next(event for event in first if event.payload.get("phase") == "thread.opened").payload["resumed"])
+            self.assertTrue(next(event for event in second if event.payload.get("phase") == "thread.opened").payload["resumed"])
 
 
 if __name__ == "__main__":

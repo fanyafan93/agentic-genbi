@@ -1,82 +1,72 @@
-# Agentic GenBI 协作指南
+# Agentic GenBI 协作卡片
 
-## 项目目标
+## 一句话目标
 
-持续交付安全、可解释、可复用的 Agentic BI 系统：分析师与运营人员通过会话和 Agent 协作，产出、更新和复用 Artifact；Artifact 可自动化刷新，并可提炼为可共享、可组合的 Agent。
+做一个安全、可解释、可复用的 Agentic BI 系统：用户在分析工作台提出业务问题，Codex Harness 调度业务语义库、数据层和工具，产出可复用分析资产。
 
-长期集成分支是 `Agentic-GenBI`。业务功能只能在独立 `feature/*` 分支开发并合入；不要直接在集成分支实现业务功能。
+## 先读这五个文件
 
-## 每次接手先做什么
+1. `AGENTS.md`：协作规则。
+2. `README.md`：项目一页总览。
+3. `docs/product/product-scope.md`：产品边界。
+4. `docs/architecture/overview.md`：架构边界。
+5. `docs/plans/current.md`：当前分支状态。
 
-按顺序阅读：
+读完再看 `git status --short --branch`。工作区有改动时，不覆盖、不重置；先判断是否属于当前切片。
 
-1. `AGENTS.md`
-2. `README.md`
-3. `docs/product/product-scope.md`
-4. `docs/architecture/overview.md`
-5. `docs/plans/current.md`
+## 当前稳定方向
 
-然后检查 `git status`、当前分支和最近提交。工作区有未知改动时，不覆盖、不重置；先在 `docs/plans/current.md` 记录归属或向用户确认。
+- 单一主入口：分析工作台。
+- 编排基座：openai-codex Python SDK / Codex 优先；能用 Codex 的，绝不自研。需要更底层能力时再研究 codex-core。
+- 业务语义库：语义模型 + 业务知识。
+- 分析资产库：报告、图表、SQL、数据快照、分析路径、`SKILL.md`。
+- 安全边界在服务端：权限、SQL 只读、RLS、审计、数据访问都不能靠前端或提示词。
 
 ## 文档规则
 
-项目文档只保留以下三份职责明确的来源：
+只维护这几份长期文档：
 
-- `docs/product/product-scope.md`：产品边界——面向业务，随产品阶段、用户反馈和业务目标变化而更新。
-- `docs/architecture/overview.md`：架构边界——面向技术，随系统复杂度、技术约束、部署方式和安全边界变化而更新。
-- `docs/plans/current.md`：当前任务——当前切片、实际进度、验证、风险与下一步；同时承担交接职责。
+- `README.md`：一页总览，不写实现流水账。
+- `docs/product/product-scope.md`：产品边界，只写用户入口、核心对象、非目标。
+- `docs/architecture/overview.md`：架构边界，只写分层、契约、安全边界和演进方向。
+- `docs/plans/current.md`：当前分支快照，只写当前状态、验证、风险、下一步。
 
-`README.md` 是入口与稳定概览，不重复三份正文。Git 提交记录用于追溯历史；不要新建 `HANDOFF.md`、`backlog.md`、接口契约或临时计划文档。
+不要新建 `HANDOFF.md`、`backlog.md`、临时计划文档或重复接口说明。历史交给 Git。
 
-### 如何更新文档
+## 开发规则
 
-- 产品承诺、阶段目标或非目标变化：更新 `product-scope.md`。
-- 架构、技术栈、公开接口、数据模型、安全边界、运行配置或部署方式变化：更新 `architecture/overview.md`；必要时同步 README 摘要。
-- 每次开发会话结束前更新 `plans/current.md`：当前分支与工作区、当前切片、关键变更、已运行验证、风险/阻塞与一到三个下一步。只写已验证事实；未知内容标为“待验证假设”。
-- 未合入 `Agentic-GenBI` 的功能不得写成已实现；普通修复不记录为长期事实，细节由 Git 提交追溯。
+- 长期集成分支是 `Agentic-GenBI`。
+- 业务功能只在独立 `feature/*` 分支开发。
+- 一个分支只承载一个可理解、可验证的垂直切片。
+- 不改写历史、不强推、不使用破坏性 Git 命令，除非用户明确要求。
+- 使用 Conventional Commit。
+- 修改前先看现有模式；不要把新领域逻辑继续堆进 `AnalysisWorkspace.tsx`，新增领域放到对应模块。
 
-## AI 开发流程
+## 实现原则
 
-使用 Superpowers 的开发方法，但不把其 plans、specs 当作项目正式文档。
+- 本项目是 vibe coding：用户定方向，AI 快速做可运行切片。
+- 前端优先、mock-first 可以，但 mock 必须贴近未来真实契约。
+- 不确定的产品体验先用可替换 mock 验证。
+- 成熟框架和 SDK 优先；Codex 已有的能力优先于任何自研实现。
+- openai-codex Python SDK / Codex 负责通用 Agent 工程底座；本项目只自研业务语义库、数据安全访问、分析资产治理、前端工作台和 Codex 适配层。
+- 模型 provider、工具、MCP、Skills、Apps / Connectors、sandbox、approval、apply_patch、file search、git 等能力优先接 Codex 生态，不重复造轮子。
 
-### Vibe coding 方式
+## 验证要求
 
-本项目明确采用 **vibe coding**：用户负责产品方向、体验判断和反馈，Codex、Trae、Claude Code 等 AI Agent 负责快速构建可运行的界面、虚拟后端和后续真实能力。开发以可演示的产品反馈驱动持续迭代，而不是等待完整需求文档或一次性实现完整系统。
+- 后端：pytest。
+- 前端：Vitest；涉及布局交互时补 Playwright 或浏览器验证。
+- 改 SQL 安全边界：加拒绝用例。
+- 改认证/权限：覆盖未登录、越权、退出和非法 state。
+- 合入前至少运行相关最小测试；准备合入 `Agentic-GenBI` 前运行全量前端、后端和 `docker compose config`。
 
-vibe coding 不等于跳过工程约束：每次改动仍须有清晰边界、稳定领域契约、最小验证和服务端安全边界；不确定的产品细节应先以可替换的前端 mock 验证，不应伪造成已完成的真实能力。
+## 收尾要求
 
-- 新功能或较大改动：先确认目标、范围、非目标和验收标准，再开始实现。
-- 新功能与 bug 修复：优先先写或补充测试，再做最小实现。
-- 遇到失败、异常或安全问题：先定位根因，不直接猜测性修改。
-- 修改完成后：运行与改动相关的最小测试；合入前运行全量测试和 `docker compose config`。
-- 功能按可独立验证的最小切片开发，不顺手扩展后续能力。
-- 详细推理、临时计划和过程草稿不写入仓库；稳定信息写入对应边界文档，当前进度写入 `plans/current.md`。
-- 当前采用前端优先、mock-first 演进：前端必须只依赖领域类型和 API/事件契约；mock 与未来真实服务保持同一结构，不能把 mock 脚本细节写进页面组件。
-- 真实 API、权限、数据访问、SQL 安全和调度必须在服务端实现；浏览器端的隐藏按钮、前端筛选或提示词不是安全边界。
+完成一次开发会话前，更新 `docs/plans/current.md`：
 
-## 多 AI Agent 协作
+- 当前分支和工作区状态。
+- 本轮做了什么。
+- 已运行验证。
+- 风险或未完成。
+- 下一步 1 到 3 条。
 
-- Codex、Trae、Claude Code 等开发 Agent 按领域边界协作，一个改动只承载一个可独立验证的垂直切片。
-- 交接以领域类型、HTTP/SSE 事件 schema、测试和 Git diff 为依据，不依赖口头上下文或未记录的临时约定。
-- 多个 Agent 不应同时重构同一容器组件或修改同一契约；需要调整共享契约时，先更新对应测试和边界文档。
-- 现有 `AnalysisWorkspace.tsx` 是会话 Demo 的组合容器；新增领域功能不得持续堆入该文件，应在对应领域目录新增组件、类型、mock 和测试。仅在组合现有能力时修改该容器。
-- 优先集成成熟框架、SDK 和工具；只有与产品差异化直接相关的业务规则才自行实现，避免重复造轮子。
-
-## 协作与 Git
-
-- 一个功能分支只承载一个能独立理解和验证的垂直切片。
-- 新分支从最新 `Agentic-GenBI` 创建；前置切片合入后再开始依赖它的下一切片。
-- 不合并功能分支到另一个功能分支，不改写历史、不强推、不使用破坏性 Git 命令，除非用户明确要求。
-- 使用 Conventional Commit。提交前查看 `git diff`，确保不包含其他人的无关改动。
-- 在 Codex 与 Trae 之间切换时，先更新 `docs/plans/current.md`；新工具只从本文件、README 和两份边界文档获取上下文，不猜测未记录状态。
-
-## 测试与完成标准
-
-- 后端使用 pytest，前端使用 Vitest。
-- 改 SQL 安全边界时增加拒绝用例。
-- 改认证时覆盖成功登录、非法 OAuth state、未登录访问和退出。
-- 改任务所有者逻辑时覆盖两个用户的越权拒绝。
-- 改前端领域契约或 mock Runtime 时，覆盖类型检查、契约测试和受影响工作流；涉及交互布局时补充 Playwright 验证。
-- 完成功能前运行相关最小测试；合入 `Agentic-GenBI` 前运行全量后端测试、全量前端测试和 `docker compose config`。
-
-任务完成的条件：实现符合产品与架构边界，安全边界未弱化，必要测试通过或已记录无法运行的原因与风险，并且 `docs/plans/current.md` 已更新。
+只写已验证事实。未知内容标为“待验证假设”。

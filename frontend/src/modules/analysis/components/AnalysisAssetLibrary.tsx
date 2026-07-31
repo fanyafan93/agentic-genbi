@@ -1,17 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { EChartRenderer } from "@/shared/charts/EChartRenderer";
 import { mockArtifact } from "./artifact-mock";
 import { buildAnalysisAssetCards, describeArtifact, getJsonPreview, getMarkdownPreview, getSqlPreview, pythonCode } from "./analysis-assets";
-import { SharedAnalysisAssetLibrary } from "./SharedAnalysisAssetLibrary";
-import {
-  listAnalysisAssetsFromBackend,
-  mockAnalysisAssetLibraryService,
-  reopenAnalysisAssetFromBackend,
-  shouldUseBackendAnalysisAssetLibrary,
-} from "../api/analysis-asset-library-service";
-import type { AnalysisAssetLibraryEntry, AnalysisAssetSaveRequest, AnalysisAssetSourceContext } from "./analysis-asset-contracts";
+import type { AnalysisAssetSaveRequest, AnalysisAssetSourceContext } from "./analysis-asset-contracts";
 import type { AnalysisAssetCard } from "./analysis-assets";
 import type { AnalysisRow } from "../types/analysis";
 import type { ArtifactFile, ArtifactFolder } from "../types/artifact";
@@ -67,7 +60,7 @@ function SkillDraftPreview() {
   const referencesReady = references.length >= 3;
   const publishReady = saved && scenarioReady && metricReady && permissionReady && referencesReady;
   const publicationMetadata = {
-    agentId: "agent_channel_sales_skill",
+    methodId: "method_channel_sales_skill",
     version: "v0.1-draft",
     visibility: "team",
     sourceTask: "渠道销售占比分析",
@@ -130,9 +123,9 @@ function SkillDraftPreview() {
       </section>
       <section className="skill-readiness" aria-label="Skill 发布准备">
         <div className="skill-readiness-header">
-          <h3>发布准备</h3>
+          <h3>复用准备</h3>
           <span className={`skill-readiness-status ${publishReady ? "ready" : "blocked"}`}>
-            {publishReady ? "可发布到 Agent 中心" : "还需补齐确认"}
+            {publishReady ? "可作为分析资产复用" : "还需补齐确认"}
           </span>
         </div>
         <div className="skill-readiness-list">
@@ -158,25 +151,25 @@ function SkillDraftPreview() {
           </label>
         </div>
         <div className="skill-readiness-actions">
-          <button type="button" disabled={!publishReady} onClick={() => setPublished(true)}>模拟发布</button>
-          <small>当前只检查发布条件，不写入真实 Agent 中心。</small>
-          {published && <em role="status">已模拟发布到 Agent 中心</em>}
+          <button type="button" disabled={!publishReady} onClick={() => setPublished(true)}>模拟入库</button>
+          <small>当前只检查复用条件，不写入真实审批或权限系统。</small>
+          {published && <em role="status">已模拟作为可复用分析方法入库</em>}
         </div>
       </section>
       {published && (
-        <section className="skill-publication" aria-label="Skill 发布元数据预览">
+        <section className="skill-publication" aria-label="Skill 复用元数据预览">
           <div className="skill-publication-header">
-            <span>AGENT CENTER PREVIEW</span>
-            <h3>发布元数据预览</h3>
+            <span>REUSABLE METHOD PREVIEW</span>
+            <h3>复用元数据预览</h3>
             <p>真实后端需要把这些字段持久化，才能让别人复用 Skill 时追溯来源、版本、权限和确认记录。</p>
           </div>
           <dl className="skill-metadata-grid">
-            <div><dt>Agent ID</dt><dd>{publicationMetadata.agentId}</dd></div>
+            <div><dt>方法 ID</dt><dd>{publicationMetadata.methodId}</dd></div>
             <div><dt>版本</dt><dd>{publicationMetadata.version}</dd></div>
             <div><dt>可见范围</dt><dd>{publicationMetadata.visibility}</dd></div>
             <div><dt>来源分析任务</dt><dd>{publicationMetadata.sourceTask}</dd></div>
             <div><dt>来源 Run</dt><dd>{publicationMetadata.sourceRun}</dd></div>
-            <div><dt>发布状态</dt><dd>等待审批 / mock</dd></div>
+            <div><dt>入库状态</dt><dd>等待审批 / mock</dd></div>
           </dl>
           <div className="skill-lineage">
             <h3>资产血缘</h3>
@@ -198,7 +191,6 @@ function SkillDraftPreview() {
 
 export function AnalysisAssetLibrary({
   taskTitle,
-  sourceContext,
   folders,
   files,
   activeFile,
@@ -216,70 +208,12 @@ export function AnalysisAssetLibrary({
   onSaveAsset,
   onContinueFromAsset,
 }: Props) {
-  const [libraryView, setLibraryView] = useState<"task" | "shared">("task");
-  const [backendSharedEntries, setBackendSharedEntries] = useState<AnalysisAssetLibraryEntry[]>([]);
-  const [sharedLibraryStatus, setSharedLibraryStatus] = useState<"mock" | "loading" | "backend" | "fallback">("mock");
   const assetCards = buildAnalysisAssetCards(files);
   const openCardFile = (fileId?: string) => {
     const file = files.find((item) => item.id === fileId);
     if (file) onOpenFile(file);
   };
   const savedAssets = assetCards.filter((asset) => savedAssetIds.includes(asset.id));
-  const mockSharedEntries = mockAnalysisAssetLibraryService.listEntries({ taskTitle, sourceContext, assets: assetCards, savedAssetIds });
-  const sharedEntries = backendSharedEntries.length > 0 ? backendSharedEntries : mockSharedEntries;
-  const findAssetFromEntry = (entry: AnalysisAssetLibraryEntry) => assetCards.find((asset) => `asset_mock_${asset.id}` === entry.assetId);
-  const assetFromEntry = (entry: AnalysisAssetLibraryEntry, targetFileId?: string): AnalysisAssetCard => {
-    const localAsset = assetCards.find((item) => item.fileId === targetFileId) ?? findAssetFromEntry(entry);
-    if (localAsset) return localAsset;
-    return {
-      id: entry.assetId,
-      title: entry.title,
-      label: entry.label,
-      description: entry.description,
-      status: entry.status === "draft" ? "draft" : "reusable",
-      intent: entry.assetType.toLowerCase().includes("skill") ? "edit-skill" : "save",
-      fileId: entry.fileId,
-    };
-  };
-  const reopenEntry = (entry: AnalysisAssetLibraryEntry) => {
-    if (shouldUseBackendAnalysisAssetLibrary()) {
-      void reopenAnalysisAssetFromBackend(entry.assetId)
-        .then((reopenResult) => {
-          onContinueFromAsset(assetFromEntry(entry, reopenResult.context.targetFileId));
-        })
-        .catch(() => {
-          const reopenResult = mockAnalysisAssetLibraryService.reopenEntry(entry);
-          onContinueFromAsset(assetFromEntry(entry, reopenResult.context.targetFileId));
-        });
-      return;
-    }
-    const reopenResult = mockAnalysisAssetLibraryService.reopenEntry(entry);
-    onContinueFromAsset(assetFromEntry(entry, reopenResult.context.targetFileId));
-  };
-  useEffect(() => {
-    if (libraryView !== "shared") return;
-    if (!shouldUseBackendAnalysisAssetLibrary()) {
-      setSharedLibraryStatus("mock");
-      setBackendSharedEntries([]);
-      return;
-    }
-    let cancelled = false;
-    setSharedLibraryStatus("loading");
-    void listAnalysisAssetsFromBackend({ limit: 50 })
-      .then((result) => {
-        if (cancelled) return;
-        setBackendSharedEntries(result.assets);
-        setSharedLibraryStatus("backend");
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setBackendSharedEntries([]);
-        setSharedLibraryStatus("fallback");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [libraryView, savedAssetIds.join(","), sourceContext.sourceTaskId, sourceContext.sourceRunId]);
   const getActionLabel = (asset: AnalysisAssetCard) => {
     if (asset.intent === "edit-skill") return "编辑 Skill";
     if (savedAssetIds.includes(asset.id) || asset.status === "reusable") return "继续分析";
@@ -290,7 +224,7 @@ export function AnalysisAssetLibrary({
     <div className={`artifact-workspace ${mobileHidden ? "mobile-hidden" : ""} ${explorerCollapsed ? "explorer-collapsed" : ""}`}>
       <aside className={`artifact-explorer ${explorerCollapsed ? "is-collapsed" : ""}`} aria-label="分析资产库目录">
         <header>
-          <div className="explorer-title"><span>ASSET LIBRARY</span><h2>分析资产库</h2><small>可共享、可复用的分析成果</small></div>
+          <div className="explorer-title"><span>CURRENT ASSETS</span><h2>当前任务资产</h2><small>本次分析生成、引用和正在编辑的资产</small></div>
           <button
             type="button"
             className="explorer-toggle"
@@ -304,43 +238,7 @@ export function AnalysisAssetLibrary({
         </header>
         <div className="explorer-stage" aria-hidden={explorerCollapsed}>
           <div className="explorer-view explorer-view-expanded">
-            <div className="asset-library-view-switch" role="tablist" aria-label="切换分析资产库视图">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={libraryView === "task"}
-                className={libraryView === "task" ? "active" : ""}
-                onClick={() => setLibraryView("task")}
-              >
-                当前任务资产
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={libraryView === "shared"}
-                className={libraryView === "shared" ? "active" : ""}
-                onClick={() => setLibraryView("shared")}
-              >
-                共享资产库
-              </button>
-            </div>
-            {libraryView === "shared" ? (
-              <section className="asset-shared-view" aria-label="分析资产库共享视图">
-                <div className="asset-shared-view-header">
-                  <span>SHARED ASSETS</span>
-                  <strong>分析资产库共享视图</strong>
-                  <small>从已保存、已发布或可复用资产回到来源分析任务继续。</small>
-                </div>
-                <p className={`asset-shared-source ${sharedLibraryStatus}`}>
-                  {sharedLibraryStatus === "backend" ? "后端资产索引已连接" : sharedLibraryStatus === "loading" ? "正在读取后端资产索引" : sharedLibraryStatus === "fallback" ? "后端资产索引不可用，显示当前任务 mock 资产" : "当前显示 mock 资产视图"}
-                </p>
-                <SharedAnalysisAssetLibrary
-                  entries={sharedEntries}
-                  onOpenEntry={(entry) => openCardFile(entry.fileId)}
-                  onReopenEntry={reopenEntry}
-                />
-              </section>
-            ) : folders.length === 0 ? (
+            {folders.length === 0 ? (
               <div className="explorer-empty">
                 <span aria-hidden="true">◇</span>
                 <strong>暂无分析资产</strong>
