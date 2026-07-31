@@ -67,7 +67,7 @@ const ruleMarkdown = `# 订单范围业务规则
 const pathMarkdown = `# 渠道销售占比分析路径
 
 1. 识别业务问题：判断为经营分析 / 渠道结构拆解。
-2. 检索语义模型：优先查报表级语义模型、MySQL / Doris 元数据、历史 SQL 示例。
+2. 检索业务语义库：优先查报表级语义模型、MySQL / Doris 元数据、ETL 血缘和历史 SQL 示例。
 3. 生成候选 SQL：先出可运行草稿，再标注假设。
 4. 生成图表和报告：输出渠道占比、增长最快渠道和风险说明。
 5. 用户继续追问时，沿当前资产版本修改 SQL、图表、报告或生成 Skill。`;
@@ -87,7 +87,7 @@ const skillMarkdown = `# 渠道销售占比分析 Skill
 
 ## 推荐步骤
 1. 确认业务口径和分析模式。
-2. 检索报表级语义模型、数据库元数据和历史 SQL 示例。
+2. 检索业务语义库，读取报表级语义模型、数据库元数据、ETL 血缘和历史 SQL 示例。
 3. 生成只读 SQL，并校验表、字段、过滤条件和 limit。
 4. 生成渠道占比图表和结果表。
 5. 输出结论、假设、风险和下一步追问。
@@ -193,7 +193,7 @@ export function buildAnalysisAssetCards(files: ArtifactFile[]): AnalysisAssetCar
     id: "skill",
     title: "Skill.md",
     label: "Skill",
-    description: "把成功分析变成 Agent 方法",
+    description: "把成功分析变成可复用分析方法",
     status: "reusable",
     intent: "edit-skill",
     confirmations: ["口径确认", "适用场景", "复用权限"],

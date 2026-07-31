@@ -47,6 +47,16 @@ const assetLibrarySource = readFileSync(
   "utf8",
 );
 
+const assetLibraryPageSource = readFileSync(
+  resolve(process.cwd(), "src/modules/analysis/components/AnalysisAssetLibraryPage.tsx"),
+  "utf8",
+);
+
+const businessSemanticLibrarySource = readFileSync(
+  resolve(process.cwd(), "src/modules/business-semantics/components/BusinessSemanticLibrary.tsx"),
+  "utf8",
+);
+
 const analysisTaskThreadSource = readFileSync(
   resolve(process.cwd(), "src/modules/analysis/components/AnalysisTaskThread.tsx"),
   "utf8",
@@ -75,43 +85,64 @@ const modeToggleSource = readFileSync(
 );
 
 describe("analysis task product language", () => {
-  test("frames the primary workspace as analysis tasks instead of generic sessions", () => {
-    expect(workspaceSource).toContain('label: "分析任务"');
-    expect(workspaceSource).toContain("ANALYSIS TASKS");
-    expect(workspaceSource).toContain("<h2>分析任务</h2>");
+  test("frames the primary workspace as a unified analysis workspace", () => {
+    expect(workspaceSource).toContain('label: "分析工作台"');
+    expect(workspaceSource).toContain('label: "分析资产库"');
+    expect(workspaceSource).toContain('label: "业务语义库"');
+    expect(workspaceSource).toContain("ANALYSIS WORKSPACE");
+    expect(workspaceSource).toContain("<h2>分析工作台</h2>");
     expect(workspaceSource).toContain('placeholder="搜索分析任务"');
-    expect(workspaceSource).toContain("+ 新建分析任务");
+    expect(workspaceSource).toContain("+ 新建分析");
     expect(workspaceSource).toContain('aria-label="分析任务工作区"');
-    expect(workspaceSource).toContain(">分析任务</button>");
-    expect(workspaceSource).toContain("新分析任务");
+    expect(workspaceSource).toContain(">分析工作台</button>");
+    expect(workspaceSource).toContain("新分析");
 
     expect(workspaceSource).not.toContain('label: "会话"');
+    expect(workspaceSource).not.toContain('label: "知识探索"');
+    expect(workspaceSource).not.toContain('label: "Agent 中心"');
+    expect(workspaceSource).not.toContain("KnowledgeExploration");
     expect(workspaceSource).not.toContain("CONVERSATIONS");
     expect(workspaceSource).not.toContain("+ 新建会话");
     expect(suggestionsSource).not.toContain("开始一个会话");
   });
 
-  test("introduces the reusable analysis asset library direction", () => {
+  test("keeps current task assets in the analysis workspace and moves shared assets to the standalone library", () => {
     expect(workspaceSource).toContain("AnalysisAssetLibrary");
-    expect(assetLibrarySource).toContain("SharedAnalysisAssetLibrary");
-    expect(assetLibrarySource).toContain("mockAnalysisAssetLibraryService");
-    expect(assetLibrarySource).toContain("listEntries");
-    expect(assetLibrarySource).toContain("reopenEntry");
-    expect(workspaceSource).toContain("分析资产库");
-    expect(assetLibrarySource).toContain("分析资产库");
-    expect(assetLibrarySource).toContain("可共享");
-    expect(assetLibrarySource).toContain("可复用");
-    expect(assetLibrarySource).toContain("libraryView");
-    expect(assetLibrarySource).toContain('aria-label="切换分析资产库视图"');
+    expect(workspaceSource).toContain("AnalysisAssetLibraryPage");
     expect(assetLibrarySource).toContain("当前任务资产");
-    expect(assetLibrarySource).toContain("共享资产库");
+    expect(assetLibrarySource).toContain("可复用");
     expect(assetLibrarySource).toContain('aria-label="当前任务资产视图"');
-    expect(assetLibrarySource).toContain('aria-label="分析资产库共享视图"');
-    expect(assetLibrarySource).toContain("分析资产库共享视图");
-    expect(assetLibrarySource).toContain("从已保存、已发布或可复用资产回到来源分析任务继续");
+    expect(assetLibrarySource).not.toContain("SharedAnalysisAssetLibrary");
+    expect(assetLibrarySource).not.toContain("共享资产库");
+    expect(assetLibrarySource).not.toContain("libraryView");
+    expect(assetLibrarySource).not.toContain('aria-label="切换分析资产库视图"');
+    expect(assetLibraryPageSource).toContain("SharedAnalysisAssetLibrary");
+    expect(assetLibraryPageSource).toContain("共享、已保存和可复用的分析资产");
+    expect(assetLibraryPageSource).toContain("打开资产");
+    expect(assetLibraryPageSource).toContain("回到分析工作台继续");
+    expect(assetLibraryPageSource).toContain("来源任务");
+    expect(assetLibraryPageSource).toContain("latestVersion");
+    expect(assetLibraryPageSource).toContain("visibility");
     expect(sharedAssetLibrarySource).toContain("共享分析资产库");
-    expect(sharedAssetLibrarySource).toContain("已保存或发布的资产");
-    expect(sharedAssetLibrarySource).toContain("回到原分析任务继续");
+    expect(sharedAssetLibrarySource).toContain("已保存、已共享或可复用的资产");
+    expect(sharedAssetLibrarySource).toContain("回到分析工作台继续");
+  });
+
+  test("adds a business semantic library for semantic models and confirmed business knowledge", () => {
+    expect(workspaceSource).toContain("BusinessSemanticLibrary");
+    expect(businessSemanticLibrarySource).toContain("业务语义库");
+    expect(businessSemanticLibrarySource).toContain("语义模型");
+    expect(businessSemanticLibrarySource).toContain("业务知识");
+    expect(businessSemanticLibrarySource).toContain("FineReport");
+    expect(businessSemanticLibrarySource).toContain("MySQL / Doris");
+    expect(businessSemanticLibrarySource).toContain("ETL");
+    expect(businessSemanticLibrarySource).toContain("金蝶");
+    expect(businessSemanticLibrarySource).toContain("SQL 示例");
+    expect(businessSemanticLibrarySource).toContain("指标 / 维度");
+    expect(businessSemanticLibrarySource).toContain("确认过的口径");
+    expect(businessSemanticLibrarySource).toContain("字段来源");
+    expect(businessSemanticLibrarySource).toContain("分析经验");
+    expect(businessSemanticLibrarySource).toContain("语义查证记录");
   });
 
   test("keeps the lower-level interaction event generic for shared conversations", () => {
@@ -131,6 +162,9 @@ describe("analysis task product language", () => {
     expect(analysisTaskThreadSource).toContain("AnalysisModeToggle");
     expect(mockClientSource).toContain('this.state.analysisMode === "deep"');
     expect(mockClientSource).toContain("quick_report.html");
+    expect(mockClientSource).toContain("检索业务语义库");
+    expect(mockClientSource).toContain("语义查证");
+    expect(mockClientSource).toContain("读取报表语义 / 字段 / 血缘 / SQL 示例");
   });
 
   test("can switch analysis tasks from mock client to the real backend run API", () => {
@@ -234,14 +268,14 @@ describe("analysis task product language", () => {
     expect(sharedAssetLibrarySource).toContain("资产 ID");
     expect(sharedAssetLibrarySource).toContain("来源 Run");
     expect(sharedAssetLibrarySource).toContain("打开资产");
-    expect(sharedAssetLibrarySource).toContain("回到任务继续");
+    expect(sharedAssetLibrarySource).toContain("回到分析工作台继续");
     expect(sharedAssetLibrarySource).toContain("保存资产或发布 Skill 后会出现在这里");
     expect(assetContractsSource).toContain("v0.1-draft");
-    expect(assetLibrarySource).toContain("sharedEntries");
+    expect(assetLibraryPageSource).toContain("sharedAnalysisAssets");
     expect(workspaceSource).toContain("mockAnalysisAssetLibraryService.saveAsset");
     expect(workspaceSource).toContain("assetSourceContext");
     expect(workspaceSource).toContain("flow.conversationId");
-    expect(assetLibrarySource).toContain("sourceContext");
+    expect(assetLibraryPageSource).toContain("reopenContext");
     expect(workspaceSource).toContain("lastSaveRequest");
     expect(assetLibrarySource).toContain("MOCK SAVE PAYLOAD");
     expect(assetContractsSource).not.toContain("analysis_task_channel_sales_share");
@@ -259,18 +293,18 @@ describe("analysis task product language", () => {
     expect(assetLibrarySource).toContain("编辑草稿");
     expect(assetLibrarySource).toContain("保存草稿");
     expect(assetLibrarySource).toContain("草稿已保存，等待发布配置");
-    expect(assetLibrarySource).toContain("发布准备");
+    expect(assetLibrarySource).toContain("复用准备");
     expect(assetLibrarySource).toContain("还需补齐确认");
-    expect(assetLibrarySource).toContain("可发布到 Agent 中心");
+    expect(assetLibrarySource).toContain("可作为分析资产复用");
     expect(assetLibrarySource).toContain("已确认适用场景");
     expect(assetLibrarySource).toContain("已确认销售额口径");
     expect(assetLibrarySource).toContain("已确认复用权限");
     expect(assetLibrarySource).toContain("引用资产齐全");
-    expect(assetLibrarySource).toContain("模拟发布");
-    expect(assetLibrarySource).toContain("已模拟发布到 Agent 中心");
-    expect(assetLibrarySource).toContain("发布元数据预览");
-    expect(assetLibrarySource).toContain("AGENT CENTER PREVIEW");
-    expect(assetLibrarySource).toContain("agent_channel_sales_skill");
+    expect(assetLibrarySource).toContain("模拟入库");
+    expect(assetLibrarySource).toContain("已模拟作为可复用分析方法入库");
+    expect(assetLibrarySource).toContain("复用元数据预览");
+    expect(assetLibrarySource).toContain("REUSABLE METHOD PREVIEW");
+    expect(assetLibrarySource).toContain("method_channel_sales_skill");
     expect(assetLibrarySource).toContain("run_mock_skill_publish");
     expect(assetLibrarySource).toContain("来源分析任务");
     expect(assetLibrarySource).toContain("来源 Run");

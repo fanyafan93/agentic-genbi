@@ -152,42 +152,53 @@ function getAnalysisMode(input: AgentInput): AnalysisMode {
 export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInput["kind"]): Iterable<AgentEvent> {
   let currentAgentNodeId: string | null = null;
   for (const event of events) {
+    const context = getSystemContext(event);
     if (event.type === "run.created") {
       const runId = event.run_id;
       const conversationId = asString(event.payload.conversation_id);
       const question = asString(event.payload.question);
       if (inputKind === "start") {
-        yield { type: "conversation-init", runId, conversationId: conversationId || undefined };
+        yield { ...context, type: "conversation-init", runId, conversationId: conversationId || undefined };
       } else {
-        yield { type: "run-init", runId, conversationId: conversationId || undefined };
+        yield { ...context, type: "run-init", runId, conversationId: conversationId || undefined };
       }
       if (question) {
-        yield { type: "user", nodeId: `user-${runId}`, content: question };
+        yield {
+          type: "user",
+          nodeId: `user-${runId}`,
+          content: question,
+          itemId: asString(event.payload.user_item_id) || asString(event.payload.item_id) || undefined,
+          ...context,
+        };
       }
       continue;
     }
 
     if (event.type === "analysis.problem.classified") {
       currentAgentNodeId ||= `agent-${event.run_id}`;
-      yield { type: "agent", nodeId: currentAgentNodeId, content: "", mode: "delta" };
+      yield { type: "agent", nodeId: currentAgentNodeId, content: "", mode: "delta", ...context };
       yield {
         type: "step",
         label: `识别问题类型：${asString(event.payload.label) || "业务分析"}`,
         state: "done",
         nodeId: currentAgentNodeId,
+        itemId: asString(event.payload.item_id) || undefined,
+        ...context,
       };
       continue;
     }
 
     if (event.type === "analysis.retrieval.plan") {
       currentAgentNodeId ||= `agent-${event.run_id}`;
-      yield { type: "agent", nodeId: currentAgentNodeId, content: "", mode: "delta" };
+      yield { type: "agent", nodeId: currentAgentNodeId, content: "", mode: "delta", ...context };
       for (const item of asRecordArray(event.payload.items)) {
         yield {
           type: "step",
           label: `检索${asString(item.label) || "语义模型"}`,
           state: "done",
           nodeId: currentAgentNodeId,
+          itemId: asString(item.item_id) || undefined,
+          ...context,
         };
       }
       continue;
@@ -200,6 +211,20 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
         nodeId: currentAgentNodeId,
         content: asString(event.payload.content),
         mode: "replace",
+        itemId: asString(event.payload.item_id) || undefined,
+        ...context,
+      };
+      continue;
+    }
+
+    if (event.type === "agent.message.delta") {
+      currentAgentNodeId ||= `agent-${event.run_id}`;
+      yield {
+        type: "tokens",
+        nodeId: currentAgentNodeId,
+        text: asString(event.payload.delta),
+        itemId: asString(event.payload.item_id) || undefined,
+        ...context,
       };
       continue;
     }
@@ -213,6 +238,8 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
           id: asString(item.id) || asString(item.label),
           label: asString(item.label) || asString(item.id),
         })),
+        itemId: asString(event.payload.item_id) || undefined,
+        ...context,
       };
       continue;
     }
@@ -225,21 +252,34 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
           type: "artifact",
           path,
           kind,
+          itemId: asString(event.payload.item_id) || undefined,
+          ...context,
         };
       }
       continue;
     }
 
     if (event.type === "run.failed") {
-      yield { type: "error", message: asString(event.payload.detail) || asString(event.payload.error) };
-      yield { type: "done" };
+      yield { type: "error", message: asString(event.payload.detail) || asString(event.payload.error), ...context };
+      yield { type: "done", ...context };
       continue;
     }
 
     if (event.type === "run.completed") {
-      yield { type: "done" };
+      yield { type: "done", ...context };
     }
   }
+}
+
+function getSystemContext(event: BackendRunEvent) {
+  const runId = asString(event.payload.run_id) || event.run_id;
+  const threadId = asString(event.payload.thread_id) || asString(event.payload.conversation_id);
+  const turnId = asString(event.payload.turn_id) || runId;
+  return {
+    runId,
+    threadId: threadId || undefined,
+    turnId: turnId || undefined,
+  };
 }
 
 function asString(value: unknown): string {

@@ -4,6 +4,7 @@
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { AnalysisAssetLibrary } from "../src/modules/analysis/components/AnalysisAssetLibrary";
+import { AnalysisAssetLibraryPage } from "../src/modules/analysis/components/AnalysisAssetLibraryPage";
 import { saveAnalysisAssetMock } from "../src/modules/analysis/components/analysis-asset-contracts";
 import type { AnalysisAssetCard } from "../src/modules/analysis/components/analysis-assets";
 import type { AnalysisAssetSaveRequest, AnalysisAssetSourceContext } from "../src/modules/analysis/components/analysis-asset-contracts";
@@ -68,7 +69,7 @@ afterEach(() => {
 });
 
 describe("AnalysisAssetLibrary interactions", () => {
-  test("saves a report asset with current source context and reopens it from the shared view", () => {
+  test("keeps the task-side library focused on current analysis assets", () => {
     vi.stubEnv("NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME", "mock");
     const onSaveAsset = vi.fn();
     const onContinueFromAsset = vi.fn();
@@ -108,94 +109,28 @@ describe("AnalysisAssetLibrary interactions", () => {
     expect(view.container.textContent).toContain("MOCK SAVE PAYLOAD");
     expect(view.container.textContent).toContain("asset_mock_report");
     expect(view.container.textContent).toContain("conv_analysis_interaction");
-
-    const sharedTab = view.container.querySelectorAll<HTMLButtonElement>(".asset-library-view-switch button")[1];
-    expect(sharedTab).not.toBeNull();
-    fireEvent.click(sharedTab!);
-
-    expect(view.container.textContent).toContain("SHARED ASSETS");
-    expect(view.container.textContent).toContain("asset_mock_report");
-    expect(view.container.textContent).toContain("run_analysis_interaction");
-
-    const sharedActions = view.container.querySelectorAll<HTMLButtonElement>(".shared-asset-actions button");
-    expect(sharedActions.length).toBeGreaterThanOrEqual(2);
-    fireEvent.click(sharedActions[1]);
-
-    expect(onContinueFromAsset).toHaveBeenCalledTimes(1);
-    const continuedAsset = onContinueFromAsset.mock.calls[0][0] as AnalysisAssetCard;
-    expect(continuedAsset.id).toBe("report");
+    expect(view.container.textContent).toContain("当前任务资产");
+    expect(view.container.textContent).not.toContain("共享资产库");
+    expect(view.container.querySelector(".asset-library-view-switch")).toBeNull();
     vi.unstubAllEnvs();
   });
 
-  test("loads shared assets from backend and reopens backend context", async () => {
-    vi.stubEnv("NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME", "backend");
-    vi.stubEnv("NEXT_PUBLIC_GENBI_API_BASE_URL", "http://192.168.101.12:8000");
+  test("shows reusable assets in the standalone analysis asset library and can continue from one", async () => {
     const onContinueFromAsset = vi.fn();
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            assets: [
-              {
-                assetId: "asset_backend_report",
-                artifactVersionId: "artifact_version_backend_report_v1",
-                sourceTaskId: sourceContext.sourceTaskId,
-                sourceTaskTitle: "首购后 30 天复购率",
-                sourceConversationId: sourceContext.sourceConversationId,
-                sourceRunId: sourceContext.sourceRunId,
-                assetType: "报告",
-                title: "后端保存的分析报告",
-                label: "报告",
-                description: "来自后端资产索引",
-                visibility: "team",
-                status: "saved",
-                latestVersion: "v1-draft",
-                fileId: "reports-quick-report-html",
-                reopenContext: {
-                  ...sourceContext,
-                  continuationPrompt: "continue from backend report",
-                  targetFileId: "reports-quick-report-html",
-                },
-              },
-            ],
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            context: {
-              ...sourceContext,
-              continuationPrompt: "continue from backend report",
-              targetFileId: "reports-quick-report-html",
-            },
-            assetId: "asset_backend_report",
-            artifactVersionId: "artifact_version_backend_report_v1",
-            openedAt: "2026-07-30T20:45:00+08:00",
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-    const view = renderLibrary({ savedAssetIds: [], onContinueFromAsset });
+    const view = render(<AnalysisAssetLibraryPage onContinueFromAsset={onContinueFromAsset} />);
 
-    const sharedTab = view.container.querySelectorAll<HTMLButtonElement>(".asset-library-view-switch button")[1];
-    fireEvent.click(sharedTab!);
-
-    await waitFor(() => expect(view.container.textContent).toContain("后端资产索引已连接"));
-    expect(view.container.textContent).toContain("后端保存的分析报告");
-    expect(fetchMock.mock.calls[0][0].toString()).toBe("http://192.168.101.12:8000/api/analysis/assets?limit=50");
+    expect(view.container.textContent).toContain("分析资产库");
+    expect(view.container.textContent).toContain("共享分析资产库");
+    expect(view.container.textContent).toContain("首购后 30 天复购率分析报告");
+    expect(view.container.textContent).toContain("SKILL.md");
+    expect(view.container.textContent).toContain("来源任务");
+    expect(view.container.textContent).toContain("可见范围");
 
     const sharedActions = view.container.querySelectorAll<HTMLButtonElement>(".shared-asset-actions button");
     fireEvent.click(sharedActions[1]);
 
     await waitFor(() => expect(onContinueFromAsset).toHaveBeenCalledTimes(1));
-    expect(fetchMock.mock.calls[1][0]).toBe("http://192.168.101.12:8000/api/analysis/assets/asset_backend_report/reopen");
     const continuedAsset = onContinueFromAsset.mock.calls[0][0] as AnalysisAssetCard;
-    expect(continuedAsset.id).toBe("report");
-    vi.unstubAllGlobals();
-    vi.unstubAllEnvs();
+    expect(continuedAsset.id).toBe("asset_shared_rebuy_report");
   });
 });

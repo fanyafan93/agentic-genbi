@@ -1,126 +1,84 @@
 # 架构边界
 
-## 当前实现
-
-当前仓库是前端优先、mock-first 演进中的 Next.js 原型；知识探索和分析任务已开始按相同后端事件边界替换局部 mock 能力。
-
-- `frontend/src/app/page.tsx` 挂载分析工作台。
-- `modules/analysis` 提供分析任务 UI、mock Agent 客户端、可选真实后端 Agent 客户端、Run 事件折叠、分析资产库 mock 与图表展示；当前前端已支持 `analysisMode: "quick" | "deep"` 的快速分析/深度分析模式。
-- `backend/analysis/run_service.py` 提供分析任务首个真实后端 Run 服务：按统一事件对象产生 `run.created`、`analysis.problem.classified`、`analysis.retrieval.plan`、`agent.message.created`、`agent.question.requested`、`artifact.created/updated` 和 `run.completed`；该服务复用现有 Run trace/event store 做审计与离线存储。未配置 LLM 时使用确定性后端编排，配置 `GENBI_ANALYSIS_RUNTIME=openai` 或 `llm` 后可调用 OpenAI Agents SDK 分析 Runner。
-- `backend/analysis/agent_runner.py` 提供分析任务 OpenAI Agents SDK 适配层：定义 Analysis Task Agent 提示词、`GENBI_ANALYSIS_MODEL` / `GENBI_ANALYSIS_MAX_TURNS` 配置、OpenAI-compatible provider 复用和 SDK stream 事件标准化。当前分析 Runner 先产出 Agent 回复；真实语义模型工具、SQL 工具和 Artifact 持久化工具仍待接入。
-- `modules/investigation` 提供知识探索 UI、领域类型、探索过程事件映射和运行环境状态提示；提交探索问题时调用配置的后端 API，服务未配置或失败时明确显示后端不可用，不再模拟探索结果。
-- `modules/knowledge-base` 提供知识库 UI、领域类型、mock 数据、筛选/映射逻辑和知识库 API 客户端；当前挂载在知识探索的“知识库”tab 中。
-- `ChartSpec -> ECharts` 是当前图表渲染链路。
-- `backend/resource_library` 提供本地资源库扫描器和结构摘要器，生成被 Git 忽略的资源索引 JSON 与结构摘要 JSON；当前只记录文件元信息、类型、大小、修改时间、hash、XML 标签计数、候选参数/数据集、SQL 读写表、输出字段和表达式候选等结构信号，不展示完整业务正文。
-- `backend/resource_library/exploration_agent.py` 提供 OpenAI Agents SDK 适配层：把资源库工具、数据库只读工具和本地知识沉淀包装成 Knowledge Exploration Agent 的 function tools；未安装 SDK 时返回明确依赖错误。
-- `backend/resource_library/knowledge_store.py` 保留最小本地知识沉淀 JSONL 存储作为测试与离线开发存储；Docker 真实后端默认通过 `backend/persistence/postgres_stores.py` 写入 PostgreSQL。
-- `backend/exploration/run_service.py` 提供探索 Run 事件服务，当前可按统一事件契约产生标题、消息、工具调用、折叠证据、追问和完成事件；也可注入真实 Agent Runner，并为 SSE 提供 async streaming 路径。
-- `backend/exploration/run_trace_store.py` 和 `backend/exploration/run_event_store.py` 保留最小本地 JSONL 存储作为测试与离线开发存储；Docker 真实后端默认通过 `backend/persistence/postgres_stores.py` 把探索 Run trace、Run events 和知识沉淀写入 PostgreSQL。
-- `backend/exploration/agent_runner.py` 提供 `LLMAgentRunner` 适配器；通过 `GENBI_EXPLORATION_RUNTIME=openai` 或 `llm` 启用，默认 provider 是 OpenAI，也可用 `GENBI_LLM_PROVIDER=minimax` 走 OpenAI-compatible endpoint；支持 `GENBI_EXPLORATION_MODEL`、`GENBI_EXPLORATION_MAX_TURNS` 和 `Runner.run_streamed()` 事件实时转发。
-- `backend/config/env.py` 负责加载项目 `.env` 或 `GENBI_ENV_FILE` 指向的 env 文件；LLM provider key、模型配置和 MySQL 连接信息均从 env 读取。MySQL 可使用 `GENBI_DB_*` 专用字段，也可从 `DATABASE_URL=mysql+pymysql://...` 解析，专用字段优先；`doctor` 用于确认 LLM Runner、MySQL 只读连接、资源库、前端 API 地址和成本估算配置是否就绪。
-- `backend/api/exploration_api.py` 提供 FastAPI 入口，暴露健康检查、运行环境状态、分析任务 Run API/SSE、探索过程/SSE、兼容 Run API、资源库状态/搜索/详情/重建索引、知识列表/筛选/保存/更新/删除/清空/标签接口；开发期允许 `localhost:3000`、`127.0.0.1:3000` 以及环境变量声明的前端来源跨域访问，启动前需要安装 `backend/requirements.txt`。
-- 前端已接入 Auth.js v5：`frontend/src/auth.ts` 使用自定义飞书 OAuth provider，读取 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 和 `AUTH_*` 环境变量；`frontend/src/app/api/auth/[...nextauth]/route.ts` 暴露 Auth.js 路由；首页未登录时展示飞书登录页，登录后进入工作台。
-- Auth 状态使用 Prisma + PostgreSQL DB session：`frontend/prisma/schema.prisma` 定义 Auth.js `User`、`Account`、`Session` 和 `VerificationToken` 表，迁移文件位于 `frontend/prisma/migrations/`。`User.role` 先保留为最小角色字段，默认 `user`。
-- 知识探索前端会从 Auth session 取得 `session.user.id`，请求探索任务列表与创建过程消息时传递 `user_id`；后端探索列表 API 支持按 `user_id` 过滤，用于当前 demo 的多用户探索列表隔离。
-- Docker Compose 启动前端、知识探索后端与 Postgres：前端宿主机端口为 `3000`，后端宿主机端口为 `8000`，Postgres 宿主机端口为 `5432`；前端容器启动时执行 `npm install && npm run prisma:migrate && npm run dev`，后端容器挂载当前 `backend/` 代码、只读 `资源库/` 和本地 `.resource-index/`，并默认设置 `GENBI_PERSISTENCE=postgres`。
-
-未包含完整会话/Artifact 持久化、团队级权限、数据权限、前端到完整真实 Agent Runtime 的连接、生产数据源适配器或调度服务。
-
-## 目标形态
-
-本项目采用 **vibe coding** 的开发方式：用户持续给出产品方向和体验反馈，多个 AI 开发 Agent 快速实现可运行 Demo 并根据反馈演进。技术架构因此采用前端优先的模块化单体：先让前端与虚拟后端共享稳定领域契约，后续用真实后端逐项替换 mock 实现。当前不预设微服务拆分。
-
-快速迭代不改变工程底线：mock 只用于验证体验和边界，不能伪装为真实能力；领域类型、HTTP/SSE 事件 schema、测试和服务端安全边界必须随功能演进保持一致。
+## 总图
 
 ```mermaid
 flowchart LR
-  UI[Next.js 工作台] --> Contract[领域契约与事件协议]
-  Contract --> Mock[MSW / Mock Runtime]
-  Contract -.逐步替换.-> API[FastAPI API + SSE]
-  API --> Runtime[Agent Runtime]
-  API --> Domain[会话、资产、自动化、Agent、知识探索服务]
-  Runtime --> Tools[受控工具]
-  Tools --> Guard[权限与查询安全]
-  Guard --> Sources[数据源适配器]
-  Domain --> State[(应用状态库)]
-  Domain --> Objects[(对象存储)]
-  Domain --> Jobs[队列与调度]
+  UI["交互层\n分析工作台"] --> API["API / SSE\nThread/Turn/Item 事件边界"]
+  API --> Harness["编排层\nopenai-codex SDK / Codex"]
+  Harness --> Semantic["语义层\n业务语义库"]
+  Harness --> Data["数据层\n只读 / RLS / SQL 安全"]
+  Harness --> Artifact["Artifact 层\n报告/图表/SQL/Skill"]
+  Semantic --> Data
+  Semantic --> Governance["治理层\n权限/审批/审计/成本"]
+  Data --> Governance
+  Artifact --> Governance
 ```
 
-## 前端架构
+## 分层职责
 
-一级导航遵循产品入口：`workbench`、`analysis-tasks`、`knowledge-exploration`、`agent-center`、`system`。横向能力不强行变成一级导航：
+| 层 | 职责 | 边界 |
+| --- | --- | --- |
+| 交互层 | 展示分析任务、Agent 过程、追问、当前任务资产、资产库和语义库 | 不做真实权限判断，不直接访问生产数据 |
+| API / SSE | 接收请求，返回 Thread/Turn/Item 事件流，隔离前后端契约 | 不泄漏内部工具实现 |
+| openai-codex SDK / Codex | 规划、执行、反思、上下文组装、工具调度、模型调用、sandbox、approval、tool/MCP/Skill 编排 | 不自研 Codex 已经提供的通用 Agent 工程能力 |
+| 业务语义库 | 提供语义模型和业务知识检索、引用、版本、认证 | 不返回完整敏感业务文件正文 |
+| 数据层 | 数据源连接、只读查询、SQL AST 校验、limit、超时、RLS、脱敏、审计 | 不允许浏览器绕过 |
+| Artifact 层 | 保存报告、图表、SQL、代码、数据快照、分析路径、`SKILL.md` 和版本 | 不把本地 mock 当真实共享 |
+| 治理层 | RBAC/RLS、敏感字段、审批、发布、审计、成本、模型/工具权限 | 横跨所有层 |
 
-- `Artifact Studio` 从分析任务右侧分析资产库和 Artifact 详情页进入，提供预览、编辑、版本、依赖、引用和自动化入口。
-- `Automation Studio` 是 Artifact 或 Agent 的配置与运行历史视图。
-- `Agent Studio` 是 Agent 中心内从 Run / Artifact 提炼、编辑、测试和发布 Agent 的工作区。
+## Codex 优先原则
 
-前端目标依赖：
-
-| 领域 | 技术选择 |
-| --- | --- |
-| 应用 | Next.js、React、TypeScript |
-| 服务端状态 | TanStack Query |
-| UI 状态 | Zustand |
-| 虚拟后端 | MSW + 本地 mock Runtime |
-| 图表 | ChartSpec + ECharts |
-| SQL 与代码编辑 | Monaco Editor |
-| 资产关系图与 Agent 工作流 | React Flow |
-| 测试 | Vitest、Playwright、MSW contract tests |
-
-页面和组件只依赖领域类型与 API Service；mock 与真实服务返回相同的 HTTP/SSE 结构，不将 mock 脚本细节泄漏到 UI。
-
-知识探索不是“指标库优先”的页面，而是 BI 调查工作区：左二栏承载我的探索、资源库和知识库；主区在选择探索任务时呈现一个探索过程。该过程由知识探索 Agent 驱动，以消息流展示检索过程、追问、证据折叠块和可保存到知识库的结论。当前知识探索只保存到知识库，不直接生成 Artifact 或可复用 Agent。
-
-知识库是独立领域模块，当前 UI 已提供 `全部知识`、`语义层`、`探索沉淀`、`认证中心` 和 `标签体系` 五个主视图。底层统一使用 `KnowledgeBaseItem` 表达指标定义、维度定义、业务实体、字段映射、口径公式、业务规则、数据链路、报表逻辑和探索结论，并记录创建人、负责人、可见范围、标签、认证、版本、冲突、证据和 Agent 可见性。当前后端基础能力仍复用 `verified_knowledge.metadata JSONB` 承载扩展字段；正式化时应拆出知识、版本、认证、标签和使用记录表。
-
-前端知识探索通过 `NEXT_PUBLIC_GENBI_API_BASE_URL` 接入真实探索 API；未配置或请求失败时明确显示后端不可用，不再生成本地模拟探索过程。前端创建探索或继续追问时优先调用 `POST /api/explorations/conversations/stream` 并按 SSE event 增量更新当前探索过程；失败时回退到一次性 `POST /api/explorations/conversations`，再失败则展示错误状态。登录态存在时，探索列表与新建消息会携带当前 Auth session 的用户 ID；这只隔离当前探索列表，不替代服务端数据权限。旧的 `/api/explorations/runs/*` 仍保留为兼容和内部排查入口。
-
-前端知识探索还会读取 `GET /api/runtime/status`，把 env doctor 的结果呈现为标题区运行状态：后端未连接、后端已连接但配置待补、或关键配置已就绪。这个状态只用于开发期可见性，不替代服务端鉴权、审计或生产可观测性。
-
-资源库和知识库也通过同一后端接入：前端启动后会尝试调用 `GET /api/resources/status`、`GET /api/resources/search`、`GET /api/knowledge` 和 `GET /api/knowledge/tags`；失败时可保留静态演示列表，但探索过程本身不再使用本地模拟结果。探索过程中的“保存到知识库”会把用户问题、结论、范围和证据引用整理后调用 `POST /api/knowledge`，并默认写入探索结论类型、待认证状态和 Agent 可见性；后端失败时应显示失败状态，不伪造成已保存。知识库编辑使用 `PATCH /api/knowledge/{id}`。资源库重建由 `POST /api/resources/reindex` 执行，默认读取 `GENBI_RESOURCE_LIBRARY_ROOT` 或项目 `资源库/`。资源详情页可通过 `GET /api/resources/{resource_id}` 查看结构摘要分组，并通过 `GET /api/resources/{resource_id}/excerpt` 读取受控片段；服务端限制 section、行数和字节数，不提供完整文件浏览。结构摘要会把 FineReport 参数、数据集、读写表、输出字段、表达式候选，以及 Apache Hop 节点、读写表和字段候选作为可搜索信号。
-
-资源库后端从本地索引器、结构摘要器和受控资源工具起步：扫描 allowlist 根目录，默认识别 `.cpt`、`.frm`、`.hpl`、`.hwf`、`.sql`、`.xml`、文档和样例数据等文件类型。索引与摘要文件仅作为本地运行产物，不提交 Git。Agent 和前端只通过 `search_resources`、`inspect_resource` 和 `read_resource_excerpt` 访问资源；搜索和摘要不返回完整正文，片段读取必须限定资源、字节数和行数。
-
-数据库探索从只读工具起步：`search_db_tables` 和 `get_table_schema` 查询 `information_schema`，`run_readonly_query` 默认开启但可通过配置关闭。SQL 必须是单条只读查询，默认禁止写操作、多语句和 `select *`，自动补默认 `limit`，真实连接必须使用只读账号。数据库连接优先读取 `GENBI_DB_HOST/USER/PASSWORD/DATABASE`，未提供时回退解析 `DATABASE_URL`。
-
-知识探索 Agent 从 OpenAI Agents SDK 适配层起步：`build_data_exploration_agent` 使用中文系统提示词约束探索顺序、证据引用、追问边界和安全边界，并通过 `function_tool` 注册受控工具。`LLMAgentRunner` 可调用真实 `Runner.run()`，也可把 `Runner.run_streamed()` 的 SDK 事件通过 async iterator 实时转换为现有 Run 事件；默认 provider 使用 OpenAI，MiniMax 先按 OpenAI-compatible Chat Completions model 接入，后续 provider 不应重写探索业务逻辑。一次性 API 仍可收集完整事件后返回。SDK raw event 中的 token usage 会被保留到 Run 事件 payload，供追踪记录汇总。Agent 当前只负责探索和沉淀知识，不直接生成 Artifact 或可复用 Agent。
-
-底层 `Conversation` 是通用多轮交互能力，不直接作为所有模块的 UI 名称。分析任务和知识探索任务都可以复用同一个 Conversation / Run / Message 基座，区别在于绑定的 Agent、可用工具、上下文和资产沉淀目标不同。知识探索模块的业务对象叫“探索任务”，主区展示“探索过程”：一个探索过程有连续消息历史，用户继续发消息时，后端按同一个 `conversation_id` 读取历史事件，把上下文交给同一个知识探索 Agent，并允许 Agent 继续调用同一组受控工具回答。新建探索任务会生成独立 `conv_*`，每次用户提问或追问都会生成新的内部 `run_*`；一个 `conv_*` 可挂多个 `run_*`。`run_*` 只作为内部单次执行审计 ID 保留，用来记录工具调用、模型事件、token、错误和调试追踪，不作为前端主标题展示。Docker 真实后端默认使用 PostgreSQL 持久化：`exploration_run_traces` 保存单次执行汇总，`exploration_run_events` 保存完整事件流，`verified_knowledge` 保存已沉淀知识。继续追问仍记录为新的可审计执行记录，但通过 `conversation_id` 归属到同一探索过程；前端只发送用户本轮真实输入，不再拼接历史 prompt。没有真实 Agent Runner 时后端直接返回失败，不再走本地资源检索模拟。`RunTraceStore`、`RunEventStore` 和 `KnowledgeStore` 的 JSONL 实现仍作为测试与离线开发存储保留。已有 `.resource-index/*.jsonl` 可通过 `python -m backend.scripts.migrate_file_stores_to_postgres` 迁入 Postgres。成本估算依赖 `GENBI_MODEL_INPUT_USD_PER_1M` 和 `GENBI_MODEL_OUTPUT_USD_PER_1M`，没有 token usage 或价格配置时成本字段保持空值。
-
-现有 `modules/analysis/components/AnalysisWorkspace.tsx` 继续作为分析任务 Demo 的组合容器。当前 mock 事件使用通用 `conversation-init` 表示底层会话初始化；UI 上的“分析任务”是该会话基座在分析场景里的业务投影。新增工作台、知识探索、Agent 中心、系统或独立 Artifact 能力时，应在对应领域目录创建组件、类型、mock 和测试；不要持续向该容器堆叠领域逻辑。
-
-分析任务前端当前默认仍采用虚拟后端事件推进持续工作流，也可设置 `NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME=backend` 和 `NEXT_PUBLIC_GENBI_API_BASE_URL` 切换到真实分析任务后端。真实后端首个切片提供 HTTP Run API 和 SSE 事件流：快速分析少追问并直接生成报告、SQL、图表配置和假设说明等草稿资产；深度分析先展示问题分类、报表级语义模型、MySQL/Doris 元数据、金蝶字典、ETL 血缘和知识库经验检索计划，再追问用户补齐口径。用户继续发消息时，后端会产生资产更新事件，并可按用户要求生成 `SKILL.md` 或 Python 分析脚本资产。配置 `GENBI_ANALYSIS_RUNTIME=openai` 或 `llm` 时，分析任务后端会把问题、分析模式、问题类型和候选语义模型交给 OpenAI Agents SDK Analysis Task Agent，并把 SDK stream 事件继续转成现有 Run 事件。当前还没有接真实语义模型工具、真实 SQL 生成或 Artifact 持久化；后续接工具时应复用同一 `AnalysisMode`、`AgentEvent.artifact` 和底层 Conversation/Run/Message 语义，不把浏览器端模式选择当作权限或 SQL 安全边界。
-
-分析资产库当前有两种前端视角：任务内文件树/预览区，以及共享资产库 mock 列表。右侧 `AnalysisAssetLibrary` 通过局部视图切换区分“当前任务资产”和“共享资产库”：前者展示本任务生成的草稿、保存请求和文件树，后者展示可复用资产索引和回到来源任务继续的入口。共享列表消费前端领域契约 `AnalysisAssetLibraryEntry`，当前条目仍由 `buildMockAnalysisAssetLibraryEntries` 从当前任务生成的 asset cards 派生，用于验证保存、发布、打开资产和回到原分析任务继续的交互。`frontend/src/modules/analysis/api/analysis-asset-library-service.ts` 提供前端 service facade，暴露 `listEntries`、`saveAsset` 和 `reopenEntry`，让 UI 先依赖服务边界而不是直接依赖 mock 构造细节。保存动作通过 service 构造 `AnalysisAssetSaveRequest`，并在 UI 中显示保存 payload；当 `NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME=backend` 且 `NEXT_PUBLIC_GENBI_API_BASE_URL` 已配置时，前端会把同一个保存请求提交到 `POST /api/analysis/assets`。后端当前提供最小开发期 JSONL 资产索引 `AnalysisAssetStore` 和 `GET /api/analysis/assets`、`GET /api/analysis/assets/{asset_id}`、`POST /api/analysis/assets`、`POST /api/analysis/assets/{asset_id}/reopen`，字段包含 `assetId`、`artifactVersionId`、`sourceTaskId`、`sourceConversationId`、`sourceRunId`、`assetType`、`visibility`、`status`、`latestVersion` 和 `reopenContext`。这只是最小持久化契约，不代表完整跨用户共享、权限、审批、版本治理或真实 Artifact 对象存储已经完成；前端不得用本地保存状态冒充真实共享资产或权限判断。
-
-## 领域与事件契约
-
-前后端围绕以下对象交互：
+能用 Codex 的，绝不自研。
 
 ```text
-Conversation → Run → Messages / Plan / Tool Calls / Artifacts
-Artifact → Versions / References / Automations
-Agent → Definition / Tools / Inputs / Outputs / Runs
-Knowledge Exploration Task → Exploration Process / Messages / Internal Runs / Resource Library / Knowledge Base
-Knowledge Item → Type / Semantic Definition / Evidence / Approvals / Tags / Versions / Agent Usage
+编排执行：优先通过 openai-codex Python SDK 接 Codex；需要更底层能力时再研究 codex-core。
+会话状态：对齐 Codex Thread / Turn / Item。
+工具生态：优先用 Codex tool / MCP / Skills / Apps / Connectors。
+执行环境：优先用 Codex shell / apply_patch / sandbox / approval。
+检索与版本：优先用 Codex file search / git 工具。
+模型调用：优先走 Codex model adapter / client。
 ```
 
-Run 采用事件流表达状态变化。最小事件集合：
+本项目只做业务层和适配层：业务语义库、数据源安全访问、分析资产治理、前端分析工作台，以及 Codex 与这些业务能力之间的 adapters。
+
+## Codex 适配契约
+
+目标后端不自建通用 runtime，而是提供这些接入 openai-codex SDK / Codex 的稳定适配接口：
+
+```text
+RunContextAdapter：把用户、thread、turn、权限、模式、业务上下文映射给 Codex。
+ToolAdapter：把资源库、数据库、业务语义库、Artifact 存储包装成 Codex 可调用工具。
+ModelAdapter：优先复用 Codex 模型适配；只在业务需要时补供应商配置。
+ArtifactAdapter：把 Codex 产物登记为分析资产、版本、来源 thread/turn/run 和依赖。
+EventAdapter：把 Codex items/events 转成现有 HTTP/SSE 事件。
+StateAdapter：把 Codex Thread / Turn / Item 映射到项目的 Postgres ThreadStore。
+```
+
+模型供应商只是 adapter。OpenAI Agents SDK 不是目标架构；现有 runner 代码只算过渡实现。
+
+## 系统对象口径
+
+```text
+Thread：持续工作上下文，对应产品层的分析任务、探索任务或资产继续编辑任务。
+Turn：用户触发的一轮 Agent 工作，从输入到暂停、追问、失败或完成。
+Run：一次实际执行尝试；一个 Turn 可有多个 Run，用于重试、回放或多 Agent 并行。
+Item：Turn 内产生的结构化单元，包括 message、tool_call、tool_result、plan、question、artifact、sql、chart、report。
+Artifact：可复用分析资产，是可治理的 Item 子集。
+```
+
+产品层继续使用“分析任务 / 分析会话 / 分析资产”；系统层、存储层、审计层和 Harness 层统一使用 `Thread / Turn / Item`。
+
+## 核心事件
+
+Thread/Turn/Item 事件是前后端主契约。现阶段事件名保持兼容，后续逐步补齐 `thread_id`、`turn_id`、`run_id`、`item_id`：
 
 ```text
 run.created
-agent.title.generated
+run.plan.updated
 agent.message.delta
 agent.message.created
 agent.question.requested
-agent.runner.started
-agent.runner.completed
-agent.runner.failed
-agent.runner.agent_updated
-agent.runner.item
-agent.runner.raw
-run.plan.updated
 tool.call.started
 tool.call.completed
 tool.call.failed
@@ -131,38 +89,38 @@ run.completed
 run.failed
 ```
 
-事件、对象和错误必须有 TypeScript schema；真实 API 建立后用 OpenAPI 与对应 schema 校验保持一致。
+所有事件必须有 TypeScript schema；真实 API 建立后用 OpenAPI 或等价 schema 校验。
 
-### Skill 发布契约方向
+## 当前实现快照
 
-分析任务把一次成功分析沉淀为 `SKILL.md` 时，真实后端不应只保存一份 Markdown 文件，而应保存可治理的发布对象：
+- 前端：Next.js + TypeScript，`modules/analysis` 已承载分析工作台、当前任务资产、独立分析资产库 mock 和业务语义库 mock。
+- 后端：FastAPI 已有分析 Run API / SSE、资源库工具、数据库只读工具、知识记录、分析资产最小存储；分析任务已写入新的 `ThreadStore`，保存 Thread/Turn/Run/Item，数据库配置可用时使用 Postgres 表，无数据库时回退 JSONL，并提供分析 Thread 查询接口；`GENBI_ANALYSIS_RUNTIME=codex` 可切到 openai-codex Python SDK runner。
+- 过渡 runner：`backend/analysis/agent_runner.py` 和 `backend/exploration/agent_runner.py` 仍存在，用于当前 LLM 调用；后续应逐步被 Codex SDK runner 和 Codex 工具适配替代。
 
-- `SkillDraft`：草稿章节、适用场景、需要确认项、推荐步骤、作者、更新时间和草稿版本。
-- `SkillPublication`：发布状态、可见范围、目标 Agent Center 条目、发布版本、审批状态和审批记录。
-- `SkillLineage`：来源分析任务 ID、来源 Conversation ID、来源 Run ID、引用的 Artifact Version ID、语义模型引用和知识库引用。
-- `SkillApproval`：业务口径确认、适用场景确认、复用权限确认、审批人、审批时间和撤回/废弃记录。
+## Codex 运行配置
 
-当前前端只提供本地 mock：保存草稿、勾选发布准备项、模拟发布和展示元数据预览。后续真实 API 需要把这些字段纳入持久化、权限校验、审计和 Agent Center 注册流程，不能依赖浏览器端勾选作为真实审批。
+```text
+GENBI_ANALYSIS_RUNTIME=codex
+GENBI_CODEX_PROVIDER=minimax
+GENBI_LLM_BASE_URL=https://api.minimaxi.com/v1
+MINIMAX_API_KEY=...
+```
 
-## 真实后端演进
+当 `GENBI_LLM_PROVIDER=minimax` 或 `GENBI_CODEX_PROVIDER=minimax` 时，runner 会把 MiniMax 配成 Codex 自定义 `model_provider`，复用 `MINIMAX_API_KEY` 和 `GENBI_LLM_BASE_URL`。OpenAI/Codex 原生账号可使用 `GENBI_CODEX_API_KEY` 或 `OPENAI_API_KEY`。当前分析 runner 默认使用 read-only sandbox 和 deny-all approval；业务工具接入后再按工具级权限开放。
+- 历史知识探索 UI 仍在代码中，但不再是目标主入口。
 
-前端体验和契约稳定后，按能力替换虚拟实现：
+## 安全底线
 
-- API：FastAPI，HTTP + SSE，服务端身份与权限上下文；当前前端身份由 Auth.js 飞书登录提供，后续后端 API 需验证同一身份上下文。
-- Agent：OpenAI Agents SDK，结构化输出、受控工具调用、Run 追踪与评估；当前知识探索已具备工具适配层、可选真实 Runner 路径和流式工具事件转发，后续需补追踪落库、成本记录和评估。
-- 状态：当前 Auth.js session、知识探索 Run trace、Run events 和已沉淀知识存在 Postgres；后续应用状态仍按系统演进保存完整会话、Artifact、版本、Agent、Automation、权限与审计。
-- 大对象：S3 兼容对象存储保存报告、文件、结果快照和代码内容。
-- 自动化：Demo 使用虚拟调度器；真实实现优先评估 Temporal，简单可靠任务可使用 Redis + BullMQ Worker。
-- 数据安全：知识探索上下文、数据源适配器、SQLGlot AST 校验、只读连接、强制限额/超时和审计。
-- 可观测性：当前先用 Postgres 保存知识探索 Run trace 与事件流，字段仍围绕探索 demo 演进；后续以 OpenTelemetry 和应用状态库记录完整 Run、模型和工具调用、调度运行、耗时与 token 成本。
+- 数据库账号必须只读。
+- SQL 必须经过服务端校验，禁止多语句、写操作和无约束大查询。
+- RLS、敏感字段、团队权限和审批必须在服务端。
+- 前端状态、隐藏按钮、提示词和 mock 标记都不是安全边界。
+- 资源库搜索和摘要不返回完整业务文件正文；片段读取必须受控。
 
-## 多 AI Agent 开发协作
+## 演进顺序
 
-- 按领域目录和稳定契约分工，避免多个开发 Agent 同时修改同一工作台容器。
-- 每项改动只承载可独立验证的垂直切片；mock、类型、测试和 UI 同步修改。
-- 以类型检查、单元测试、契约测试和 Playwright 视觉验证作为交接依据。
-- 项目稳定事实仅记录在产品、架构和当前任务文档；过程和历史由 Git 提交追溯。
-
-## 当前边界
-
-不在前端原型阶段实现真实数据访问、真实权限判定或生产调度；这些能力必须在服务端受控实现，不能依赖浏览器隐藏按钮或提示词约束。
+1. 先通过 openai-codex Python SDK 接入 Codex，把 `backend/harness/` 收敛为 Codex adapters，而不是自研 runtime。
+2. 把分析任务执行迁到 Codex SDK runner，同时保持现有 HTTP/SSE 契约。
+3. 把资源库、数据库、业务语义库改成 Codex tool / MCP / Skill adapters。
+4. 把 Artifact 版本、权限、发布、回到任务继续迁入新的 Thread/Item 血缘。
+5. 再做自动刷新、评估、成本和治理。

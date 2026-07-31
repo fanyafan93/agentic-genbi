@@ -9,6 +9,7 @@ from backend.analysis.agent_runner import AnalysisAgentRunResult, AnalysisAgentR
 from backend.exploration.run_event_store import RunEventStore
 from backend.exploration.run_service import ExplorationRunEvent
 from backend.exploration.run_trace_store import RunTraceStore
+from backend.harness.thread_store import ThreadStore
 
 AnalysisMode = Literal["quick", "deep"]
 AnalysisTurnKind = Literal["start", "message", "reply"]
@@ -47,11 +48,16 @@ class AnalysisRunService:
         agent_runner: AnalysisAgentRunner | None = None,
         trace_store: RunTraceStore | None = None,
         event_store: RunEventStore | None = None,
+        thread_store: ThreadStore | None = None,
     ) -> None:
         self.agent_runner = agent_runner
         self.trace_store = trace_store
         self.event_store = event_store
+        self.thread_store = thread_store
         self._requests: dict[str, AnalysisRunRequest] = {}
+        self._run_contexts: dict[str, dict[str, str]] = {}
+        self._run_item_counts: dict[str, int] = {}
+        self._run_events: dict[str, list[ExplorationRunEvent]] = {}
 
     def create_run(self, request: AnalysisRunRequest) -> str:
         run_id = f"run_analysis_{uuid4().hex[:12]}"
@@ -63,10 +69,20 @@ class AnalysisRunService:
         return list(self.stream_run_events(run_id))
 
     def stream_run_events(self, run_id: str) -> Iterable[ExplorationRunEvent]:
-        stored_events = self.event_store.list_events(run_id) if self.event_store else []
-        if stored_events:
-            yield from stored_events
+        if run_id in self._run_events:
+            yield from self._run_events[run_id]
             return
+        if self.thread_store:
+            stored_items = self.thread_store.get_run_events(run_id)
+            if stored_items:
+                for item in stored_items:
+                    yield ExplorationRunEvent(
+                        type=str(item["type"]),
+                        run_id=str(item["run_id"]),
+                        payload=dict(item.get("payload") or {}),
+                        created_at=str(item["created_at"]),
+                    )
+                return
         request = self._requests.get(run_id)
         if not request:
             yield self._event(run_id, "run.failed", {"error": "run_not_found"})
@@ -209,6 +225,7 @@ class AnalysisRunService:
         classification: ProblemClassification,
         semantic_models: list[SemanticModelCandidate],
     ) -> Iterable[ExplorationRunEvent]:
+        self._register_run_context(run_id, conversation_id, request)
         yield self._event(
             run_id,
             "run.created",
@@ -256,11 +273,11 @@ class AnalysisRunService:
         yield self._event(
             run_id,
             "agent.runner.started",
-            {"runtime": "openai-agents-sdk", "domain": "analysis_task"},
+            {"runtime": self._agent_runner_runtime(), "domain": "analysis_task"},
         )
         try:
             result = None
-            for item in self._run_agent_runner(prompt):
+            for item in self._run_agent_runner(prompt, run_id=run_id, request=request):
                 if isinstance(item, AnalysisAgentRunResult):
                     result = item
                 else:
@@ -271,14 +288,14 @@ class AnalysisRunService:
             yield self._event(
                 run_id,
                 "agent.runner.failed",
-                {"runtime": "openai-agents-sdk", "domain": "analysis_task", "error": str(exc)},
+                {"runtime": self._agent_runner_runtime(), "domain": "analysis_task", "error": str(exc)},
             )
             yield self._event(run_id, "run.failed", {"error": "analysis_agent_runner_failed", "detail": str(exc)})
             return
         yield self._event(
             run_id,
             "agent.runner.completed",
-            {"runtime": "openai-agents-sdk", "domain": "analysis_task", "raw_result_type": result.raw_result_type},
+            {"runtime": self._agent_runner_runtime(), "domain": "analysis_task", "raw_result_type": result.raw_result_type},
         )
         yield self._event(
             run_id,
@@ -303,11 +320,11 @@ class AnalysisRunService:
         yield self._event(
             run_id,
             "agent.runner.started",
-            {"runtime": "openai-agents-sdk", "domain": "analysis_task"},
+            {"runtime": self._agent_runner_runtime(), "domain": "analysis_task"},
         )
         try:
             result = None
-            async for item in self._run_agent_runner_async(prompt):
+            async for item in self._run_agent_runner_async(prompt, run_id=run_id, request=request):
                 if isinstance(item, AnalysisAgentRunResult):
                     result = item
                 else:
@@ -318,14 +335,14 @@ class AnalysisRunService:
             yield self._event(
                 run_id,
                 "agent.runner.failed",
-                {"runtime": "openai-agents-sdk", "domain": "analysis_task", "error": str(exc)},
+                {"runtime": self._agent_runner_runtime(), "domain": "analysis_task", "error": str(exc)},
             )
             yield self._event(run_id, "run.failed", {"error": "analysis_agent_runner_failed", "detail": str(exc)})
             return
         yield self._event(
             run_id,
             "agent.runner.completed",
-            {"runtime": "openai-agents-sdk", "domain": "analysis_task", "raw_result_type": result.raw_result_type},
+            {"runtime": self._agent_runner_runtime(), "domain": "analysis_task", "raw_result_type": result.raw_result_type},
         )
         yield self._event(
             run_id,
@@ -454,39 +471,126 @@ class AnalysisRunService:
         yield self._event(run_id, "artifact.created", {"path": "skills/analysis_skill.md", "kind": "markdown"})
 
     def _event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> ExplorationRunEvent:
-        return ExplorationRunEvent(type=event_type, run_id=run_id, payload=payload)
+        enriched_payload = dict(payload)
+        enriched_payload.setdefault("run_id", run_id)
+        context = self._run_contexts.get(run_id)
+        if context:
+            enriched_payload.setdefault("thread_id", context["thread_id"])
+            enriched_payload.setdefault("turn_id", context["turn_id"])
+            enriched_payload.setdefault("conversation_id", context["thread_id"])
+        item_kind = item_kind_for_event(event_type, enriched_payload)
+        if item_kind:
+            enriched_payload.setdefault("item_kind", item_kind)
+            enriched_payload.setdefault("item_id", self._next_item_id(run_id, item_kind))
+        return ExplorationRunEvent(type=event_type, run_id=run_id, payload=enriched_payload)
 
-    def _run_agent_runner(self, prompt: str) -> Iterable[Any]:
+    def _register_run_context(self, run_id: str, thread_id: str, request: AnalysisRunRequest) -> None:
+        turn_id = str(request.metadata.get("turn_id") or f"turn_{run_id.removeprefix('run_')}")
+        self._run_contexts[run_id] = {"thread_id": thread_id, "turn_id": turn_id}
+
+    def _next_item_id(self, run_id: str, item_kind: str) -> str:
+        next_index = self._run_item_counts.get(run_id, 0) + 1
+        self._run_item_counts[run_id] = next_index
+        return f"item_{run_id.removeprefix('run_')}_{next_index:04d}_{item_kind}"
+
+    def _run_agent_runner(self, prompt: str, *, run_id: str, request: AnalysisRunRequest) -> Iterable[Any]:
         if not self.agent_runner:
             return []
         stream = getattr(self.agent_runner, "stream", None)
         if callable(stream):
-            return stream(prompt)
+            try:
+                return stream(prompt, context=self._agent_runner_context(run_id, request))
+            except TypeError:
+                return stream(prompt)
         return [self.agent_runner.run(prompt)]
 
-    async def _run_agent_runner_async(self, prompt: str) -> AsyncIterator[Any]:
+    async def _run_agent_runner_async(self, prompt: str, *, run_id: str, request: AnalysisRunRequest) -> AsyncIterator[Any]:
         if not self.agent_runner:
             return
         async_stream = getattr(self.agent_runner, "async_stream", None)
         if callable(async_stream):
-            async for item in async_stream(prompt):
+            try:
+                async_items = async_stream(prompt, context=self._agent_runner_context(run_id, request))
+            except TypeError:
+                async_items = async_stream(prompt)
+            async for item in async_items:
                 yield item
             return
-        for item in self._run_agent_runner(prompt):
+        for item in self._run_agent_runner(prompt, run_id=run_id, request=request):
             yield item
 
+    def _agent_runner_context(self, run_id: str, request: AnalysisRunRequest) -> dict[str, Any]:
+        context = self._run_contexts.get(run_id, {})
+        thread_id = context.get("thread_id")
+        return {
+            "genbi_thread_id": thread_id,
+            "genbi_turn_id": context.get("turn_id"),
+            "genbi_run_id": run_id,
+            "codex_thread_id": self._resolve_runtime_thread_id(
+                request,
+                thread_id=thread_id,
+                runtime=self._agent_runner_runtime(),
+            ),
+        }
+
+    def _agent_runner_runtime(self) -> str:
+        if not self.agent_runner:
+            return "local"
+        return str(getattr(self.agent_runner, "runtime_name", "") or self.agent_runner.__class__.__name__)
+
     def _save_run_artifacts(self, run_id: str, request: AnalysisRunRequest, events: list[ExplorationRunEvent]) -> None:
-        metadata = {"domain": "analysis_task", "analysis_mode": request.analysis_mode, **(request.metadata or {})}
-        if self.event_store:
+        context = self._run_contexts.get(run_id, {})
+        runtime = self._agent_runner_runtime()
+        codex_thread_id = _latest_payload_value(events, "codex_thread_id") or self._resolve_runtime_thread_id(
+            request,
+            thread_id=context.get("thread_id"),
+            runtime=runtime,
+        )
+        metadata = {
+            "domain": "analysis_task",
+            "analysis_mode": request.analysis_mode,
+            "thread_id": context.get("thread_id"),
+            "turn_id": context.get("turn_id"),
+            **(request.metadata or {}),
+        }
+        if codex_thread_id:
+            metadata["codex_thread_id"] = codex_thread_id
+            runtime_threads = dict(metadata.get("runtime_threads") or {})
+            runtime_threads[runtime] = codex_thread_id
+            metadata["runtime_threads"] = runtime_threads
+        self._run_events[run_id] = list(events)
+        if self.thread_store and context.get("thread_id") and context.get("turn_id"):
             try:
-                self.event_store.save_events(run_id=run_id, events=events)
+                self.thread_store.save_run(
+                    thread_id=context["thread_id"],
+                    turn_id=context["turn_id"],
+                    run_id=run_id,
+                    question=request.question.strip(),
+                    input_kind=request.turn_kind,
+                    product_kind="analysis_task",
+                    user_id=request.user_id,
+                    events=events,
+                    metadata=metadata,
+                )
             except Exception:
                 pass
-        if self.trace_store:
-            try:
-                self.trace_store.save_trace(run_id=run_id, request=request, events=events, metadata=metadata)
-            except Exception:
-                pass
+
+    def _resolve_runtime_thread_id(
+        self,
+        request: AnalysisRunRequest,
+        *,
+        thread_id: str | None,
+        runtime: str,
+    ) -> str | None:
+        explicit = _string_or_none(request.metadata.get("codex_thread_id"))
+        if explicit:
+            return explicit
+        if not self.thread_store or not thread_id:
+            return None
+        try:
+            return self.thread_store.get_runtime_thread_id(thread_id, runtime)
+        except Exception:
+            return None
 
 
 def generate_analysis_title(question: str) -> str:
@@ -572,6 +676,44 @@ def build_semantic_model_plan(
             purpose="复用相似问题的报告、SQL、图表和 Skill",
         ),
     ]
+
+
+def item_kind_for_event(event_type: str, payload: dict[str, Any]) -> str | None:
+    if event_type == "run.created" and payload.get("question"):
+        return "message"
+    if event_type == "analysis.retrieval.plan" or event_type == "run.plan.updated":
+        return "plan"
+    if event_type == "agent.question.requested":
+        return "question"
+    if event_type == "agent.message.created":
+        return "message"
+    if event_type in {"tool.call.started", "tool.call.completed", "tool.call.failed"}:
+        return "tool_call" if event_type == "tool.call.started" else "tool_result"
+    if event_type in {"artifact.created", "artifact.updated"}:
+        kind = str(payload.get("kind") or "")
+        if kind == "sql":
+            return "sql"
+        if kind == "json" and ".chart." in str(payload.get("path") or ""):
+            return "chart"
+        if kind == "html" or "report" in str(payload.get("path") or ""):
+            return "report"
+        return "artifact"
+    return None
+
+
+def _latest_payload_value(events: list[ExplorationRunEvent], key: str) -> str | None:
+    for event in reversed(events):
+        value = _string_or_none(event.payload.get(key))
+        if value:
+            return value
+    return None
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def build_follow_up_question(classification: ProblemClassification) -> str:

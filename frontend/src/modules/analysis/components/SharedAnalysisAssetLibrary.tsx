@@ -25,7 +25,7 @@ export function SharedAnalysisAssetLibrary({
       <div className="shared-asset-library-header">
         <div>
           <strong>共享分析资产库</strong>
-          <small>已保存或发布的资产，可从这里回到原分析任务继续</small>
+          <small>已保存、已共享或可复用的资产，可从这里回到分析工作台继续</small>
         </div>
         <span>{entries.length} 项</span>
       </div>
@@ -50,7 +50,7 @@ export function SharedAnalysisAssetLibrary({
               </dl>
               <div className="shared-asset-actions">
                 <button type="button" onClick={() => onOpenEntry(entry)}>打开资产</button>
-                <button type="button" onClick={() => onReopenEntry(entry)}>回到任务继续</button>
+                <button type="button" onClick={() => onReopenEntry(entry)}>回到分析工作台继续</button>
               </div>
             </article>
           ))}

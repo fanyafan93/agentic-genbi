@@ -2,10 +2,11 @@
 
 import { useState, useMemo, useEffect, type PointerEvent as ReactPointerEvent } from "react";
 import { UserChip } from "@/modules/auth/components/UserChip";
-import { KnowledgeExploration, KnowledgeExplorationProvider, KnowledgeExplorationSidebar } from "@/modules/investigation/components/DataInvestigation";
+import { BusinessSemanticLibrary } from "@/modules/business-semantics/components/BusinessSemanticLibrary";
 import { useFlow } from "../hooks/use-flow";
 import { AnalysisTaskThread } from "./AnalysisTaskThread";
 import { AnalysisAssetLibrary } from "./AnalysisAssetLibrary";
+import { AnalysisAssetLibraryPage } from "./AnalysisAssetLibraryPage";
 import { mergeArtifactFolders } from "./analysis-assets";
 import {
   mockAnalysisAssetLibraryService,
@@ -20,12 +21,13 @@ import type { ArtifactFile } from "../types/artifact";
 
 const navItems = [
   { id: "workspace", label: "工作台", icon: "dashboard" },
-  { id: "analysis-tasks", label: "分析任务", icon: "analysisTask" },
-  { id: "investigation", label: "知识探索", icon: "investigation" },
-  { id: "agent-center", label: "Agent 中心", icon: "agent" },
+  { id: "analysis-workspace", label: "分析工作台", icon: "analysisTask" },
+  { id: "analysis-assets", label: "分析资产库", icon: "assetLibrary" },
+  { id: "business-semantics", label: "业务语义库", icon: "businessSemantics" },
 ] as const;
 
 const adminNavItem = { id: "system", label: "系统", icon: "system" } as const;
+type ActiveTool = (typeof navItems)[number]["id"] | typeof adminNavItem["id"];
 const analysisTaskGroups = [
   {
     label: "今天",
@@ -48,8 +50,8 @@ function NavIcon({ name }: { name: NavIconName }) {
   const paths = {
     dashboard: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
     analysisTask: <><path d="M6 3.8h8l4 4V20a1.8 1.8 0 0 1-1.8 1.8H6A1.8 1.8 0 0 1 4.2 20V5.6A1.8 1.8 0 0 1 6 3.8Z" /><path d="M14 4v4h4" /><path className="task-bar task-bar-1" d="M8 17v-3" /><path className="task-bar task-bar-2" d="M11 17v-6" /><path className="task-bar task-bar-3" d="M14 17v-4.5" /></>,
-    investigation: <><ellipse cx="10" cy="5.5" rx="5.5" ry="2.5" /><path d="M4.5 5.5v7c0 1.4 2.5 2.5 5.5 2.5.8 0 1.5-.1 2.2-.2" /><path d="M15.5 5.5v3" /><path d="M4.5 9c0 1.4 2.5 2.5 5.5 2.5.8 0 1.5-.1 2.2-.2" /><g className="mag"><circle cx="16.5" cy="15.5" r="3.5" /><path d="m19 18 2 2" /></g></>,
-    agent: <><rect x="5" y="7" width="14" height="12" rx="3" /><path d="M12 3v4M9 12h.01M15 12h.01M9 16h6" /><path d="M3 11v4M21 11v4" /></>,
+    assetLibrary: <><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h5l2 2h6A1.5 1.5 0 0 1 20 7.5v11A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-13Z" /><path d="M8 15h8M8 11h5" /></>,
+    businessSemantics: <><ellipse cx="12" cy="5.5" rx="6.5" ry="2.5" /><path d="M5.5 5.5v6c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5v-6" /><path d="M5.5 9c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5" /><path d="M8 18h8M12 14v4" /></>,
     system: <><path d="M12 3.5 19 6v5.4c0 4.2-2.8 7.6-7 9.1-4.2-1.5-7-4.9-7-9.1V6l7-2.5Z" /><path d="m9 12 2 2 4-4" /></>,
   };
 
@@ -57,7 +59,7 @@ function NavIcon({ name }: { name: NavIconName }) {
 }
 
 export function AnalysisWorkspace() {
-  const [activeTool, setActiveTool] = useState("analysis-tasks");
+  const [activeTool, setActiveTool] = useState<ActiveTool>("analysis-workspace");
   const [collapsed, setCollapsed] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("quick");
   const [selectedAnalysisTask, setSelectedAnalysisTask] = useState<string | null>("渠道销售占比分析");
@@ -191,10 +193,9 @@ export function AnalysisWorkspace() {
     window.addEventListener("pointerup", onUp);
   }
 
-  const mode = activeTool === "analysis-tasks" ? "analysis-task" : "default";
+  const mode = activeTool === "analysis-workspace" ? "analysis-task" : "default";
 
   return (
-    <KnowledgeExplorationProvider>
     <div className="app-shell">
       <header className="topbar">
         <img className="topbar-logo" src="/brand-logo.png" alt="Agentic GenBI" />
@@ -247,12 +248,12 @@ export function AnalysisWorkspace() {
           )}
         </nav>
 
-        <aside className={`panel ${activeTool === "analysis-tasks" ? "analysis-tasks" : ""} ${activeTool === "investigation" ? "exploration" : ""}`} aria-label="侧栏">
-          {activeTool === "analysis-tasks" ? (
+        <aside className={`panel ${activeTool === "analysis-workspace" ? "analysis-tasks" : ""}`} aria-label="侧栏">
+          {activeTool === "analysis-workspace" ? (
             <div className="analysis-task-panel">
-              <header className="panel-header"><span className="panel-kicker">ANALYSIS TASKS</span><h2>分析任务</h2></header>
+              <header className="panel-header"><span className="panel-kicker">ANALYSIS WORKSPACE</span><h2>分析工作台</h2></header>
               <label className="analysis-task-search"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg><input type="search" placeholder="搜索分析任务" /></label>
-              <button className="analysis-task-new" type="button" onClick={() => { setSelectedAnalysisTask(null); setCurrentAnalysisTaskId(null); setOpenFileIds([]); setSavedAssetIds([]); setAssetNotice(""); setLastSaveRequest(undefined); setActiveFileId("report"); }}><span>+ 新建分析任务</span></button>
+              <button className="analysis-task-new" type="button" onClick={() => { setSelectedAnalysisTask(null); setCurrentAnalysisTaskId(null); setOpenFileIds([]); setSavedAssetIds([]); setAssetNotice(""); setLastSaveRequest(undefined); setActiveFileId("report"); }}><span>+ 新建分析</span></button>
               <div className="analysis-task-groups">
                 {analysisTaskGroups.map((group) => (
                   <section className="analysis-task-group" key={group.label}>
@@ -274,10 +275,33 @@ export function AnalysisWorkspace() {
                 ))}
               </div>
             </div>
-          ) : activeTool === "investigation" ? (
-            <KnowledgeExplorationSidebar />
+          ) : activeTool === "analysis-assets" ? (
+            <div className="workbench-panel">
+              <header className="panel-header"><span className="panel-kicker">ASSET LIBRARY</span><h2>分析资产库</h2></header>
+              <div className="panel-brief-list">
+                <span>共享资产</span>
+                <span>已保存资产</span>
+                <span>可复用分析方法</span>
+              </div>
+            </div>
+          ) : activeTool === "business-semantics" ? (
+            <div className="workbench-panel">
+              <header className="panel-header"><span className="panel-kicker">BUSINESS SEMANTICS</span><h2>业务语义库</h2></header>
+              <div className="panel-brief-list">
+                <span>语义模型</span>
+                <span>业务知识</span>
+                <span>语义查证记录</span>
+              </div>
+            </div>
           ) : (
-            <div className="workbench-panel"><div className="placeholder"><span>⌁</span><strong>待开发</strong></div></div>
+            <div className="workbench-panel">
+              <header className="panel-header"><span className="panel-kicker">GOVERNANCE</span><h2>系统</h2></header>
+              <div className="panel-brief-list">
+                <span>数据源连接</span>
+                <span>权限与 RLS</span>
+                <span>模型与工具配置</span>
+              </div>
+            </div>
           )}
         </aside>
 
@@ -286,14 +310,39 @@ export function AnalysisWorkspace() {
         </button>
 
         <main className="main" data-mode={mode} data-tool={activeTool}>
-          {activeTool === "investigation" ? <KnowledgeExploration /> : <div key={currentAnalysisTaskId ?? "new"} className="workbench-frame" style={{ height: "100%" }}>
+          {activeTool === "analysis-assets" ? (
+            <AnalysisAssetLibraryPage onContinueFromAsset={(asset) => { setActiveTool("analysis-workspace"); handleContinueFromAsset(asset); }} />
+          ) : activeTool === "business-semantics" ? (
+            <BusinessSemanticLibrary />
+          ) : activeTool === "workspace" ? (
+            <section className="overview-workbench" aria-label="工作台">
+              <header>
+                <span>WORKBENCH</span>
+                <h1>工作台</h1>
+                <p>这里聚合最近分析、待确认口径、常用资产和运行状态；真正开始分析时进入分析工作台。</p>
+              </header>
+              <div className="overview-card-grid">
+                <article><span>待确认</span><strong>2 个业务口径</strong><small>复购率退款排除、渠道归因优先级</small></article>
+                <article><span>最近资产</span><strong>5 个分析资产</strong><small>报告、SQL、业务规则和可复用分析方法</small></article>
+                <article><span>语义层</span><strong>6 类语义模型</strong><small>FineReport、MySQL/Doris、ETL、金蝶、SQL 示例、指标维度</small></article>
+              </div>
+            </section>
+          ) : activeTool === "system" ? (
+            <section className="overview-workbench" aria-label="系统">
+              <header>
+                <span>SYSTEM</span>
+                <h1>系统</h1>
+                <p>治理、安全和配置能力会放在这里，包括 RBAC/RLS、敏感字段、只读数据源、模型工具和审计。</p>
+              </header>
+            </section>
+          ) : <div key={currentAnalysisTaskId ?? "new"} className="workbench-frame" style={{ height: "100%" }}>
               <div className="mobile-pane-switch" role="tablist" aria-label="分析任务工作区">
-                <button className={mobilePane === "analysisTask" ? "active" : ""} type="button" onClick={() => setMobilePane("analysisTask")}>分析任务</button>
-                <button className={mobilePane === "assetLibrary" ? "active" : ""} type="button" onClick={() => setMobilePane("assetLibrary")}>分析资产库</button>
+                <button className={mobilePane === "analysisTask" ? "active" : ""} type="button" onClick={() => setMobilePane("analysisTask")}>分析工作台</button>
+                <button className={mobilePane === "assetLibrary" ? "active" : ""} type="button" onClick={() => setMobilePane("assetLibrary")}>当前任务资产</button>
               </div>
               <section className="workspace" style={{ gridTemplateColumns: `${splitPercent}% 7px minmax(0, 1fr)`, height: "100%" }}>
                 <AnalysisTaskThread
-                  title={isNewAnalysisTask ? "新分析任务" : (selectedAnalysisTask ?? "分析任务")}
+                  title={isNewAnalysisTask ? "新分析" : (selectedAnalysisTask ?? "分析工作台")}
                   isNewTask={isNewAnalysisTask}
                   running={flow.running}
                   nodes={flow.nodes}
@@ -307,7 +356,7 @@ export function AnalysisWorkspace() {
                   onSendMessage={handleSendMessage}
                 />
 
-                <div className="workspace-resizer" role="separator" aria-label="调整分析任务和分析资产库宽度" aria-orientation="vertical" onPointerDown={startResize} onDoubleClick={() => setSplitPercent(40)}><span /></div>
+                <div className="workspace-resizer" role="separator" aria-label="调整分析工作台和当前任务资产宽度" aria-orientation="vertical" onPointerDown={startResize} onDoubleClick={() => setSplitPercent(40)}><span /></div>
 
                 <AnalysisAssetLibrary
                   taskTitle={selectedAnalysisTask ?? "当前分析任务"}
@@ -335,6 +384,5 @@ export function AnalysisWorkspace() {
         </main>
       </div>
     </div>
-    </KnowledgeExplorationProvider>
   );
 }
