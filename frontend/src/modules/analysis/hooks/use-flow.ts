@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAgentClient } from "@/modules/analysis/agentClients";
 import type { AgentEvent, AgentInput, AnalysisMode } from "@/modules/analysis/agentClients";
 import type { ArtifactFolder, ArtifactKind } from "../types/artifact";
+import type { InteractiveReport } from "../types/interactive-report";
 
 export type FlowRole = "user" | "agent" | "ask";
 
@@ -20,6 +21,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
   const [conversationId, setConversationId] = useState<string | null>(conversationKey);
   const [nodes, setNodes] = useState<FlowNode[]>(initial);
   const [artifacts, setArtifacts] = useState<ArtifactFolder[]>([]);
+  const [draftReport, setDraftReport] = useState<InteractiveReport | null>(null);
   const [running, setRunning] = useState(false);
 
   useEffect(() => {
@@ -28,6 +30,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
     setConversationId(conversationKey);
     setNodes([...initial]);
     setArtifacts([]);
+    setDraftReport(null);
     setRunning(false);
     return () => { cancelled = true; };
   }, [conversationKey, initial]);
@@ -38,6 +41,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
       setConversationId(event.conversationId ?? event.runId);
       setNodes([]);
       setArtifacts([]);
+      setDraftReport(null);
       return [];
     }
 
@@ -115,6 +119,11 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
       return currentNodes;
     }
 
+    if (event.type === "report-draft") {
+      setDraftReport(event.report);
+      return currentNodes;
+    }
+
     if (event.type === "error") {
       const next: FlowNode[] = [
         ...currentNodes,
@@ -141,11 +150,11 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
     }
   }, [agent, applyEvent, nodes]);
 
-  const start = useCallback((question?: string, analysisMode?: AnalysisMode) => consume({ kind: "start", question, analysisMode }), [consume]);
-  const send = useCallback((content: string, analysisMode?: AnalysisMode) => consume({ kind: "message", content, analysisMode }), [consume]);
-  const reply = useCallback((optionId: string, analysisMode?: AnalysisMode) => consume({ kind: "reply", optionId, analysisMode }), [consume]);
+  const start = useCallback((question?: string, analysisMode?: AnalysisMode, dataEgressAuthorized?: boolean, interactiveReport?: InteractiveReport) => consume({ kind: "start", question, analysisMode, dataEgressAuthorized, interactiveReport }), [consume]);
+  const send = useCallback((content: string, analysisMode?: AnalysisMode, dataEgressAuthorized?: boolean, interactiveReport?: InteractiveReport) => consume({ kind: "message", content, analysisMode, dataEgressAuthorized, interactiveReport }), [consume]);
+  const reply = useCallback((optionId: string, analysisMode?: AnalysisMode, dataEgressAuthorized?: boolean, interactiveReport?: InteractiveReport) => consume({ kind: "reply", optionId, analysisMode, dataEgressAuthorized, interactiveReport }), [consume]);
 
-  return { runId, conversationId, nodes, artifacts, running, start, send, reply };
+  return { runId, conversationId, nodes, artifacts, draftReport, running, start, send, reply };
 }
 
 let cancelled = false;

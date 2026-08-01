@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { BackendAnalysisAgentClient, getBackendAnalysisRequestTimeoutMs, mapBackendEvents, parseAnalysisSse } from "../src/modules/analysis/agentClients/backendClient";
+import { mockInteractiveReport } from "../src/modules/analysis/mocks/interactive-report";
 
 async function collect<T>(items: AsyncIterable<T>): Promise<T[]> {
   const collected: T[] = [];
@@ -154,6 +155,34 @@ describe("analysis backend client event mapping", () => {
     ]);
   });
 
+  test("maps a validated interactive report draft as a dedicated result event", () => {
+    const events = Array.from(mapBackendEvents([
+      {
+        type: "interactive_report.draft",
+        run_id: "run_analysis_report",
+        created_at: "2026-08-01T00:00:00Z",
+        payload: {
+          artifactType: "interactive_report",
+          schemaVersion: "1.0",
+          id: "report_draft_run_analysis_report",
+          title: "渠道销售分析",
+          subtitle: "待数据查询验证",
+          renderer: "puck",
+          document: { root: { props: {} }, content: [], zones: {} },
+          filters: [], queries: {}, chartSpecs: {}, gridSpecs: {},
+          source: { threadId: "conv_analysis_report", turnId: "turn_analysis_report", runId: "run_analysis_report" },
+        },
+      },
+    ], "start"));
+
+    expect(events).toEqual([expect.objectContaining({
+      type: "report-draft",
+      report: expect.objectContaining({ id: "report_draft_run_analysis_report", title: "渠道销售分析" }),
+      runId: "run_analysis_report",
+      threadId: "conv_analysis_report",
+    })]);
+  });
+
   test("sends the stored conversation id on continuation messages", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(
@@ -188,7 +217,7 @@ describe("analysis backend client event mapping", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    await collect(client.send({ kind: "start", question: "start question", analysisMode: "quick" }));
+    await collect(client.send({ kind: "start", question: "start question", analysisMode: "quick", dataEgressAuthorized: true, interactiveReport: mockInteractiveReport }));
     const messageEvents = await collect(client.send({ kind: "message", content: "continue question", analysisMode: "quick" }));
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -196,7 +225,15 @@ describe("analysis backend client event mapping", () => {
     const messageBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
     expect(fetchMock.mock.calls[0][0]).toBe("http://backend.test/api/analysis/tasks/runs/stream");
     expect(startBody.conversation_id).toBeUndefined();
+    expect(startBody.metadata).toMatchObject({
+      frontend_client: "analysis_task",
+      data_egress_authorized: true,
+      semantic_context_egress_authorized: true,
+    });
+    expect(startBody.metadata.interactive_report_context).toEqual(mockInteractiveReport);
     expect(messageBody.conversation_id).toBe("conv_analysis_456");
+    expect(messageBody.metadata.data_egress_authorized).toBeUndefined();
+    expect(messageBody.metadata.semantic_context_egress_authorized).toBeUndefined();
     expect(messageBody.turn_kind).toBe("message");
     expect(messageEvents[0]).toMatchObject({
       type: "run-init",

@@ -1,4 +1,5 @@
 import type { ArtifactKind } from "@/modules/analysis/types/artifact";
+import type { InteractiveReport } from "@/modules/analysis/types/interactive-report";
 import type { AgentClient, AgentEvent, AgentInput, AnalysisMode } from "./types";
 
 export type BackendRunEvent = {
@@ -46,7 +47,12 @@ export class BackendAnalysisAgentClient implements AgentClient {
           conversation_id: input.kind === "start" ? undefined : this.conversationId,
           analysis_mode: getAnalysisMode(input),
           turn_kind: input.kind,
-          metadata: { frontend_client: "analysis_task" },
+          metadata: {
+            frontend_client: "analysis_task",
+            ...(getDataEgressAuthorized(input) ? { data_egress_authorized: true } : {}),
+            ...(getDataEgressAuthorized(input) ? { semantic_context_egress_authorized: true } : {}),
+            ...(getDataEgressAuthorized(input) && input.interactiveReport ? { interactive_report_context: input.interactiveReport } : {}),
+          },
         }),
         signal: this.abortController.signal,
       });
@@ -244,6 +250,21 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
       continue;
     }
 
+    if (event.type === "interactive_report.draft") {
+      const report = asInteractiveReport(event.payload);
+      if (report) {
+        yield {
+          type: "report-draft",
+          report,
+          ...context,
+          threadId: report.source.threadId,
+          turnId: report.source.turnId,
+          runId: report.source.runId,
+        };
+      }
+      continue;
+    }
+
     if (event.type === "artifact.created" || event.type === "artifact.updated") {
       const kind = asString(event.payload.kind);
       const path = asString(event.payload.path);
@@ -288,6 +309,40 @@ function asString(value: unknown): string {
 
 function asRecordArray(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object") : [];
+}
+
+function getDataEgressAuthorized(input: AgentInput): boolean {
+  return input.kind !== "reset" && input.dataEgressAuthorized === true;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function asInteractiveReport(payload: Record<string, unknown>): InteractiveReport | null {
+  const source = asRecord(payload.source);
+  const document = asRecord(payload.document);
+  if (
+    payload.artifactType !== "interactive_report"
+    || payload.schemaVersion !== "1.0"
+    || typeof payload.id !== "string"
+    || typeof payload.title !== "string"
+    || typeof payload.subtitle !== "string"
+    || payload.renderer !== "puck"
+    || !document
+    || !asRecord(document.root)
+    || !Array.isArray(document.content)
+    || !asRecord(document.zones)
+    || !Array.isArray(payload.filters)
+    || !asRecord(payload.queries)
+    || !asRecord(payload.chartSpecs)
+    || !asRecord(payload.gridSpecs)
+    || !source
+    || typeof source.threadId !== "string"
+    || typeof source.turnId !== "string"
+    || typeof source.runId !== "string"
+  ) return null;
+  return payload as unknown as InteractiveReport;
 }
 
 function isArtifactKind(value: string): value is ArtifactKind {

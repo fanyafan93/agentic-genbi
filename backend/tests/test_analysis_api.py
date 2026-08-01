@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 
 from backend.analysis.asset_store import AnalysisAssetStore
+from backend.analysis.runner_contracts import AnalysisAgentRunResult
+from backend.analysis.report_query_service import CHANNEL_SALES_QUERY_REF, ReportQueryResponse
 from backend.analysis.run_service import AnalysisRunService
 import backend.api.exploration_api as exploration_api
 from backend.api.exploration_api import create_app
@@ -21,6 +23,72 @@ from backend.harness.thread_store import ThreadStore
 
 
 class AnalysisApiTest(unittest.TestCase):
+    def test_report_query_api_only_accepts_server_owned_query_ref(self) -> None:
+        class QueryService:
+            def run(self, query_ref: str, filters: dict[str, object], *, audit_context: dict[str, object] | None = None) -> ReportQueryResponse:
+                if query_ref != CHANNEL_SALES_QUERY_REF:
+                    from backend.analysis.report_query_service import ReportQueryNotFound
+
+                    raise ReportQueryNotFound("report_query_not_found")
+                return ReportQueryResponse(
+                    queryRef=query_ref,
+                    filters={"month": str(filters["month"])},
+                    columns=["channel", "salesAmount", "salesShare"],
+                    rows=[{"channel": "线上自营", "salesAmount": 100, "salesShare": 1}],
+                    rowCount=1,
+                    elapsedMs=12,
+                    truncated=False,
+                )
+
+        app = create_app(ExplorationRunService(), analysis_service=AnalysisRunService(), report_query_service=QueryService())
+        client = TestClient(app)
+
+        response = client.post(
+            f"/api/analysis/report-queries/{CHANNEL_SALES_QUERY_REF}",
+            json={"filters": {"month": "2026-08", "brand": "all"}},
+        )
+        missing = client.post("/api/analysis/report-queries/browser-supplied-sql", json={"filters": {"month": "2026-08"}})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["rows"][0]["channel"], "线上自营")
+        self.assertEqual(missing.status_code, 404)
+
+    def test_codex_report_draft_becomes_report_item_without_leaking_json_to_message(self) -> None:
+        class ReportDraftRunner:
+            runtime_name = "openai-codex"
+
+            def run(self, prompt: str) -> AnalysisAgentRunResult:
+                return AnalysisAgentRunResult(
+                    final_output=(
+                        "我已整理出一份待验证的报告结构。\n"
+                        "<interactive_report_draft>\n"
+                        '{"title":"渠道销售分析","subtitle":"待数据查询验证","document":{"root":{"props":{}},"content":[],"zones":{}},'
+                        '"filters":[],"queries":{},"chartSpecs":{},"gridSpecs":{}}\n'
+                        "</interactive_report_draft>"
+                    ),
+                    raw_result_type="test",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            events = AnalysisRunService(agent_runner=ReportDraftRunner(), thread_store=thread_store).run(
+                __import__("backend.analysis.run_service", fromlist=["AnalysisRunRequest"]).AnalysisRunRequest(
+                    question="分析渠道销售结构",
+                    analysis_mode="quick",
+                )
+            )
+
+            draft = next(event for event in events if event.type == "interactive_report.draft")
+            message = next(event for event in events if event.type == "agent.message.created")
+            thread_id = draft.payload["source"]["threadId"]
+            saved = thread_store.get_thread(thread_id)
+
+            self.assertEqual(draft.payload["artifactType"], "interactive_report")
+            self.assertEqual(draft.payload["source"]["runId"], draft.run_id)
+            self.assertNotIn("interactive_report_draft", message.payload["content"])
+            self.assertTrue(saved)
+            self.assertIn("report", [item["kind"] for item in saved["items"]])
+
     def test_default_analysis_service_uses_postgres_thread_store_when_enabled(self) -> None:
         with patch.dict("os.environ", {"GENBI_PERSISTENCE": "postgres"}, clear=False):
             with patch.object(exploration_api, "build_postgres_thread_store") as build_thread_store:

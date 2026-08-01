@@ -1,3 +1,5 @@
+import type { InteractiveReport } from "../types/interactive-report";
+
 export type AnalysisMode = "quick" | "deep";
 
 export type AgentEventSystemContext = {
@@ -15,14 +17,15 @@ export type AgentEvent =
   | ({ type: "step"; label: string; state: "queued" | "running" | "done"; nodeId?: string } & AgentEventSystemContext)
   | ({ type: "ask"; nodeId: string; question: string; options: { id: string; label: string }[] } & AgentEventSystemContext)
   | ({ type: "tokens"; nodeId: string; text: string } & AgentEventSystemContext)
+  | ({ type: "report-draft"; report: InteractiveReport } & AgentEventSystemContext)
   | ({ type: "artifact"; path: string; kind: "html" | "sql" | "python" | "csv" | "markdown" | "json" } & AgentEventSystemContext)
   | ({ type: "error"; message: string } & AgentEventSystemContext)
   | ({ type: "done" } & AgentEventSystemContext);
 
 export type AgentInput =
-  | { kind: "start"; suggestionId?: string; question?: string; analysisMode?: AnalysisMode }
-  | { kind: "message"; content: string; analysisMode?: AnalysisMode }
-  | { kind: "reply"; optionId: string; analysisMode?: AnalysisMode }
+  | { kind: "start"; suggestionId?: string; question?: string; analysisMode?: AnalysisMode; dataEgressAuthorized?: boolean; interactiveReport?: InteractiveReport }
+  | { kind: "message"; content: string; analysisMode?: AnalysisMode; dataEgressAuthorized?: boolean; interactiveReport?: InteractiveReport }
+  | { kind: "reply"; optionId: string; analysisMode?: AnalysisMode; dataEgressAuthorized?: boolean; interactiveReport?: InteractiveReport }
   | { kind: "reset" };
 
 export interface AgentClient {

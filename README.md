@@ -7,9 +7,9 @@
 ## 当前方向
 
 ```text
-分析工作台：提出问题、回答追问、查看过程、修改当前资产。
+分析工作台：左侧提出问题、回答追问、查看过程；右侧持续生成和修改当前分析结果。
 业务语义库：让 Agent 看懂数据和业务，包含语义模型和业务知识。
-分析资产库：保存和复用报告、图表、SQL、数据快照、分析路径、SKILL.md。
+我的分析：查看自己保存的分析结果和分析模板。
 系统：数据源、权限、安全、模型、工具、审计和成本。
 ```
 
@@ -30,8 +30,8 @@ MiniMax、OpenAI-compatible 或其他模型只是 Codex 的 model adapter，不�
 
 ## 当前实现快照
 
-- 前端：Next.js + TypeScript，分析工作台 / 分析资产库 / 业务语义库 mock 已有。
-- 后端：FastAPI，已提供分析 Run API / SSE、资源库工具、数据库只读工具、知识记录、分析资产最小存储；分析 Thread/Turn/Run/Item 已写入 Postgres；分析 runner 已有 openai-codex Python SDK 最小适配。
+- 前端：Next.js + TypeScript。分析工作台提供左侧对话、右侧交互式分析结果；结果以 Puck JSON 描述布局，ECharts / AG Grid 分别渲染图表与表格，并优先读写后端报告版本接口。
+- 后端：FastAPI，已提供分析 Run API / SSE、资源库工具、数据库只读工具、知识记录、分析资产最小存储；分析 Thread/Turn/Run/Item 和交互式报告/版本已写入 Postgres；分析 runner 已有 openai-codex Python SDK 最小适配。
 - 登录：Auth.js + 飞书 OAuth + PostgreSQL session。
 - 运行：Docker Compose 启动 frontend、backend、postgres。
 - 仍未完成：Codex 工具/MCP/Skill 接入、完整业务语义库持久化、完整 Artifact 治理、团队权限/RLS、生产数据源治理。

@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 
 from backend.api.exploration_api import create_app
+from backend.business_semantics.finereport_reports import FineReportReportRepository
 from backend.exploration.run_service import ExplorationRunService
 
 
@@ -38,7 +39,7 @@ class FineReportReportsApiTest(unittest.TestCase):
                                     "fine_report_class": "DatabaseQuery",
                                     "connection_name": "fat_dm",
                                     "raw_sql": "select amount from dm.budget",
-                                    "parameters": [{"name": "month"}],
+                                    "parameters": [{"name": "month"}, {"name": "fine_username"}],
                                     "embedded_row_count": 0,
                                 }
                             ],
@@ -117,6 +118,21 @@ class FineReportReportsApiTest(unittest.TestCase):
                 self.assertEqual(payload["sheets"][0]["cells"][0]["colspan"], 2)
                 self.assertEqual(payload["sheets"][0]["cells"][1]["columnIndex"], 1)
                 self.assertEqual(payload["sheets"][0]["cells"][1]["binding"]["field"], "amount")
+
+                semantic_context = FineReportReportRepository(parsed_root).build_agent_semantic_context()
+
+                self.assertIsNotNone(semantic_context)
+                summary = semantic_context["reports"][0]
+                self.assertEqual(summary["name"], "预算管控")
+                self.assertEqual(summary["datasets"], [{"name": "ds", "type": "database_query", "parameterNames": ["month"]}])
+                self.assertEqual(summary["bindings"], [{"sheet": "额度报表", "dataset": "ds", "field": "amount"}])
+                encoded = json.dumps(semantic_context, ensure_ascii=False)
+                self.assertNotIn("select amount from dm.budget", encoded)
+                self.assertNotIn("fat_dm", encoded)
+                self.assertNotIn("2026-07", encoded)
+                self.assertNotIn("reports/预算管控.cpt", encoded)
+                self.assertNotIn("=sum(A3)", encoded)
+                self.assertNotIn("fine_username", encoded)
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, object]) -> None:

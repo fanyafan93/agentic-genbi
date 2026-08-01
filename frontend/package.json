@@ -13,6 +13,9 @@
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",
     "@prisma/client": "^6.19.0",
+    "@puckeditor/core": "^0.22.4",
+    "ag-grid-community": "^36.0.2",
+    "ag-grid-react": "^36.0.2",
     "echarts": "^5.6.0",
     "echarts-for-react": "^3.0.6",
     "next": "16.2.10",

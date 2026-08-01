@@ -1,15 +1,30 @@
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterable, Literal
 from uuid import uuid4
 
-from backend.analysis.runner_contracts import AnalysisAgentRunResult, AnalysisAgentRunner, build_analysis_runner_prompt
+from backend.analysis.runner_contracts import (
+    AnalysisAgentRunResult,
+    AnalysisAgentRunner,
+    build_analysis_runner_prompt,
+    extract_interactive_report_draft,
+    sanitize_interactive_report_context,
+)
 from backend.exploration.run_event_store import RunEventStore
 from backend.exploration.run_service import ExplorationRunEvent
 from backend.exploration.run_trace_store import RunTraceStore
 from backend.harness.thread_store import ThreadStore
+from backend.analysis.report_query_service import (
+    CHANNEL_SALES_QUERY_REF,
+    REGION_CHANNEL_SALES_QUERY_REF,
+    ReportQueryFilterError,
+    ReportQueryService,
+    response_to_dict,
+)
+from backend.business_semantics.finereport_reports import FineReportReportRepository
 
 AnalysisMode = Literal["quick", "deep"]
 AnalysisTurnKind = Literal["start", "message", "reply"]
@@ -49,11 +64,15 @@ class AnalysisRunService:
         trace_store: RunTraceStore | None = None,
         event_store: RunEventStore | None = None,
         thread_store: ThreadStore | None = None,
+        report_query_service: ReportQueryService | None = None,
+        finereport_repository: FineReportReportRepository | None = None,
     ) -> None:
         self.agent_runner = agent_runner
         self.trace_store = trace_store
         self.event_store = event_store
         self.thread_store = thread_store
+        self.report_query_service = report_query_service
+        self.finereport_repository = finereport_repository or FineReportReportRepository()
         self._requests: dict[str, AnalysisRunRequest] = {}
         self._run_contexts: dict[str, dict[str, str]] = {}
         self._run_item_counts: dict[str, int] = {}
@@ -264,11 +283,29 @@ class AnalysisRunService:
         classification: ProblemClassification,
         semantic_models: list[SemanticModelCandidate],
     ) -> Iterable[ExplorationRunEvent]:
+        snapshot = self._authorized_data_snapshot(request, run_id=run_id)
+        if snapshot:
+            yield self._event(run_id, "agent.evidence.available", {"kind": "authorized_aggregate_snapshot", **snapshot})
+        report_context = self._authorized_report_context(request)
+        semantic_context = self._authorized_semantic_context(request)
+        if semantic_context:
+            yield self._event(
+                run_id,
+                "agent.evidence.available",
+                {
+                    "kind": "authorized_finereport_semantic_summary",
+                    "reportCount": len(semantic_context["reports"]),
+                    "reportIds": [report["id"] for report in semantic_context["reports"]],
+                },
+            )
         prompt = build_analysis_runner_prompt(
             question=request.question.strip(),
             analysis_mode=request.analysis_mode,
             problem_label=classification.label,
             semantic_model_labels=[item.label for item in semantic_models],
+            authorized_data_snapshot=snapshot,
+            authorized_semantic_context=semantic_context,
+            current_report_context=report_context,
         )
         yield self._event(
             run_id,
@@ -297,11 +334,7 @@ class AnalysisRunService:
             "agent.runner.completed",
             {"runtime": self._agent_runner_runtime(), "domain": "analysis_task", "raw_result_type": result.raw_result_type},
         )
-        yield self._event(
-            run_id,
-            "agent.message.created",
-            {"role": "assistant", "title": "分析结果", "content": result.final_output},
-        )
+        yield from self._final_result_events(run_id, result, current_report_context=report_context, authorized_data_snapshot=snapshot)
         yield from self._post_runner_events(run_id, request, classification)
 
     async def _agent_runner_events_async(
@@ -311,11 +344,29 @@ class AnalysisRunService:
         classification: ProblemClassification,
         semantic_models: list[SemanticModelCandidate],
     ) -> AsyncIterator[ExplorationRunEvent]:
+        snapshot = self._authorized_data_snapshot(request, run_id=run_id)
+        if snapshot:
+            yield self._event(run_id, "agent.evidence.available", {"kind": "authorized_aggregate_snapshot", **snapshot})
+        report_context = self._authorized_report_context(request)
+        semantic_context = self._authorized_semantic_context(request)
+        if semantic_context:
+            yield self._event(
+                run_id,
+                "agent.evidence.available",
+                {
+                    "kind": "authorized_finereport_semantic_summary",
+                    "reportCount": len(semantic_context["reports"]),
+                    "reportIds": [report["id"] for report in semantic_context["reports"]],
+                },
+            )
         prompt = build_analysis_runner_prompt(
             question=request.question.strip(),
             analysis_mode=request.analysis_mode,
             problem_label=classification.label,
             semantic_model_labels=[item.label for item in semantic_models],
+            authorized_data_snapshot=snapshot,
+            authorized_semantic_context=semantic_context,
+            current_report_context=report_context,
         )
         yield self._event(
             run_id,
@@ -344,13 +395,89 @@ class AnalysisRunService:
             "agent.runner.completed",
             {"runtime": self._agent_runner_runtime(), "domain": "analysis_task", "raw_result_type": result.raw_result_type},
         )
-        yield self._event(
-            run_id,
-            "agent.message.created",
-            {"role": "assistant", "title": "分析结果", "content": result.final_output},
-        )
+        for event in self._final_result_events(run_id, result, current_report_context=report_context, authorized_data_snapshot=snapshot):
+            yield event
         for event in self._post_runner_events(run_id, request, classification):
             yield event
+
+    def _final_result_events(
+        self,
+        run_id: str,
+        result: AnalysisAgentRunResult,
+        *,
+        current_report_context: dict[str, Any] | None = None,
+        authorized_data_snapshot: dict[str, Any] | None = None,
+    ) -> Iterable[ExplorationRunEvent]:
+        message, draft = extract_interactive_report_draft(result.final_output)
+        if message:
+            yield self._event(
+                run_id,
+                "agent.message.created",
+                {"role": "assistant", "title": "分析结果", "content": message},
+            )
+        draft = draft or _fallback_report_draft(current_report_context, authorized_data_snapshot)
+        if draft:
+            context = self._run_contexts.get(run_id, {})
+            draft["artifactType"] = "interactive_report"
+            draft["schemaVersion"] = "1.0"
+            draft["renderer"] = "puck"
+            inherited_report_id = str((current_report_context or {}).get("id") or "").strip()
+            draft["id"] = inherited_report_id or f"report_draft_{run_id}"
+            draft["source"] = {
+                "threadId": context.get("thread_id", ""),
+                "turnId": context.get("turn_id", ""),
+                "runId": run_id,
+            }
+            yield self._event(run_id, "interactive_report.draft", draft)
+
+    def _authorized_data_snapshot(self, request: AnalysisRunRequest, *, run_id: str) -> dict[str, Any] | None:
+        """Return only a bounded, server-owned aggregate snapshot after explicit per-run consent."""
+
+        if not self.report_query_service or request.metadata.get("data_egress_authorized") is not True:
+            return None
+        question = request.question
+        if not re.search(r"渠道.*(销售|占比)|销售.*渠道", question):
+            return None
+        month_match = re.search(r"\b(20\d{2}-(?:0[1-9]|1[0-2]))\b", question)
+        if not month_match:
+            return None
+        try:
+            query_ref = REGION_CHANNEL_SALES_QUERY_REF if re.search(r"按区域|区域.*(拆|分|渠道)", question) else CHANNEL_SALES_QUERY_REF
+            response = self.report_query_service.run(
+                query_ref,
+                {"month": month_match.group(1)},
+                audit_context={
+                    "source": "codex_authorized_snapshot",
+                    "thread_id": request.conversation_id,
+                    "run_id": run_id,
+                    "user_id": request.user_id,
+                    "data_egress_authorized": True,
+                },
+            )
+        except ReportQueryFilterError:
+            return None
+        payload = response_to_dict(response)
+        return {
+            "queryRef": payload["queryRef"],
+            "filters": payload["filters"],
+            "columns": payload["columns"],
+            "rows": payload["rows"],
+            "rowCount": payload["rowCount"],
+            "truncated": payload["truncated"],
+        }
+
+    def _authorized_semantic_context(self, request: AnalysisRunRequest) -> dict[str, Any] | None:
+        """Export only the repository's safe semantic summary after per-run consent."""
+
+        if request.metadata.get("semantic_context_egress_authorized") is not True:
+            return None
+        return self.finereport_repository.build_agent_semantic_context()
+
+    @staticmethod
+    def _authorized_report_context(request: AnalysisRunRequest) -> dict[str, Any] | None:
+        if request.metadata.get("data_egress_authorized") is not True:
+            return None
+        return sanitize_interactive_report_context(request.metadata.get("interactive_report_context"))
 
     def _post_runner_events(
         self,
@@ -678,6 +805,123 @@ def build_semantic_model_plan(
     ]
 
 
+def _fallback_report_draft(
+    current_report_context: dict[str, Any] | None,
+    authorized_data_snapshot: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Keep the right-side result continuous when a constrained Codex reply omits only its report envelope."""
+
+    if not authorized_data_snapshot:
+        return None
+    query_ref = str(authorized_data_snapshot.get("queryRef") or "")
+    if not current_report_context:
+        return _initial_snapshot_report_draft(authorized_data_snapshot)
+    if query_ref != REGION_CHANNEL_SALES_QUERY_REF:
+        return None
+    report = copy.deepcopy(current_report_context)
+    report["title"] = f"{str(report['title']).strip()}（按区域拆分）"
+    report["subtitle"] = "已切换为服务端登记的区域 × 渠道聚合视图；数值以本轮受控查询结果为准。"
+    dataset_id = "region_channel_sales"
+    report["queries"][query_ref] = {
+        "datasetId": dataset_id,
+        "filterBindings": ["month", "brand", "region"],
+    }
+    report["chartSpecs"]["region-channel-sales-chart"] = {
+        "id": "region-channel-sales-chart",
+        "datasetId": dataset_id,
+        "type": "bar",
+        "xField": "region",
+        "title": "区域渠道销售额",
+        "series": [{"field": "salesAmount", "label": "销售额", "format": "currency"}],
+    }
+    report["gridSpecs"]["region-channel-sales-grid"] = {
+        "id": "region-channel-sales-grid",
+        "datasetId": dataset_id,
+        "pageSize": 12,
+        "columns": [
+            {"field": "region", "label": "区域"},
+            {"field": "channel", "label": "渠道"},
+            {"field": "salesAmount", "label": "销售额", "format": "currency"},
+            {"field": "salesShare", "label": "销售占比", "format": "percent"},
+            {"field": "netRevenue", "label": "收入净额", "format": "currency"},
+            {"field": "refundAmount", "label": "退款金额", "format": "currency"},
+        ],
+    }
+    content = report["document"].get("content", [])
+    for block in content:
+        if not isinstance(block, dict) or not isinstance(block.get("props"), dict):
+            continue
+        if block.get("type") == "ChartBlock":
+            block["props"]["chartSpecRef"] = "region-channel-sales-chart"
+            block["props"]["queryRef"] = query_ref
+        elif block.get("type") == "GridBlock":
+            block["props"]["gridSpecRef"] = "region-channel-sales-grid"
+            block["props"]["queryRef"] = query_ref
+    return report
+
+
+def _initial_snapshot_report_draft(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """Create a minimal, server-owned report when an authorized first-run response omits its draft."""
+
+    query_ref = str(snapshot.get("queryRef") or "")
+    filters = snapshot.get("filters")
+    if query_ref not in {CHANNEL_SALES_QUERY_REF, REGION_CHANNEL_SALES_QUERY_REF} or not isinstance(filters, dict):
+        return None
+
+    month = str(filters.get("month") or "本期")
+    is_region_view = query_ref == REGION_CHANNEL_SALES_QUERY_REF
+    dataset_id = "region_channel_sales" if is_region_view else "channel_sales"
+    chart_id = "region-channel-sales-chart" if is_region_view else "channel-sales-chart"
+    grid_id = "region-channel-sales-grid" if is_region_view else "channel-sales-grid"
+    subject = "区域 × 渠道销售结构" if is_region_view else "渠道销售结构"
+    chart_x_field = "region" if is_region_view else "channel"
+    grid_columns = ([
+        {"field": "region", "label": "区域"},
+        {"field": "channel", "label": "渠道"},
+    ] if is_region_view else [{"field": "channel", "label": "渠道"}]) + [
+        {"field": "salesAmount", "label": "销售额", "format": "currency"},
+        {"field": "salesShare", "label": "销售占比", "format": "percent"},
+        {"field": "netRevenue", "label": "收入净额", "format": "currency"},
+        {"field": "refundAmount", "label": "退款金额", "format": "currency"},
+    ]
+    return {
+        "title": f"{month} {subject}",
+        "subtitle": "基于服务端受控聚合查询生成；筛选仅改变运行时数据视图。",
+        "document": {
+            "root": {"props": {"title": f"{month} {subject}"}},
+            "content": [
+                {"type": "SectionBlock", "props": {"id": "summary-section", "title": "本期结论", "tone": "coral"}},
+                {"type": "MarkdownBlock", "props": {"id": "summary-note", "content": "本报告使用本轮已授权的受控聚合数据。具体结论请结合左侧分析说明与下方明细复核。"}},
+                {"type": "KpiBlock", "props": {"id": "kpi-sales", "metric": "sales"}},
+                {"type": "KpiBlock", "props": {"id": "kpi-share", "metric": "share"}},
+                {"type": "SectionBlock", "props": {"id": "contribution-section", "title": subject, "tone": "navy"}},
+                {"type": "ChartBlock", "props": {"id": "sales-chart", "chartSpecRef": chart_id, "queryRef": query_ref}},
+                {"type": "SectionBlock", "props": {"id": "detail-section", "title": "聚合明细", "tone": "navy"}},
+                {"type": "GridBlock", "props": {"id": "sales-grid", "gridSpecRef": grid_id, "queryRef": query_ref}},
+                {"type": "EvidenceBlock", "props": {"id": "evidence", "label": "数据证据", "content": "来源：FineReport 财务经营管报日报的服务端登记只读聚合查询。未读取业务明细，也未在浏览器提交 SQL。"}},
+            ],
+            "zones": {},
+        },
+        "filters": [
+            {"id": "month", "label": "月份", "defaultValue": month, "options": [{"label": month, "value": month}]},
+            {"id": "brand", "label": "品牌", "defaultValue": "all", "options": [{"label": "全部品牌", "value": "all"}]},
+            {"id": "region", "label": "区域", "defaultValue": "all", "options": [{"label": "全部区域", "value": "all"}]},
+        ],
+        "queries": {query_ref: {"datasetId": dataset_id, "filterBindings": ["month", "brand", "region"]}},
+        "chartSpecs": {
+            chart_id: {
+                "id": chart_id,
+                "datasetId": dataset_id,
+                "type": "bar",
+                "xField": chart_x_field,
+                "title": "销售额",
+                "series": [{"field": "salesAmount", "label": "销售额", "format": "currency"}],
+            }
+        },
+        "gridSpecs": {grid_id: {"id": grid_id, "datasetId": dataset_id, "pageSize": 12, "columns": grid_columns}},
+    }
+
+
 def item_kind_for_event(event_type: str, payload: dict[str, Any]) -> str | None:
     if event_type == "run.created" and payload.get("question"):
         return "message"
@@ -687,6 +931,8 @@ def item_kind_for_event(event_type: str, payload: dict[str, Any]) -> str | None:
         return "question"
     if event_type == "agent.message.created":
         return "message"
+    if event_type == "interactive_report.draft":
+        return "report"
     if event_type in {"tool.call.started", "tool.call.completed", "tool.call.failed"}:
         return "tool_call" if event_type == "tool.call.started" else "tool_result"
     if event_type in {"artifact.created", "artifact.updated"}:
