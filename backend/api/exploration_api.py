@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from backend.config import check_runtime_env, load_project_env
 from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
+from backend.analysis.interactive_report_store import InteractiveReportStore, InteractiveReportVersionConflict
+from backend.analysis.report_query_service import ReportQueryFilterError, ReportQueryNotFound, ReportQueryService, response_to_dict
 from backend.analysis.run_service import AnalysisRunRequest, AnalysisRunService
 from backend.business_semantics.finereport_reports import FineReportReportRepository
 from backend.exploration.run_event_store import RunEventStore
@@ -14,7 +16,12 @@ from backend.exploration.run_service import ExplorationRunEvent, ExplorationRunR
 from backend.exploration.run_trace_store import RunTraceStore
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRunner
 from backend.harness.thread_store import ThreadStore
-from backend.persistence.postgres_stores import build_postgres_stores, build_postgres_thread_store, postgres_persistence_enabled
+from backend.persistence.postgres_stores import (
+    build_postgres_report_query_audit_store,
+    build_postgres_stores,
+    build_postgres_thread_store,
+    postgres_persistence_enabled,
+)
 from backend.resource_library.database_tools import DatabaseConfig, ReadonlyDatabaseTools
 from backend.resource_library.indexer import ResourceIndexer
 from backend.resource_library.inspector import inspect_index
@@ -33,6 +40,8 @@ def create_app(
     knowledge_store: KnowledgeStore | None = None,
     analysis_service: AnalysisRunService | None = None,
     analysis_asset_store: AnalysisAssetStore | None = None,
+    interactive_report_store: Any | None = None,
+    report_query_service: ReportQueryService | None = None,
     thread_store: ThreadStore | None = None,
     finereport_repository: FineReportReportRepository | None = None,
 ) -> Any:
@@ -84,6 +93,29 @@ def create_app(
         saveReason: str | None = None
         reopenContext: AnalysisAssetReopenContextBody
         metadata: dict[str, Any] = Field(default_factory=dict)
+
+    class InteractiveReportSourceBody(BaseModel):
+        threadId: str = Field(min_length=1)
+        turnId: str = Field(min_length=1)
+        runId: str = Field(min_length=1)
+
+    class InteractiveReportBody(BaseModel):
+        id: str = Field(min_length=1)
+        title: str = Field(min_length=1)
+        subtitle: str = Field(min_length=1)
+        artifactType: str = "interactive_report"
+        renderer: str = "puck"
+        document: dict[str, Any]
+        filters: list[dict[str, Any]] = Field(default_factory=list)
+        queries: dict[str, Any] = Field(default_factory=dict)
+        chartSpecs: dict[str, Any] = Field(default_factory=dict)
+        gridSpecs: dict[str, Any] = Field(default_factory=dict)
+        source: InteractiveReportSourceBody
+        ownerId: str = Field(min_length=1)
+        expectedVersion: int | None = Field(default=None, ge=0)
+
+    class ReportQueryBody(BaseModel):
+        filters: dict[str, Any] = Field(default_factory=dict)
 
     class ResourceReindexBody(BaseModel):
         root: str | None = None
@@ -168,8 +200,16 @@ def create_app(
         configured_knowledge_store = knowledge_store or KnowledgeStore()
     else:
         run_service, configured_knowledge_store = build_default_service_with_stores()
-    configured_analysis_service = analysis_service or build_default_analysis_service(run_service)
+    configured_report_query_service = report_query_service or ReportQueryService(
+        ReadonlyDatabaseTools(DatabaseConfig.from_env()),
+        audit_store=build_postgres_report_query_audit_store() if postgres_persistence_enabled() else None,
+    )
+    configured_analysis_service = analysis_service or build_default_analysis_service(
+        run_service,
+        report_query_service=configured_report_query_service,
+    )
     configured_analysis_asset_store = analysis_asset_store or AnalysisAssetStore()
+    configured_interactive_report_store = interactive_report_store or _build_default_interactive_report_store()
     configured_thread_store = thread_store or getattr(configured_analysis_service, "thread_store", None) or ThreadStore()
     if getattr(configured_analysis_service, "thread_store", None) is None:
         configured_analysis_service.thread_store = configured_thread_store
@@ -253,6 +293,21 @@ def create_app(
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+    @app.post("/api/analysis/report-queries/{query_ref}")
+    def run_interactive_report_query(query_ref: str, body: ReportQueryBody = Body(...)) -> dict[str, Any]:
+        try:
+            return response_to_dict(
+                configured_report_query_service.run(
+                    query_ref,
+                    body.filters,
+                    audit_context={"source": "interactive_report"},
+                )
+            )
+        except ReportQueryNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ReportQueryFilterError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/analysis/assets")
     def list_analysis_assets(
         limit: int = Query(default=50, ge=1, le=200),
@@ -315,6 +370,46 @@ def create_app(
         if not result:
             raise HTTPException(status_code=404, detail="analysis_asset_not_found")
         return result
+
+    @app.get("/api/analysis/reports")
+    def list_interactive_reports(
+        owner_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        return {"reports": [asdict(report) for report in configured_interactive_report_store.list_reports(owner_id=owner_id, limit=limit)]}
+
+    @app.post("/api/analysis/reports")
+    def save_interactive_report(body: InteractiveReportBody = Body(...)) -> dict[str, Any]:
+        try:
+            report, version = configured_interactive_report_store.save_report(body.model_dump())
+        except InteractiveReportVersionConflict as exc:
+            raise HTTPException(status_code=409, detail="interactive_report_version_conflict") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"report": asdict(report), "version": asdict(version)}
+
+    @app.get("/api/analysis/reports/{report_id}")
+    def get_interactive_report(report_id: str) -> dict[str, Any]:
+        result = configured_interactive_report_store.get_report(report_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="interactive_report_not_found")
+        report, version = result
+        return {"report": asdict(report), "version": asdict(version)}
+
+    @app.get("/api/analysis/reports/{report_id}/versions")
+    def list_interactive_report_versions(report_id: str) -> dict[str, Any]:
+        versions = configured_interactive_report_store.list_versions(report_id)
+        if versions is None:
+            raise HTTPException(status_code=404, detail="interactive_report_not_found")
+        return {"versions": [asdict(version) for version in versions]}
+
+    @app.get("/api/analysis/reports/{report_id}/versions/{version_number}")
+    def get_interactive_report_version(report_id: str, version_number: int) -> dict[str, Any]:
+        result = configured_interactive_report_store.get_report(report_id, version=version_number)
+        if not result:
+            raise HTTPException(status_code=404, detail="interactive_report_version_not_found")
+        report, version = result
+        return {"report": asdict(report), "version": asdict(version)}
 
     @app.post("/api/explorations/conversations")
     def create_exploration_conversation_turn(body: ExplorationRunBody = Body(...)) -> dict[str, Any]:
@@ -761,7 +856,11 @@ def build_default_service() -> ExplorationRunService:
     return service
 
 
-def build_default_analysis_service(run_service: ExplorationRunService) -> AnalysisRunService:
+def build_default_analysis_service(
+    run_service: ExplorationRunService,
+    *,
+    report_query_service: ReportQueryService | None = None,
+) -> AnalysisRunService:
     load_project_env()
     analysis_runner = None
     analysis_runtime = os.getenv("GENBI_ANALYSIS_RUNTIME", "codex").lower()
@@ -772,6 +871,7 @@ def build_default_analysis_service(run_service: ExplorationRunService) -> Analys
     return AnalysisRunService(
         agent_runner=analysis_runner,
         thread_store=_build_default_thread_store(),
+        report_query_service=report_query_service,
     )
 
 
@@ -810,6 +910,14 @@ def _build_default_thread_store() -> ThreadStore:
             if os.getenv("GENBI_PERSISTENCE", "").strip():
                 raise
     return ThreadStore()
+
+
+def _build_default_interactive_report_store() -> Any:
+    if postgres_persistence_enabled():
+        from backend.persistence.postgres_stores import build_postgres_interactive_report_store
+
+        return build_postgres_interactive_report_store()
+    return InteractiveReportStore()
 
 
 def main() -> None:

@@ -9,6 +9,11 @@ from typing import Any
 
 
 PART_PATTERN = re.compile(r"^(?P<name>.+)\.(?P<part>0[123])_[^.]+\.json$")
+SENSITIVE_SEMANTIC_TOKEN_PATTERN = re.compile(
+    r"(?:password|passwd|secret|token|credential|username|user_name|user_id|phone|mobile|email|id_card|"
+    r"密码|密钥|令牌|凭证|用户|账号|手机号|电话|邮箱|身份证)",
+    re.IGNORECASE,
+)
 
 
 class FineReportReportRepository:
@@ -24,6 +29,45 @@ class FineReportReportRepository:
             if _report_id(name) == report_id:
                 return self._load_report(name, parts)
         return None
+
+    def build_agent_semantic_context(
+        self,
+        *,
+        max_reports: int = 3,
+        max_datasets_per_report: int = 12,
+        max_parameters_per_dataset: int = 12,
+        max_bindings_per_report: int = 32,
+        max_bytes: int = 16_000,
+    ) -> dict[str, Any] | None:
+        """Return a bounded report-semantic summary suitable for an authorized model prompt.
+
+        The parsed source is richer than an LLM needs.  In particular, raw SQL,
+        data-source connection names, CPT paths, parameter defaults and cell text
+        are intentionally excluded from this export.
+        """
+
+        reports: list[dict[str, Any]] = []
+        for name, parts in self._group_files().items():
+            if len(reports) >= max_reports:
+                break
+            loaded = self._load_report(name, parts)
+            report = loaded["report"]
+            if report.get("status") != "complete":
+                continue
+            reports.append(
+                _safe_report_semantic_summary(
+                    loaded,
+                    max_datasets=max_datasets_per_report,
+                    max_parameters=max_parameters_per_dataset,
+                    max_bindings=max_bindings_per_report,
+                )
+            )
+
+        if not reports:
+            return None
+        context = {"kind": "finereport_report_semantics", "reports": reports}
+        encoded = json.dumps(context, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return context if len(encoded) <= max_bytes else None
 
     def _group_files(self) -> dict[str, dict[str, Path]]:
         groups: dict[str, dict[str, Path]] = {}
@@ -146,6 +190,59 @@ def _normalize_sheet(sheet: dict[str, Any]) -> dict[str, Any]:
         "columnCount": column_count,
         "cells": cells,
     }
+
+
+def _safe_report_semantic_summary(
+    loaded: dict[str, Any],
+    *,
+    max_datasets: int,
+    max_parameters: int,
+    max_bindings: int,
+) -> dict[str, Any]:
+    report = loaded["report"]
+    datasets = [
+        {
+            "name": str(dataset.get("name") or "dataset"),
+            "type": str(dataset.get("type") or "unknown"),
+            "parameterNames": [
+                str(parameter.get("name"))
+                for parameter in _list(dataset.get("parameters"))[:max_parameters]
+                if parameter.get("name") and _is_safe_semantic_identifier(str(parameter["name"]))
+            ],
+        }
+        for dataset in loaded["datasets"][:max_datasets]
+    ]
+    bindings: list[dict[str, str]] = []
+    for sheet in loaded["sheets"]:
+        for cell in sheet["cells"]:
+            binding = cell.get("binding")
+            if not isinstance(binding, dict):
+                continue
+            dataset = binding.get("dataset")
+            field = binding.get("field")
+            if not dataset or not field or not _is_safe_semantic_identifier(str(field)):
+                continue
+            bindings.append({"sheet": str(sheet["name"]), "dataset": str(dataset), "field": str(field)})
+            if len(bindings) >= max_bindings:
+                break
+        if len(bindings) >= max_bindings:
+            break
+    counts = report["counts"]
+    return {
+        "id": report["id"],
+        "name": report["name"],
+        "sheetNames": list(report["sheetNames"]),
+        "counts": {
+            key: counts[key]
+            for key in ("sheets", "datasets", "parameters", "cells", "formulas", "bindings")
+        },
+        "datasets": datasets,
+        "bindings": bindings,
+    }
+
+
+def _is_safe_semantic_identifier(value: str) -> bool:
+    return bool(value.strip()) and not SENSITIVE_SEMANTIC_TOKEN_PATTERN.search(value)
 
 
 def _positive_int(value: Any, default: int) -> int:

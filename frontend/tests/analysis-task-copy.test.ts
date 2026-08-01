@@ -84,10 +84,15 @@ const modeToggleSource = readFileSync(
   "utf8",
 );
 
+const interactiveReportSource = readFileSync(
+  resolve(process.cwd(), "src/modules/analysis/components/InteractiveReportPanel.tsx"),
+  "utf8",
+);
+
 describe("analysis task product language", () => {
   test("frames the primary workspace as a unified analysis workspace", () => {
     expect(workspaceSource).toContain('label: "分析工作台"');
-    expect(workspaceSource).toContain('label: "分析资产库"');
+    expect(workspaceSource).toContain('label: "我的分析"');
     expect(workspaceSource).toContain('label: "业务语义库"');
     expect(workspaceSource).toContain("ANALYSIS WORKSPACE");
     expect(workspaceSource).toContain("<h2>分析工作台</h2>");
@@ -95,7 +100,9 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain("+ 新建分析");
     expect(workspaceSource).toContain('aria-label="分析任务工作区"');
     expect(workspaceSource).toContain(">分析工作台</button>");
+    expect(workspaceSource).toContain(">分析结果</button>");
     expect(workspaceSource).toContain("新分析");
+    expect(workspaceSource).toContain("InteractiveReportPanel");
 
     expect(workspaceSource).not.toContain('label: "会话"');
     expect(workspaceSource).not.toContain('label: "知识探索"');
@@ -106,26 +113,16 @@ describe("analysis task product language", () => {
     expect(suggestionsSource).not.toContain("开始一个会话");
   });
 
-  test("keeps current task assets in the analysis workspace and moves shared assets to the standalone library", () => {
-    expect(workspaceSource).toContain("AnalysisAssetLibrary");
-    expect(workspaceSource).toContain("AnalysisAssetLibraryPage");
-    expect(assetLibrarySource).toContain("当前任务资产");
-    expect(assetLibrarySource).toContain("可复用");
-    expect(assetLibrarySource).toContain('aria-label="当前任务资产视图"');
-    expect(assetLibrarySource).not.toContain("SharedAnalysisAssetLibrary");
-    expect(assetLibrarySource).not.toContain("共享资产库");
-    expect(assetLibrarySource).not.toContain("libraryView");
-    expect(assetLibrarySource).not.toContain('aria-label="切换分析资产库视图"');
-    expect(assetLibraryPageSource).toContain("SharedAnalysisAssetLibrary");
-    expect(assetLibraryPageSource).toContain("共享、已保存和可复用的分析资产");
-    expect(assetLibraryPageSource).toContain("打开资产");
-    expect(assetLibraryPageSource).toContain("回到分析工作台继续");
-    expect(assetLibraryPageSource).toContain("来源任务");
-    expect(assetLibraryPageSource).toContain("latestVersion");
-    expect(assetLibraryPageSource).toContain("visibility");
-    expect(sharedAssetLibrarySource).toContain("共享分析资产库");
-    expect(sharedAssetLibrarySource).toContain("已保存、已共享或可复用的资产");
-    expect(sharedAssetLibrarySource).toContain("回到分析工作台继续");
+  test("keeps the current interactive result in the analysis workspace and moves reusable items to my analysis", () => {
+    expect(workspaceSource).toContain("InteractiveReportPanel");
+    expect(workspaceSource).toContain("MyAnalysisPage");
+    expect(workspaceSource).not.toContain("AnalysisAssetLibraryPage");
+    expect(interactiveReportSource).toContain('aria-label="分析结果"');
+    expect(interactiveReportSource).toContain("@puckeditor/core");
+    expect(interactiveReportSource).toContain("AgGridReact");
+    expect(interactiveReportSource).toContain("EChartRenderer");
+    expect(workspaceSource).toContain("loadSavedInteractiveReports");
+    expect(workspaceSource).toContain("saveInteractiveReport");
   });
 
   test("adds a business semantic library for structured knowledge and semantics", () => {
@@ -182,7 +179,7 @@ describe("analysis task product language", () => {
   test("supports quick and deep analysis modes as agent behavior inputs", () => {
     expect(agentTypesSource).toContain('export type AnalysisMode = "quick" | "deep"');
     expect(agentTypesSource).toContain("analysisMode?: AnalysisMode");
-    expect(agentTypesSource).toContain('{ kind: "reply"; optionId: string; analysisMode?: AnalysisMode }');
+    expect(agentTypesSource).toContain('{ kind: "reply"; optionId: string; analysisMode?: AnalysisMode; dataEgressAuthorized?: boolean; interactiveReport?: InteractiveReport }');
     expect(modeToggleSource).toContain("快速分析");
     expect(modeToggleSource).toContain("深度分析");
     expect(workspaceSource).toContain("AnalysisTaskThread");
@@ -228,8 +225,7 @@ describe("analysis task product language", () => {
     expect(globalStylesSource).toContain("max-height: min(54vh, 680px)");
   });
 
-  test("treats generated files and Skill markdown as analysis assets", () => {
-    expect(workspaceSource).toContain("mergeArtifactFolders");
+  test("keeps generated files and Skill markdown as reusable analysis materials", () => {
     expect(assetLibrarySource).toContain("describeArtifact");
     expect(assetLibrarySource).toContain("buildAnalysisAssetCards");
     expect(assetLibrarySource).toContain("可沉淀资产");
@@ -254,13 +250,13 @@ describe("analysis task product language", () => {
     expect(mockClientSource).toContain("dashboards/channel_overview.dashboard.json");
   });
 
-  test("lets saved analysis assets reopen the current analysis task context", () => {
-    expect(workspaceSource).toContain("savedAssetIds");
-    expect(workspaceSource).toContain("handleSaveAsset");
-    expect(workspaceSource).toContain("handleContinueFromAsset");
-    expect(workspaceSource).toContain("基于分析资产");
-    expect(workspaceSource).toContain("继续当前分析任务");
-    expect(workspaceSource).toContain("可从资产回到本任务继续");
+  test("lets saved interactive results reopen the analysis workspace", () => {
+    expect(workspaceSource).toContain("handleOpenReport");
+    expect(workspaceSource).toContain("openedReportId");
+    expect(workspaceSource).toContain("initialReport={flow.draftReport ?? openedReport?.report ?? undefined}");
+    expect(workspaceSource).toContain("initialVersion={openedReport?.version}");
+    expect(interactiveReportSource).toContain("onSaveReport");
+    expect(interactiveReportSource).toContain("已保存新的报告版本");
   });
 
   test("shows a shared asset library entry that can reopen source task context", () => {
@@ -299,11 +295,7 @@ describe("analysis task product language", () => {
     expect(sharedAssetLibrarySource).toContain("保存资产或发布 Skill 后会出现在这里");
     expect(assetContractsSource).toContain("v0.1-draft");
     expect(assetLibraryPageSource).toContain("sharedAnalysisAssets");
-    expect(workspaceSource).toContain("mockAnalysisAssetLibraryService.saveAsset");
-    expect(workspaceSource).toContain("assetSourceContext");
-    expect(workspaceSource).toContain("flow.conversationId");
     expect(assetLibraryPageSource).toContain("reopenContext");
-    expect(workspaceSource).toContain("lastSaveRequest");
     expect(assetLibrarySource).toContain("MOCK SAVE PAYLOAD");
     expect(assetContractsSource).not.toContain("analysis_task_channel_sales_share");
     expect(assetContractsSource).not.toContain("conv_analysis_channel_sales");
@@ -341,8 +333,6 @@ describe("analysis task product language", () => {
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 适用场景"');
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 需要确认"');
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 推荐步骤"');
-    expect(workspaceSource).toContain("继续编辑 Skill.md");
-    expect(workspaceSource).toContain("适用场景、口径和复用权限");
     expect(mockClientSource).toContain("整理适用场景");
     expect(mockClientSource).toContain("提取需要确认的业务口径");
     expect(mockClientSource).toContain("标注复用权限");

@@ -19,7 +19,7 @@ flowchart LR
 
 | 层 | 职责 | 边界 |
 | --- | --- | --- |
-| 交互层 | 展示分析任务、Agent 过程、追问、当前任务资产、资产库和语义库 | 不做真实权限判断，不直接访问生产数据 |
+| 交互层 | 左侧展示分析任务、Agent 过程和追问；右侧展示当前交互式分析结果；“我的分析”展示已保存结果和模板 | 不做真实权限判断，不直接访问生产数据 |
 | API / SSE | 接收请求，返回 Thread/Turn/Item 事件流，隔离前后端契约 | 不泄漏内部工具实现 |
 | openai-codex SDK / Codex | 规划、执行、反思、上下文组装、工具调度、模型调用、sandbox、approval、tool/MCP/Skill 编排 | 不自研 Codex 已经提供的通用 Agent 工程能力 |
 | 业务语义库 | 提供语义模型和业务知识检索、引用、版本、认证 | 不返回完整敏感业务文件正文 |
@@ -85,16 +85,35 @@ tool.call.failed
 agent.evidence.available
 artifact.created
 artifact.updated
+interactive_report.draft
 run.completed
 run.failed
 ```
 
 所有事件必须有 TypeScript schema；真实 API 建立后用 OpenAPI 或等价 schema 校验。
 
+## 交互式分析结果契约
+
+用户看到的主结果是 `interactive_report`，不是 HTML、PDF 或截图。它以 PostgreSQL `jsonb` 为目标存储形态：
+
+```text
+Puck document：组件、布局、组件参数
+filters：可交互筛选器定义与默认值
+queries：数据集与筛选绑定
+chartSpecs：平台级 Chart Spec，前端适配为 ECharts option
+gridSpecs：平台级 Grid Spec，前端适配为 AG Grid 配置
+```
+
+运行时筛选、分页、排序和缩放存于前端状态，不创建新版本；页面布局、查询、图表/表格配置、结论和默认筛选器变更才创建新的结果版本。
+
+报告读取真实数据时，浏览器只能提交已登记的 `queryRef` 和运行时筛选；SQL 模板、允许筛选键、AST 校验、参数绑定、只读账户、RLS 与审计均属于服务端数据层。首个实现是 FineReport“财务经营管报日报”的渠道销售汇总，尚未具备用户绑定 RLS 与完整审计。
+
+FineReport 的解析详情也不能直接进入外部模型。服务端只在本轮 `semantic_context_egress_authorized=true` 时，导出至多三份报表的受限语义摘要：报表标识、名称、页签、结构计数、数据集名称/类型、普通参数名与绑定字段；原始 SQL、数据源连接、CPT 路径、参数默认值、单元格正文和疑似敏感标识一律不外发。授权事件只记录摘要的报表 ID 与数量，保留 Thread / Turn / Run 关联。
+
 ## 当前实现快照
 
-- 前端：Next.js + TypeScript，`modules/analysis` 已承载分析工作台、当前任务资产、独立分析资产库 mock 和业务语义库 mock。
-- 后端：FastAPI 已有分析 Run API / SSE、资源库工具、数据库只读工具、知识记录、分析资产最小存储；分析任务已写入新的 `ThreadStore`，保存 Thread/Turn/Run/Item，数据库配置可用时使用 Postgres 表，无数据库时回退 JSONL，并提供分析 Thread 查询接口；`GENBI_ANALYSIS_RUNTIME=codex` 可切到 openai-codex Python SDK runner。
+- 前端：Next.js + TypeScript，`modules/analysis` 已承载左侧分析对话、右侧交互式分析结果、“我的分析”结果列表和业务语义库 mock。
+- 后端：FastAPI 已有分析 Run API / SSE、资源库工具、数据库只读工具、知识记录、分析资产最小存储；分析任务已写入新的 `ThreadStore`，保存 Thread/Turn/Run/Item。交互式报告使用 `analysis_reports` 与 `analysis_report_versions` 保存 JSONB 与不可变版本；数据库不可用时仅开发环境回退 JSON 文件，并提供分析 Thread 与报告查询接口；`GENBI_ANALYSIS_RUNTIME=codex` 可切到 openai-codex Python SDK runner。
 - 编排：`backend/harness/codex_sdk_runner.py` 是当前分析任务唯一真实 runner；探索侧只保留服务契约和工具函数，后续通过 Codex tools / MCP / Skills 接入。
 
 ## Codex 运行配置

@@ -5,66 +5,85 @@
 ## 当前分支
 
 - 仓库：`E:\my_repo\agentic genbi`
-- 分支：`feature/codex-runtime-cleanup`
-- 当前切片：业务语义库接入真实 FineReport 解析结果，提供报表目录、结构预览和解析详情，并保持固定桌面画布行为。
+- 分支：`feature/interactive-analysis-result`
+- 当前切片：交互式分析结果持久化与 Codex 草稿桥接。左侧保留分析对话，右侧展示并编辑一份当前分析结果；保存后的结果写入 Postgres 并进入“我的分析”。
 
 ## 当前产品方向
 
-用户只从分析工作台提出业务问题。后端通过 Codex / openai-codex 作为编排运行入口，负责理解意图、推进分析、生成事件流，并逐步接入业务语义库、只读数据工具和分析资产治理。
+用户从分析工作台提出业务问题。左侧对话承载问题、追问和 Agent 过程；右侧持续生成、修改当前结果。结果确认后可保存、分享、导出或提炼为模板。
 
-原则：能用 Codex 的，绝不自研；本项目只做业务语义、数据安全、分析资产治理、前端体验和 Codex 适配层。
+第一类结果是 `Interactive Report`：布局用 Puck JSON 表达，图表、表格和运行时筛选按独立契约渲染。产品前台使用“分析结果 / 我的结果 / 分析模板”；`Artifact` 只保留给内部治理与 API 契约。
 
 ## 本轮改动
 
-- 新增 `backend/analysis/runner_contracts.py`，只保留分析 runner 的结果、协议和 prompt builder。
-- 删除 `backend/analysis/agent_runner.py`，分析侧不再保留旧运行实现。
-- 收缩 `backend/exploration/agent_runner.py` 为纯协议与文本清理工具，不再包含模型 provider、旧 runner 或 SDK 事件归一化。
-- `backend/api/exploration_api.py` 中 `GENBI_ANALYSIS_RUNTIME` 只支持 `codex`、`local`、`mock`；默认值改为 `codex`，不再回退旧 runner。
-- `backend/resource_library/exploration_agent.py` 不再构造旧 SDK agent；保留资源库、只读数据库和知识沉淀工具函数，后续包装为 Codex tools / MCP / Skills。
-- 移除 `backend/requirements.txt` 中旧依赖，只保留 `openai-codex` 运行链路。
-- 更新相关测试，测试目标从旧 SDK runner 改为 Codex-compatible runner contract。
-- README 默认配置改为 `GENBI_ANALYSIS_RUNTIME=codex`、`GENBI_EXPLORATION_RUNTIME=local`。
-- `frontend/src/modules/business-semantics/components/BusinessSemanticLibrary.tsx`：业务语义库改为两个一级模块：结构化知识、语义。
-- 结构化知识模块以 FineReport、Apache Hop、数据库、金蝶四类来源组织侧栏入口，表达“系统里实际存在什么”。
-- 语义模块统一承载业务主题、数据对象、查询路由、关系规则、字段语义、指标、维度、业务规则、查询案例，并通过状态区分全部、待确认、已发布、草稿、已废弃。
-- 页面补充“结构化知识 → 语义候选 → 人工确认 → 发布为语义”的关系说明。
-- 业务语义库的“结构化知识 / 语义”切换已移动到第二竖栏。
-- FineReport、Apache Hop、数据库、金蝶已作为“结构化知识”下的二级入口放入第二竖栏，只保留名称和基本介绍。
-- 业务语义库右侧主内容区默认只在 FineReport 入口展示真实报表解析浏览器；Apache Hop、数据库、金蝶和语义入口继续留空。
-- 新增 `backend/business_semantics/finereport_reports.py`，从只读资源库自动聚合同名的三类解析 JSON，规范化报表摘要、数据集、参数交互、Sheet、单元格坐标和跨行跨列信息。
-- 新增 FineReport 列表与详情接口：`GET /api/business-semantics/finereport/reports`、`GET /api/business-semantics/finereport/reports/{report_id}`。
-- 新增 FineReport 前端 API 契约、报表目录、概览、报表预览、数据集与 SQL、参数与交互、结构详情五个视图。
-- 报表预览使用 CSS Grid 根据 `row / columnIndex / rowspan / colspan` 还原结构，支持 Sheet 切换、60% 至 160% 缩放、横纵滚动和单元格公式/绑定查看。
-- 修复业务语义库图标重复点击或历史折叠状态导致第二竖栏不显示的问题：进入业务语义库会强制展开第二竖栏。
-- 所有页面统一使用 1180px 最小桌面画布；窗口变小时不隐藏侧栏、不改变列数、不把卡片改成单列，空间不足时通过页面横向滚动查看。
-- 删除 900px、620px、520px 三组会改变页面结构的响应式断点，只保留减少动画等不影响结构的媒体规则。
+- 新增交互式报告契约：报告 JSON 包含 Puck 布局、筛选定义、查询引用、图表 Spec、表格 Spec 和来源 `thread / turn / run`。
+- 分析工作台右侧改为单一“分析结果”面板，使用 Puck 渲染布局、ECharts 渲染图表、AG Grid 渲染明细表。
+- 月份、品牌、区域筛选只改变运行时数据视图；不会写回 Puck 文档，也不会创建版本。
+- 新增“保存、分享、提炼为模板、导出、编辑结果”操作；当前分享、模板和导出明确为 Mock。
+- 新增 `analysis_reports` 与 `analysis_report_versions`：前者保存结果归属、来源和最新版本；后者以 JSONB 保存不可变的 Puck 布局、筛选定义、查询、图表和表格 Spec。
+- 新增报告 API：`POST /api/analysis/reports`、`GET /api/analysis/reports`、`GET /api/analysis/reports/{id}`、版本列表与指定版本读取接口；陈旧版本保存会返回 `409`。
+- Puck 编辑器发布会调用报告 API 并使用服务端返回的版本号；“保存”也创建新的报告版本。运行时筛选不写入任何版本。
+- Codex 最终回复可显式附带 `<interactive_report_draft>` JSON；服务端严格校验最小 Puck 契约，剥离聊天正文中的 JSON，补齐报告 ID 与 `thread / turn / run` 来源，再发出 `interactive_report.draft`。
+- `interactive_report.draft` 会随 Run 保存为 `report` Item；前端已校验并消费此事件，右侧优先展示本轮 Codex 草稿。
+- 新增第一个受控 `queryRef`：`finereport-operation-management-channel-sales`。它基于已解析的“财务经营管报日报”来源表 `dm.dm_fina_operation_mgmt_rpt`，只接受 `month / brand / region` 三个筛选键，汇总 `销售额 / 收入净额 / 退款金额`，并在服务端计算 `salesShare`。
+- 新增第二个受控 `queryRef`：`finereport-operation-management-region-channel-sales`。它按 FineReport 已解析字段 `vregion`（线下区域）与 `vchannel_type`（渠道类型）共同聚合；“按区域拆开”的授权 Run 会选择它，而不是把区域误当作单一筛选条件。
+- 新增 `POST /api/analysis/report-queries/{queryRef}`：浏览器不提交 SQL；服务端登记固定 SQL 模板，先经 SQL AST 只读校验，再将命名筛选转换为数据库参数绑定。右侧报告在 backend 模式下通过该接口读取运行时数据。
+- 前端报告筛选的品牌、区域值已与数据库业务口径统一为中文实际值（如“花西子”“华东”）；不再使用仅供 mock 的 `florasis / east` 等内部代号，从而保证同一筛选状态在 mock 与 backend 模式语义一致。
+- 新增“我的分析”页：优先读取当前 Auth.js 用户的后端报告；未登录开发态或 API 不可用时才回退到浏览器 `localStorage`。
+- 右侧分析结果已增加“历史版本”入口：后端存储模式下可读取版本列表并打开指定版本；打开历史版本只切换当前阅读/编辑对象，后续保存才创建新版本，运行时筛选仍不写入版本。
+- 每个报告版本现在都冻结自己的 `sourceThreadId / sourceTurnId / sourceRunId`；读取历史版本时以前述版本来源为准，不再误用报告最新版本的来源。Postgres 启动时会为既有版本回填当前报告来源，并将三个新列收紧为不可空。
+- 分析工作台已增加“使用受控数据与语义摘要”逐次授权开关：默认关闭，仅后端模式展示；勾选后当前 `start / message / reply` Run 才会发送 `metadata.data_egress_authorized=true` 与 `metadata.semantic_context_egress_authorized=true`，发送后立即复位，避免继承到下一轮。
+- FineReport 报表解析已接入受控语义摘要：仅在本轮语义外发授权成立时，服务端才向 Codex / MiniMax 发送至多三份完整解析报表的 `id / name / sheetNames / counts / datasets / bindings`。摘要排除原始 SQL、连接名、CPT 路径、参数默认值、单元格正文与含用户、凭证、令牌、联系方式等敏感标识的参数或字段；事件审计只保留报表 ID、数量和 Thread / Turn / Run 关联。
+- 当本轮已获得受控聚合数据快照时，Codex prompt 会强制要求输出完整的交互式报告草稿；即使模型只返回普通文本或 HTML Artifact，服务端也会基于已登记的 `queryRef` 生成最小 Puck 报告草稿，确保右侧分析结果不断流。
+- 若模型在同一份草稿中混入未登记的 `queryRef`，服务端会移除该未知查询及其引用的图表/表格，只保留已登记的受控部分；若整份草稿只含未知查询，仍会拒绝，不会把未授权查询带入右侧报告。
+- 用户继续对话时，前端会把右侧当前报告作为“修改基线”随 Run 一并提交；服务端只在本轮已明确授权外发受控数据时接收该上下文，并剥离来源等无关字段、限制为 60KB、校验所有 `queryRef` 均为服务端登记后，才发送给 Codex / MiniMax。模型必须返回完整的新报告草稿，右侧随即切换；用户保存后才创建新的报告版本。
+- 基于已有报告继续对话时，受控上下文会保留原报告 ID；服务端生成的草稿继承该 ID，但来源更新为新的 `thread / turn / run`。右侧优先显示本轮草稿，用户保存时以原报告最新版本为并发基线写入下一版本，而不会误创建另一份报告。
+- 草稿解析会容错模型可判定的 JSON 格式错误（字符串中的原始控制字符、少量尾部花括号、`document` 内误嵌顶层报告字段、扁平的 Puck `props`）；修复后仍必须通过完整报告契约与登记 `queryRef` 校验。若本轮已授权、存在当前报告基线且已取得区域渠道快照，但模型仅漏掉草稿外壳，服务端会保守地把已有图表/表格绑定切换到区域渠道 `queryRef`，保持右侧结果不断流。
+- 工作台移除旧分析资产库状态和入口依赖，避免“当前结果”与旧资产卡片模型同时占据右侧。
+- README、产品范围和架构文档已补充交互式结果与运行时筛选契约。
 
 ## 已验证
 
-- `python -m py_compile backend\analysis\runner_contracts.py backend\analysis\run_service.py backend\harness\codex_sdk_runner.py backend\exploration\agent_runner.py backend\exploration\run_service.py backend\resource_library\exploration_agent.py backend\api\exploration_api.py`：通过。
-- `python -m unittest backend.tests.test_agent_runner backend.tests.test_analysis_agent_runner backend.tests.test_analysis_run_service backend.tests.test_codex_sdk_runner backend.tests.test_analysis_api backend.tests.test_exploration_agent backend.tests.test_exploration_run_service -v`：39 个后端测试通过。
-- 旧运行时关键词扫描通过：后端、README 和三份文档中不再出现旧 SDK 入口、依赖和 runner 名称。
-- `cmd /c npm run test -- tests/analysis-task-copy.test.ts`：1 个前端测试文件 / 12 个测试通过。
-- `cmd /c npm run build`：Next.js build 通过。
-- `cmd /c npm run test`：10 个前端测试文件 / 73 个测试通过。
-- `cmd /c npm run build`：固定桌面画布修改后 Next.js production build 通过。
-- 浏览器在 1366x844 与 390x844 视口完成对比验证；390px 视口下画布保持 1180px，主体三栏保持 `56px / 240px / 874px`，页面横向滚动范围为 1180px。
-- 逐页验证工作台、分析工作台、分析资产库、业务语义库和系统页：窗口变小时仍保持桌面端侧栏和既有列结构，通过横向滚动查看未显示区域。
-- 浏览器验证业务语义库：第二竖栏包含 4 个结构化知识二级入口；FineReport 展示真实报表浏览器，其他入口保持空白；侧栏宽度保持 240px，页面画布宽度保持 1180px。
-- FineReport 后端真实数据验证：识别 3 张完整报表；分别包含 137、272、2364 个单元格，数据集、参数控件、交互规则、公式和字段绑定统计均可读取。
-- `python -m unittest backend.tests.test_finereport_reports -v`：FineReport 聚合与 API 测试通过。
-- `python -m unittest discover -s backend\tests -v`：后端全量 91 个测试通过。
-- 浏览器验证三张真实报表可切换；最大报表渲染 2364 个单元格，横纵滚动正常，13 个数据集和 SQL 视图可打开；最终示例报表包含 2 个 Sheet、111 个当前 Sheet 单元格，控制台无错误。
+- `python -m unittest discover -s backend/tests -v`：112 个后端测试通过。
+- `npm.cmd test`：13 个前端测试文件、81 个测试通过。
+- `npm.cmd run build`：Next.js production build 通过。
+- 前端版本列表客户端测试通过；页面级检查确认右侧报告头部展示“历史版本”按钮。
+- 前端逐次授权请求契约、页面控件可见性与勾选/复位行为已验证。
+- `docker compose up -d --build backend`：FastAPI backend 已重建，Postgres 健康。
+- Docker 端到端验收：通过运行中的 FastAPI 保存报告 v1、保存 v2、读取版本列表 `[2, 1]`、读回 v1 内容；临时验收记录已删除。
+- Postgres 结构验证：`analysis_report_versions.source_thread_id / source_turn_id / source_run_id` 已存在且均为 `NOT NULL`。
+- 测试覆盖：报告 Puck 契约、运行时筛选不修改报告 JSON、筛选后的指标重新计算、后端保存/列表/最新版本/历史版本/陈旧版本冲突。
+- 定向契约验证：Codex 草稿会成为 `report` Item，不泄漏 JSON 到聊天正文；前端可将草稿事件映射为右侧报告状态。
+- 真实 smoke：候选表字段与 FineReport 解析一致；数据区间为 `2024-01` 至 `2026-05`。通过 API 查询 `2026-05` 已返回四个渠道的真实聚合行，未读取业务明细。
+- 真实续聊 smoke：在逐次授权和当前报告基线均存在时，`run_analysis_66b148ea4c0c` 以 `run.completed` 结束并返回 1 个 `interactive_report.draft`。服务端也能容错处理模型在 Markdown 字符串中写入的未转义换行，仍只接受校验通过的完整报告草稿。
+- 真实区域拆分 smoke：新查询接口对 `2026-05` 返回 `region / channel / salesAmount / netRevenue / refundAmount / salesShare` 六列、10 行且未截断；`run_analysis_f38fac46978b` 选择区域渠道快照、以 `run.completed` 结束并返回 1 个 `interactive_report.draft`，草稿来源 Run 与实际 Run 一致且只引用区域渠道登记查询。
+- 真实 FineReport 语义摘要 smoke：`run_analysis_1f631a326622` 在仅携带 `semantic_context_egress_authorized=true`、不请求业务数据的条件下，发出 `authorized_finereport_semantic_summary` 事件并关联 3 份报表；Codex / MiniMax 流式回复与 `run.completed` 正常结束。
+- 报告草稿连续性验证：`python -m unittest backend.tests.test_analysis_agent_runner -v` 通过 19 个测试，其中覆盖“已授权渠道快照但模型只返回普通文本”时仍发出 `interactive_report.draft`，以及混入未知查询时保留已登记部分。重建 backend 后的真实 UTF-8 SSE smoke 同时收到 `agent.evidence.available`、`interactive_report.draft` 与 `run.completed`；包含“平台”的请求只保留渠道 `queryRef`，不会放行未登记的平台查询。
 
 ## 风险
 
-- 探索侧真实 LLM runner 已移除，当前探索接口没有真实 agent runner；符合“不要两个并列 Agent 入口”的方向，后续应通过分析工作台背后的 Codex tools 接入语义查证能力。
-- 业务语义库除 FineReport 真实解析文件浏览外仍为前端占位，尚未接完整持久化、状态流转、审核发布和 Codex tools。
-- FineReport 当前直接读取解析 JSON，尚未持久化到 Postgres；视觉预览只能还原现有 JSON 中的结构，原始行高、列宽、字体、颜色、边框和数字格式仍需解析器补充。
-- 只读数据库和 Artifact tools 尚未接入 Codex runner。
-- 固定桌面画布意味着窄窗口必须横向滚动；这是当前明确的产品取舍，不是响应式缺陷。
+- 当前 Puck 文档仍有 mock 初始内容；首个渠道与区域渠道报告已能在 backend 模式按运行时筛选读取真实受控聚合数据，但尚未覆盖更多指标、时间对比和多报表数据集。
+- 当前只有一个固定报表查询切片；没有用户身份绑定、RLS 条件注入或独立查询审计表，不能将其视为完整的数据治理能力。
+- Codex 草稿协议已通过 fake runner 契约验证。用户已明确授权：受控聚合数据与裁剪后的 FineReport 报表语义摘要可在每轮开关明确同意后发送给 MiniMax 用于生成分析报告。
+- 每次需要发送聚合数据的 Run 都必须显式传入 `metadata.data_egress_authorized=true`；仅当问题命中渠道销售且包含合法月份时，服务端才执行登记 `queryRef` 并将至多 100 行聚合快照放入 Codex prompt。真实端到端 smoke 已完成：`2026-05` 查询返回 4 行渠道聚合数据，MiniMax 返回文字结论与 `interactive_report.draft`，SSE 以 `run.completed` 结束。
+- 当前报告基线上下文仅在用户勾选“使用受控数据”的那一轮发送给外部模型；前端不发送时服务端也会再次拒绝该上下文。上下文不含来源字段，且未知 `queryRef`、不完整报告或超过 60KB 的内容会被丢弃。
+- 报表查询审计已写入 Postgres `analysis_report_query_audits`：只保存 `queryRef`、筛选、行数、耗时、截断标记、调用来源、Thread/Run、用户标识和外发授权标记，不保存 SQL 正文或查询结果行。真实验证中，`run_analysis_3eb253084aaf` 与其审计记录均关联到同一 Thread，记录 `2026-05` 的 4 行受控聚合查询。
+- Codex 草稿中的 `queries` 也受同一登记表约束；未知 `queryRef` 会被拒绝，不会进入右侧结果。
+- API 使用前端传入的 `ownerId` 记录归属；尚未由后端认证上下文强制绑定，不能作为权限边界。
+- 真实分享权限、模板提炼、PDF/XLSX 导出，以及数据源/RLS/只读 SQL 仍未接入。
+- 报告列表为当前用户逐条读取详情，适合当前小规模开发数据；团队规模前需改为后端一次性返回摘要与最新版本。
+
+## 后续阶段（暂缓）
+
+以下能力不属于本次已完成的“分析结果闭环”切片，用户已决定后续再做：
+
+- 权限与 RLS：由后端认证上下文绑定用户，并按用户、角色或数据范围限制可查询和可查看的数据行。
+- 团队分享与模板：将确认后的分析结果以权限受控方式分享给团队，并提炼为可复用的分析模板。
+- 更多语义工具：把更多已治理的指标口径、字段、ETL 血缘和业务知识以受控检索或 `queryRef` 提供给 Codex。
+- 导出与治理：提供 PDF/XLSX 导出、数据血缘、审计和可解释说明。
 
 ## 下一步
 
-1. 合并当前分支到 `Agentic-GenBI` 并推送远端。
-2. 下一切片设计业务语义库真实数据契约和 Codex tools / MCP / Skills 接入。
+1. 当前“分析结果闭环”切片不继续扩展，等待合入或由用户指定下一项后续阶段能力。
+2. 启动后续阶段时，优先明确用户范围、数据权限模型和需要覆盖的数据源，再实施权限与 RLS。
+3. 团队分享、模板、更多语义工具、导出与治理均保持暂缓，直到用户重新排期。

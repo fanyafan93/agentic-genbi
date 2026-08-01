@@ -6,7 +6,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 from urllib.parse import unquote, urlparse
 
 import sqlglot
@@ -17,6 +17,7 @@ from backend.config import load_project_env
 
 DEFAULT_MAX_ROWS = 1000
 DEFAULT_TIMEOUT_SECONDS = 30
+_NAMED_PARAMETER_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 FORBIDDEN_EXPRESSIONS = (
     exp.Create,
     exp.Delete,
@@ -192,6 +193,34 @@ class ReadonlyDatabaseTools:
             raise ValueError("; ".join(validation.reasons))
         return self._fetch(validation.normalized_sql, None, max_rows=max_rows or self.config.max_rows)
 
+    def run_readonly_template(
+        self,
+        sql_template: str,
+        parameters: Mapping[str, Any],
+        *,
+        reason: str,
+        max_rows: int | None = None,
+    ) -> QueryResult:
+        """Execute a server-owned SELECT template with driver-bound named values.
+
+        Callers must never receive this as a free-form browser SQL surface. The
+        template is AST-validated before `:name` placeholders become DB-API
+        `%s` bindings.
+        """
+
+        if not reason.strip():
+            raise ValueError("run_readonly_template requires a reason.")
+        effective_max_rows = max_rows or self.config.max_rows
+        validation = validate_readonly_sql(
+            sql_template,
+            max_rows=effective_max_rows,
+            allow_select_star=self.config.allow_select_star,
+        )
+        if not validation.ok or not validation.normalized_sql:
+            raise ValueError("; ".join(validation.reasons))
+        bound_sql, values = bind_readonly_sql_template(validation.normalized_sql, parameters)
+        return self._fetch(bound_sql, values, max_rows=effective_max_rows)
+
     def _fetch(self, sql: str, params: tuple[Any, ...] | None, *, max_rows: int) -> QueryResult:
         if not self.config.enabled:
             raise RuntimeError("Business data query is disabled by configuration.")
@@ -247,6 +276,22 @@ def validate_readonly_sql(sql: str, *, max_rows: int = DEFAULT_MAX_ROWS, allow_s
     if not expression.args.get("limit"):
         normalized_sql = f"{normalized_sql} LIMIT {max_rows}"
     return QueryValidation(True, normalized_sql, [])
+
+
+def bind_readonly_sql_template(sql: str, parameters: Mapping[str, Any]) -> tuple[str, tuple[Any, ...]]:
+    """Convert validated `:name` placeholders to DB-API bindings without interpolation."""
+
+    names = _NAMED_PARAMETER_RE.findall(sql)
+    supplied = set(parameters)
+    required = set(names)
+    missing = sorted(required - supplied)
+    unexpected = sorted(supplied - required)
+    if missing:
+        raise ValueError(f"sql_template_parameters_missing: {', '.join(missing)}")
+    if unexpected:
+        raise ValueError(f"sql_template_parameters_unexpected: {', '.join(unexpected)}")
+    values = tuple(parameters[name] for name in names)
+    return _NAMED_PARAMETER_RE.sub("%s", sql), values
 
 
 def _is_with_select(expression: exp.Expression) -> bool:

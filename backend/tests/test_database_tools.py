@@ -76,6 +76,24 @@ class DatabaseToolsTest(unittest.TestCase):
         self.assertEqual(result.rows, [{"order_id": 1}])
         self.assertEqual(connection.cursor_instance.executed[0][0], "SELECT order_id FROM dm.sales LIMIT 1000")
 
+    def test_run_readonly_template_binds_named_values_after_sql_validation(self) -> None:
+        connection = FakeConnection([{"channel": "线上", "salesAmount": 100}])
+        tools = ReadonlyDatabaseTools(
+            DatabaseConfig(host="x", port=3306, user="u", password="p", enabled=True),
+            connection=connection,
+        )
+
+        result = tools.run_readonly_template(
+            "select vchannel_type as channel, sum(vvalues) as salesAmount from dm.sales where vmonth_code = :month group by vchannel_type",
+            {"month": "2026-08"},
+            reason="interactive report query",
+        )
+
+        self.assertEqual(result.rows, [{"channel": "线上", "salesAmount": 100}])
+        sql, params = connection.cursor_instance.executed[0]
+        self.assertIn("vmonth_code = %s", sql)
+        self.assertEqual(params, ("2026-08",))
+
     def test_disabled_business_query_blocks_fetch(self) -> None:
         tools = ReadonlyDatabaseTools(
             DatabaseConfig(host="x", port=3306, user="u", password="p", enabled=False),

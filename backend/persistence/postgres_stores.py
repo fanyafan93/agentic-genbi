@@ -10,6 +10,11 @@ from uuid import uuid4
 from backend.exploration.run_event_store import RunEventStore
 from backend.exploration.run_trace_store import RunCost, RunTrace, RunTraceStore, TokenUsage, build_run_trace
 from backend.harness.thread_store import ItemRecord, RunRecord, ThreadRecord, ThreadStore, TurnRecord
+from backend.analysis.interactive_report_store import (
+    InteractiveReportRecord,
+    InteractiveReportVersionConflict,
+    InteractiveReportVersionRecord,
+)
 from backend.resource_library.knowledge_store import KnowledgeRecord, KnowledgeStore
 
 
@@ -20,6 +25,9 @@ POSTGRES_THREAD_TABLE = "analysis_threads"
 POSTGRES_TURN_TABLE = "analysis_turns"
 POSTGRES_RUN_TABLE = "analysis_runs"
 POSTGRES_ITEM_TABLE = "analysis_items"
+POSTGRES_INTERACTIVE_REPORT_TABLE = "analysis_reports"
+POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE = "analysis_report_versions"
+POSTGRES_REPORT_QUERY_AUDIT_TABLE = "analysis_report_query_audits"
 
 
 def postgres_persistence_enabled() -> bool:
@@ -52,6 +60,20 @@ def build_postgres_thread_store() -> "PostgresThreadStore":
     if not database_url:
         raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres ThreadStore persistence.")
     return PostgresThreadStore(database_url)
+
+
+def build_postgres_interactive_report_store() -> "PostgresInteractiveReportStore":
+    database_url = get_postgres_database_url()
+    if not database_url:
+        raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres interactive report persistence.")
+    return PostgresInteractiveReportStore(database_url)
+
+
+def build_postgres_report_query_audit_store() -> "PostgresReportQueryAuditStore":
+    database_url = get_postgres_database_url()
+    if not database_url:
+        raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres query auditing.")
+    return PostgresReportQueryAuditStore(database_url)
 
 
 class PostgresRunTraceStore(RunTraceStore):
@@ -444,6 +466,234 @@ class PostgresThreadStore(ThreadStore):
             return item_count
 
 
+class PostgresInteractiveReportStore:
+    def __init__(self, database_url: str) -> None:
+        self.database_url = _normalize_postgres_url(database_url)
+        self.ensure_schema()
+
+    def ensure_schema(self) -> None:
+        with _connect(self.database_url) as conn:
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_INTERACTIVE_REPORT_TABLE} (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    subtitle TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    renderer TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    source_thread_id TEXT NOT NULL,
+                    source_turn_id TEXT NOT NULL,
+                    source_run_id TEXT NOT NULL,
+                    latest_version INTEGER NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} (
+                    report_id TEXT NOT NULL REFERENCES {POSTGRES_INTERACTIVE_REPORT_TABLE}(id) ON DELETE CASCADE,
+                    version INTEGER NOT NULL,
+                    source_thread_id TEXT NOT NULL,
+                    source_turn_id TEXT NOT NULL,
+                    source_run_id TEXT NOT NULL,
+                    document JSONB NOT NULL,
+                    filters JSONB NOT NULL,
+                    queries JSONB NOT NULL,
+                    chart_specs JSONB NOT NULL,
+                    grid_specs JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (report_id, version)
+                )
+                """
+            )
+            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS source_thread_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS source_turn_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS source_run_id TEXT")
+            conn.execute(
+                f"""
+                UPDATE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} AS version
+                SET source_thread_id = report.source_thread_id,
+                    source_turn_id = report.source_turn_id,
+                    source_run_id = report.source_run_id
+                FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} AS report
+                WHERE version.report_id = report.id
+                  AND (version.source_thread_id IS NULL OR version.source_turn_id IS NULL OR version.source_run_id IS NULL)
+                """
+            )
+            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ALTER COLUMN source_thread_id SET NOT NULL")
+            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ALTER COLUMN source_turn_id SET NOT NULL")
+            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ALTER COLUMN source_run_id SET NOT NULL")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_INTERACTIVE_REPORT_TABLE}_owner_updated ON {POSTGRES_INTERACTIVE_REPORT_TABLE} (owner_id, updated_at DESC)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_INTERACTIVE_REPORT_TABLE}_thread ON {POSTGRES_INTERACTIVE_REPORT_TABLE} (source_thread_id, updated_at DESC)")
+
+    def save_report(self, payload: dict[str, Any]) -> tuple[InteractiveReportRecord, InteractiveReportVersionRecord]:
+        from backend.analysis.interactive_report_store import _validate_payload
+
+        _validate_payload(payload)
+        report_id = str(payload["id"]).strip()
+        expected_version = payload.get("expectedVersion")
+        with _connect(self.database_url) as conn:
+            with conn.transaction():
+                existing = conn.execute(
+                    f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s FOR UPDATE",
+                    {"id": report_id},
+                ).fetchone()
+                current_version = int(existing["latest_version"]) if existing else 0
+                if (existing and expected_version != current_version) or (not existing and expected_version not in (None, 0)):
+                    raise InteractiveReportVersionConflict("interactive_report_version_conflict")
+
+                next_version = current_version + 1
+                report_params = _interactive_report_params(payload, latest_version=next_version)
+                if existing:
+                    conn.execute(
+                        f"""
+                        UPDATE {POSTGRES_INTERACTIVE_REPORT_TABLE}
+                        SET title = %(title)s, subtitle = %(subtitle)s, artifact_type = %(artifact_type)s,
+                            renderer = %(renderer)s, owner_id = %(owner_id)s, source_thread_id = %(source_thread_id)s,
+                            source_turn_id = %(source_turn_id)s, source_run_id = %(source_run_id)s,
+                            latest_version = %(latest_version)s, updated_at = now()
+                        WHERE id = %(id)s
+                        """,
+                        report_params,
+                    )
+                else:
+                    conn.execute(
+                        f"""
+                        INSERT INTO {POSTGRES_INTERACTIVE_REPORT_TABLE} (
+                            id, title, subtitle, artifact_type, renderer, owner_id, source_thread_id,
+                            source_turn_id, source_run_id, latest_version
+                        ) VALUES (
+                            %(id)s, %(title)s, %(subtitle)s, %(artifact_type)s, %(renderer)s, %(owner_id)s,
+                            %(source_thread_id)s, %(source_turn_id)s, %(source_run_id)s, %(latest_version)s
+                        )
+                        """,
+                        report_params,
+                    )
+                conn.execute(
+                    f"""
+                    INSERT INTO {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} (
+                        report_id, version, source_thread_id, source_turn_id, source_run_id,
+                        document, filters, queries, chart_specs, grid_specs
+                    ) VALUES (
+                        %(report_id)s, %(version)s, %(source_thread_id)s, %(source_turn_id)s, %(source_run_id)s,
+                        %(document)s, %(filters)s, %(queries)s, %(chart_specs)s, %(grid_specs)s
+                    )
+                    """,
+                    _interactive_report_version_params(payload, version=next_version),
+                )
+                report_row = conn.execute(f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s", {"id": report_id}).fetchone()
+                version_row = conn.execute(
+                    f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} WHERE report_id = %(report_id)s AND version = %(version)s",
+                    {"report_id": report_id, "version": next_version},
+                ).fetchone()
+        return _interactive_report_from_row(report_row), _interactive_report_version_from_row(version_row)
+
+    def list_reports(self, *, owner_id: str | None = None, limit: int = 50) -> list[InteractiveReportRecord]:
+        where = "WHERE owner_id = %(owner_id)s" if owner_id else ""
+        params: dict[str, Any] = {"limit": limit}
+        if owner_id:
+            params["owner_id"] = owner_id
+        with _connect(self.database_url) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} {where} ORDER BY updated_at DESC LIMIT %(limit)s",
+                params,
+            ).fetchall()
+        return [_interactive_report_from_row(row) for row in rows]
+
+    def get_report(self, report_id: str, *, version: int | None = None) -> tuple[InteractiveReportRecord, InteractiveReportVersionRecord] | None:
+        with _connect(self.database_url) as conn:
+            report_row = conn.execute(f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s", {"id": report_id}).fetchone()
+            if not report_row:
+                return None
+            target_version = version if version is not None else int(report_row["latest_version"])
+            version_row = conn.execute(
+                f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} WHERE report_id = %(report_id)s AND version = %(version)s",
+                {"report_id": report_id, "version": target_version},
+            ).fetchone()
+        return (_interactive_report_from_row(report_row), _interactive_report_version_from_row(version_row)) if version_row else None
+
+    def list_versions(self, report_id: str) -> list[InteractiveReportVersionRecord] | None:
+        with _connect(self.database_url) as conn:
+            exists = conn.execute(f"SELECT 1 FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s", {"id": report_id}).fetchone()
+            if not exists:
+                return None
+            rows = conn.execute(
+                f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} WHERE report_id = %(report_id)s ORDER BY version DESC",
+                {"report_id": report_id},
+            ).fetchall()
+        return [_interactive_report_version_from_row(row) for row in rows]
+
+
+class PostgresReportQueryAuditStore:
+    """Append-only audit metadata for server-owned report queries; result rows are never stored."""
+
+    def __init__(self, database_url: str) -> None:
+        self.database_url = _normalize_postgres_url(database_url)
+        self.ensure_schema()
+
+    def ensure_schema(self) -> None:
+        with _connect(self.database_url) as conn:
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_REPORT_QUERY_AUDIT_TABLE} (
+                    id TEXT PRIMARY KEY,
+                    query_ref TEXT NOT NULL,
+                    filters JSONB NOT NULL,
+                    row_count INTEGER NOT NULL,
+                    elapsed_ms INTEGER NOT NULL,
+                    truncated BOOLEAN NOT NULL,
+                    source TEXT NOT NULL,
+                    thread_id TEXT,
+                    run_id TEXT,
+                    user_id TEXT,
+                    data_egress_authorized BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_REPORT_QUERY_AUDIT_TABLE}_run "
+                f"ON {POSTGRES_REPORT_QUERY_AUDIT_TABLE} (run_id, created_at DESC)"
+            )
+
+    def record_query(
+        self,
+        *,
+        query_ref: str,
+        filters: dict[str, str],
+        response: Any,
+        context: dict[str, Any],
+    ) -> None:
+        with _connect(self.database_url) as conn:
+            conn.execute(
+                f"""
+                INSERT INTO {POSTGRES_REPORT_QUERY_AUDIT_TABLE} (
+                    id, query_ref, filters, row_count, elapsed_ms, truncated, source,
+                    thread_id, run_id, user_id, data_egress_authorized
+                ) VALUES (
+                    %(id)s, %(query_ref)s, %(filters)s, %(row_count)s, %(elapsed_ms)s, %(truncated)s, %(source)s,
+                    %(thread_id)s, %(run_id)s, %(user_id)s, %(data_egress_authorized)s
+                )
+                """,
+                {
+                    "id": f"query_audit_{uuid4().hex}",
+                    "query_ref": query_ref,
+                    "filters": _jsonb(filters),
+                    "row_count": response.rowCount,
+                    "elapsed_ms": response.elapsedMs,
+                    "truncated": response.truncated,
+                    "source": str(context.get("source") or "unspecified"),
+                    "thread_id": context.get("thread_id"),
+                    "run_id": context.get("run_id"),
+                    "user_id": context.get("user_id"),
+                    "data_egress_authorized": context.get("data_egress_authorized") is True,
+                },
+            )
+
+
 class PostgresKnowledgeStore(KnowledgeStore):
     def __init__(self, database_url: str) -> None:
         self.database_url = _normalize_postgres_url(database_url)
@@ -761,6 +1011,38 @@ def _item_params(record: ItemRecord) -> dict[str, Any]:
     }
 
 
+def _interactive_report_params(payload: dict[str, Any], *, latest_version: int) -> dict[str, Any]:
+    source = dict(payload["source"])
+    return {
+        "id": str(payload["id"]).strip(),
+        "title": str(payload["title"]).strip(),
+        "subtitle": str(payload["subtitle"]).strip(),
+        "artifact_type": str(payload["artifactType"]).strip(),
+        "renderer": str(payload["renderer"]).strip(),
+        "owner_id": str(payload["ownerId"]).strip(),
+        "source_thread_id": str(source["threadId"]).strip(),
+        "source_turn_id": str(source["turnId"]).strip(),
+        "source_run_id": str(source["runId"]).strip(),
+        "latest_version": latest_version,
+    }
+
+
+def _interactive_report_version_params(payload: dict[str, Any], *, version: int) -> dict[str, Any]:
+    source = dict(payload["source"])
+    return {
+        "report_id": str(payload["id"]).strip(),
+        "version": version,
+        "source_thread_id": str(source["threadId"]).strip(),
+        "source_turn_id": str(source["turnId"]).strip(),
+        "source_run_id": str(source["runId"]).strip(),
+        "document": _jsonb(payload["document"]),
+        "filters": _jsonb(payload["filters"]),
+        "queries": _jsonb(payload["queries"]),
+        "chart_specs": _jsonb(payload["chartSpecs"]),
+        "grid_specs": _jsonb(payload["gridSpecs"]),
+    }
+
+
 def _trace_from_row(row: dict[str, Any]) -> RunTrace:
     return RunTrace(
         run_id=str(row["run_id"]),
@@ -835,6 +1117,39 @@ def _item_record_from_row(row: dict[str, Any]) -> ItemRecord:
         eventType=str(row["event_type"]),
         payload=dict(row.get("payload") or {}),
         createdAt=_iso(row.get("created_at")) or "",
+    )
+
+
+def _interactive_report_from_row(row: dict[str, Any]) -> InteractiveReportRecord:
+    return InteractiveReportRecord(
+        id=str(row["id"]),
+        title=str(row["title"]),
+        subtitle=str(row["subtitle"]),
+        artifactType=str(row["artifact_type"]),
+        renderer=str(row["renderer"]),
+        ownerId=str(row["owner_id"]),
+        sourceThreadId=str(row["source_thread_id"]),
+        sourceTurnId=str(row["source_turn_id"]),
+        sourceRunId=str(row["source_run_id"]),
+        latestVersion=int(row["latest_version"]),
+        createdAt=_iso(row["created_at"]) or "",
+        updatedAt=_iso(row["updated_at"]) or "",
+    )
+
+
+def _interactive_report_version_from_row(row: dict[str, Any]) -> InteractiveReportVersionRecord:
+    return InteractiveReportVersionRecord(
+        reportId=str(row["report_id"]),
+        version=int(row["version"]),
+        sourceThreadId=str(row["source_thread_id"]),
+        sourceTurnId=str(row["source_turn_id"]),
+        sourceRunId=str(row["source_run_id"]),
+        document=dict(row["document"] or {}),
+        filters=list(row["filters"] or []),
+        queries=dict(row["queries"] or {}),
+        chartSpecs=dict(row["chart_specs"] or {}),
+        gridSpecs=dict(row["grid_specs"] or {}),
+        createdAt=_iso(row["created_at"]) or "",
     )
 
 
