@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterable
 
-from backend.analysis.agent_runner import AnalysisAgentRunResult
+from backend.analysis.runner_contracts import AnalysisAgentRunResult
 from backend.config import load_project_env
 from backend.exploration.agent_runner import ExplorationAgentRunnerEvent
 

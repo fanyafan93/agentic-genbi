@@ -55,7 +55,7 @@ EventAdapter：把 Codex items/events 转成现有 HTTP/SSE 事件。
 StateAdapter：把 Codex Thread / Turn / Item 映射到项目的 Postgres ThreadStore。
 ```
 
-模型供应商只是 adapter。OpenAI Agents SDK 不是目标架构；现有 runner 代码只算过渡实现。
+模型供应商只是 adapter。分析任务运行入口统一走 Codex / openai-codex；项目侧只保留业务语义、数据安全、资产治理和 Codex 适配代码。
 
 ## 系统对象口径
 
@@ -95,7 +95,7 @@ run.failed
 
 - 前端：Next.js + TypeScript，`modules/analysis` 已承载分析工作台、当前任务资产、独立分析资产库 mock 和业务语义库 mock。
 - 后端：FastAPI 已有分析 Run API / SSE、资源库工具、数据库只读工具、知识记录、分析资产最小存储；分析任务已写入新的 `ThreadStore`，保存 Thread/Turn/Run/Item，数据库配置可用时使用 Postgres 表，无数据库时回退 JSONL，并提供分析 Thread 查询接口；`GENBI_ANALYSIS_RUNTIME=codex` 可切到 openai-codex Python SDK runner。
-- 过渡 runner：`backend/analysis/agent_runner.py` 和 `backend/exploration/agent_runner.py` 仍存在，用于当前 LLM 调用；后续应逐步被 Codex SDK runner 和 Codex 工具适配替代。
+- 编排：`backend/harness/codex_sdk_runner.py` 是当前分析任务唯一真实 runner；探索侧只保留服务契约和工具函数，后续通过 Codex tools / MCP / Skills 接入。
 
 ## Codex 运行配置
 

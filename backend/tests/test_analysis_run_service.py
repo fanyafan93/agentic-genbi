@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.analysis.agent_runner import AnalysisAgentRunResult
+from backend.analysis.runner_contracts import AnalysisAgentRunResult
 from backend.analysis.run_service import AnalysisRunRequest, AnalysisRunService, classify_analysis_problem
 from backend.exploration.run_event_store import RunEventStore
 from backend.exploration.run_service import ExplorationRunEvent

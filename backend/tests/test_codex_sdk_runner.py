@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.analysis.agent_runner import AnalysisAgentRunResult
+from backend.analysis.runner_contracts import AnalysisAgentRunResult
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRunner
 
 

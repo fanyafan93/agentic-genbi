@@ -2,7 +2,11 @@
 
 import { useState, useMemo, useEffect, type PointerEvent as ReactPointerEvent } from "react";
 import { UserChip } from "@/modules/auth/components/UserChip";
-import { BusinessSemanticLibrary } from "@/modules/business-semantics/components/BusinessSemanticLibrary";
+import {
+  BusinessSemanticLibrary,
+  type BusinessSemanticSection,
+  type StructuredKnowledgeSource,
+} from "@/modules/business-semantics/components/BusinessSemanticLibrary";
 import { useFlow } from "../hooks/use-flow";
 import { AnalysisTaskThread } from "./AnalysisTaskThread";
 import { AnalysisAssetLibrary } from "./AnalysisAssetLibrary";
@@ -28,6 +32,16 @@ const navItems = [
 
 const adminNavItem = { id: "system", label: "系统", icon: "system" } as const;
 type ActiveTool = (typeof navItems)[number]["id"] | typeof adminNavItem["id"];
+const structuredKnowledgeNav: Array<{
+  id: StructuredKnowledgeSource;
+  label: string;
+  description: string;
+}> = [
+  { id: "finereport", label: "FineReport", description: "报表解析" },
+  { id: "hop", label: "Apache Hop", description: "ETL 血缘解析" },
+  { id: "database", label: "数据库", description: "MySQL / Doris 元数据" },
+  { id: "kingdee", label: "金蝶", description: "业务数据字典" },
+];
 const analysisTaskGroups = [
   {
     label: "今天",
@@ -75,6 +89,8 @@ export function AnalysisWorkspace() {
   const [mobilePane, setMobilePane] = useState<"analysisTask" | "assetLibrary">("analysisTask");
   const [explorerCollapsed, setExplorerCollapsed] = useState(false);
   const [currentAnalysisTaskId, setCurrentAnalysisTaskId] = useState<string | null>("channel");
+  const [businessSemanticSection, setBusinessSemanticSection] = useState<BusinessSemanticSection>("structured");
+  const [structuredKnowledgeSource, setStructuredKnowledgeSource] = useState<StructuredKnowledgeSource>("finereport");
   const analysisTaskScriptDef = selectedAnalysisTask ? findAnalysisTaskByTitle(selectedAnalysisTask) : undefined;
   const initialFlowMessages = useMemo(() => {
     if (selectedAnalysisTask === null) return [];
@@ -90,6 +106,9 @@ export function AnalysisWorkspace() {
       return next;
     });
   }, [flow.artifacts]);
+  useEffect(() => {
+    if (activeTool === "business-semantics") setCollapsed(false);
+  }, [activeTool]);
   const isAdmin = true;
   const isNewAnalysisTask = selectedAnalysisTask === null;
   const analysisTaskScript = analysisTaskScriptDef;
@@ -205,17 +224,22 @@ export function AnalysisWorkspace() {
         <UserChip />
       </header>
 
-      <div className={`shell ${collapsed ? "collapsed" : ""}`}>
+      <div className={`shell ${collapsed ? "collapsed" : ""}`} data-tool={activeTool}>
         <nav className="icon-toolbar" aria-label="主导航">
           {navItems.map((item) => (
             <button
               key={item.id}
-              className={`icon-btn ${!collapsed && activeTool === item.id ? "active" : ""}`}
+              className={`icon-btn ${activeTool === item.id ? "active" : ""}`}
               type="button"
               title={item.label}
               aria-label={item.label}
               aria-current={activeTool === item.id ? "page" : undefined}
               onClick={() => {
+                if (item.id === "business-semantics") {
+                  setActiveTool(item.id);
+                  setCollapsed(false);
+                  return;
+                }
                 if (activeTool === item.id && !collapsed) {
                   setCollapsed(true);
                   return;
@@ -229,7 +253,7 @@ export function AnalysisWorkspace() {
           ))}
           {isAdmin && (
             <button
-              className={`icon-btn admin-nav ${!collapsed && activeTool === adminNavItem.id ? "active" : ""}`}
+              className={`icon-btn admin-nav ${activeTool === adminNavItem.id ? "active" : ""}`}
               type="button"
               title={adminNavItem.label}
               aria-label={adminNavItem.label}
@@ -287,11 +311,42 @@ export function AnalysisWorkspace() {
           ) : activeTool === "business-semantics" ? (
             <div className="workbench-panel">
               <header className="panel-header"><span className="panel-kicker">BUSINESS SEMANTICS</span><h2>业务语义库</h2></header>
-              <div className="panel-brief-list">
-                <span>语义模型</span>
-                <span>业务知识</span>
-                <span>语义查证记录</span>
-              </div>
+              <nav className="panel-brief-list panel-nav-list" aria-label="业务语义库导航">
+                <button
+                  type="button"
+                  className={businessSemanticSection === "structured" ? "active" : ""}
+                  aria-current={businessSemanticSection === "structured" ? "page" : undefined}
+                  onClick={() => setBusinessSemanticSection("structured")}
+                >
+                  <strong>结构化知识</strong>
+                  <small>系统里实际存在什么</small>
+                </button>
+                {businessSemanticSection === "structured" && (
+                  <div className="panel-subnav-list" aria-label="结构化知识来源">
+                    {structuredKnowledgeNav.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className={structuredKnowledgeSource === item.id ? "active" : ""}
+                        aria-current={structuredKnowledgeSource === item.id ? "page" : undefined}
+                        onClick={() => setStructuredKnowledgeSource(item.id)}
+                      >
+                        <strong>{item.label}</strong>
+                        <small>{item.description}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  className={businessSemanticSection === "semantic" ? "active" : ""}
+                  aria-current={businessSemanticSection === "semantic" ? "page" : undefined}
+                  onClick={() => setBusinessSemanticSection("semantic")}
+                >
+                  <strong>语义</strong>
+                  <small>业务解释和使用规则</small>
+                </button>
+              </nav>
             </div>
           ) : (
             <div className="workbench-panel">
@@ -313,7 +368,7 @@ export function AnalysisWorkspace() {
           {activeTool === "analysis-assets" ? (
             <AnalysisAssetLibraryPage onContinueFromAsset={(asset) => { setActiveTool("analysis-workspace"); handleContinueFromAsset(asset); }} />
           ) : activeTool === "business-semantics" ? (
-            <BusinessSemanticLibrary />
+             <BusinessSemanticLibrary section={businessSemanticSection} structuredKnowledgeSource={structuredKnowledgeSource} />
           ) : activeTool === "workspace" ? (
             <section className="overview-workbench" aria-label="工作台">
               <header>

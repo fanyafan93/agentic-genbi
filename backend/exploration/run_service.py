@@ -127,7 +127,7 @@ class ExplorationRunService:
             yield self._event(
                 actual_run_id,
                 "agent.runner.started",
-                {"runtime": "openai-agents-sdk", "max_resource_results": self.max_resource_results},
+                {"runtime": "agent-runner", "max_resource_results": self.max_resource_results},
             )
             try:
                 result = None
@@ -142,21 +142,21 @@ class ExplorationRunService:
                 yield self._event(
                     actual_run_id,
                     "agent.runner.failed",
-                    {"runtime": "openai-agents-sdk", "error": str(exc)},
+                    {"runtime": "agent-runner", "error": str(exc)},
                 )
                 yield self._event(actual_run_id, "run.failed", {"error": "agent_runner_failed", "detail": str(exc)})
                 return
             yield self._event(
                 actual_run_id,
                 "agent.runner.completed",
-                {"runtime": "openai-agents-sdk", "raw_result_type": result.raw_result_type},
+                {"runtime": "agent-runner", "raw_result_type": result.raw_result_type},
             )
             yield self._event(
                 actual_run_id,
                 "agent.message.created",
                 {
                     "role": "assistant",
-                    "title": "探索结论",
+                    "title": "Exploration result",
                     "content": result.final_output,
                 },
             )
@@ -166,7 +166,7 @@ class ExplorationRunService:
                 {
                     "title": title,
                     "status": "completed",
-                    "next_action": "已由真实 Agent Runtime 完成探索；如结论需要固化，可继续沉淀为知识。",
+                    "next_action": "Agent Runtime completed exploration; continue to save knowledge if needed.",
                 },
             )
             return
@@ -174,7 +174,7 @@ class ExplorationRunService:
         yield self._event(
             actual_run_id,
             "agent.runner.failed",
-            {"runtime": "openai-agents-sdk", "error": "agent_runner_not_configured"},
+            {"runtime": "agent-runner", "error": "agent_runner_not_configured"},
         )
         yield self._event(
             actual_run_id,
@@ -206,7 +206,7 @@ class ExplorationRunService:
             yield self._event(
                 actual_run_id,
                 "agent.runner.started",
-                {"runtime": "openai-agents-sdk", "max_resource_results": self.max_resource_results},
+                {"runtime": "agent-runner", "max_resource_results": self.max_resource_results},
             )
             try:
                 result = None
@@ -221,21 +221,21 @@ class ExplorationRunService:
                 yield self._event(
                     actual_run_id,
                     "agent.runner.failed",
-                    {"runtime": "openai-agents-sdk", "error": str(exc)},
+                    {"runtime": "agent-runner", "error": str(exc)},
                 )
                 yield self._event(actual_run_id, "run.failed", {"error": "agent_runner_failed", "detail": str(exc)})
                 return
             yield self._event(
                 actual_run_id,
                 "agent.runner.completed",
-                {"runtime": "openai-agents-sdk", "raw_result_type": result.raw_result_type},
+                {"runtime": "agent-runner", "raw_result_type": result.raw_result_type},
             )
             yield self._event(
                 actual_run_id,
                 "agent.message.created",
                 {
                     "role": "assistant",
-                    "title": "探索结论",
+                    "title": "Exploration result",
                     "content": result.final_output,
                 },
             )
@@ -245,7 +245,7 @@ class ExplorationRunService:
                 {
                     "title": title,
                     "status": "completed",
-                    "next_action": "已由真实 Agent Runtime 完成探索；如结论需要固化，可继续沉淀为知识。",
+                    "next_action": "Agent Runtime completed exploration; continue to save knowledge if needed.",
                 },
             )
             return
@@ -253,7 +253,7 @@ class ExplorationRunService:
         yield self._event(
             actual_run_id,
             "agent.runner.failed",
-            {"runtime": "openai-agents-sdk", "error": "agent_runner_not_configured"},
+            {"runtime": "agent-runner", "error": "agent_runner_not_configured"},
         )
         yield self._event(
             actual_run_id,
@@ -332,30 +332,28 @@ class ExplorationRunService:
 
 
 def generate_exploration_title(question: str) -> str:
-    text = re.sub(r"\s+", " ", question).strip(" \t\r\n。！？!?")
+    text = re.sub(r"\s+", " ", question).strip(" \t\r\n?？。.!！")
     if not text:
-        return "未命名探索"
-    text = re.sub(r"^(请|帮我|麻烦|先|看看|查一下|问一下)[，,：:\s]*", "", text)
-    text = re.sub(r"(现在应该怎么计算|应该怎么计算|怎么计算|如何计算|先看看公司里有没有已有实现)", "", text)
-    text = text.strip(" ，,。！？!?")
+        return "知识探索"
+    text = re.sub(r"^(请|帮我|帮忙|麻烦你|我想|我要)\s*", "", text)
+    text = re.split(r"(现在|应该|怎么|如何|先看看|有没有)", text, maxsplit=1)[0].strip()
+    text = text.strip(" ?？。.!！:")
     if len(text) > 24:
         text = text[:24].rstrip()
-    return text or "未命名探索"
+    return text or "知识探索"
+
 
 
 def build_conversation_turn_prompt(question: str, history_events: list[ExplorationRunEvent]) -> str:
     history = _conversation_history_lines(history_events)
     if not history:
         return question
-    return "\n\n".join(
-        [
-            "这是同一个知识探索会话中的继续追问或补充。请基于已有上下文继续，不要重新自我介绍，不要当成全新的探索。",
-            "已有对话：",
-            "\n".join(history[-12:]),
-            "本轮用户追问：",
-            question,
-        ]
-    )
+    return "\n\n".join([
+        "已有对话：",
+        "\n".join(history[-12:]),
+        "本轮用户追问：",
+        question,
+    ])
 
 
 def _conversation_history_lines(events: list[ExplorationRunEvent]) -> list[str]:
@@ -363,20 +361,21 @@ def _conversation_history_lines(events: list[ExplorationRunEvent]) -> list[str]:
     for event in events:
         if event.type == "run.created":
             question = str(event.payload.get("question") or "").strip()
-            if question and not question.startswith("这是同一个知识探索会话中的继续追问或补充"):
+            if question:
                 lines.append(f"用户：{_truncate_context_text(question)}")
         elif event.type == "agent.message.created":
             content = str(event.payload.get("content") or "").strip()
-            if not content:
-                continue
-            title = str(event.payload.get("title") or "").strip()
-            prefix = f"Agent（{title}）" if title else "Agent"
-            lines.append(f"{prefix}：{_truncate_context_text(content)}")
+            if content:
+                title = str(event.payload.get("title") or "").strip()
+                prefix = f"Agent（{title}）" if title else "Agent"
+                lines.append(f"{prefix}：{_truncate_context_text(content)}")
         elif event.type == "agent.question.requested":
             content = str(event.payload.get("question") or "").strip()
             if content:
-                lines.append(f"Agent（追问用户）：{_truncate_context_text(content)}")
+                lines.append(f"Agent 追问：{_truncate_context_text(content)}")
     return lines
+
+
 
 
 def _truncate_context_text(text: str, limit: int = 1200) -> str:
@@ -395,6 +394,8 @@ def _sanitize_event_payload(event_type: str, payload: dict[str, Any]) -> dict[st
     return {**payload, "content": content.replace("数据探索 Agent", "知识探索 Agent")}
 
 
+
+
 def extract_search_keywords(question: str) -> list[str]:
     normalized = question.strip()
     tokens = re.findall(r"[\w\u4e00-\u9fff]+", normalized)
@@ -403,15 +404,18 @@ def extract_search_keywords(question: str) -> list[str]:
         candidates.append(normalized)
     candidates.extend(_extract_metric_phrases(normalized))
     candidates.extend(token for token in tokens if len(token) >= 2)
-    return _dedupe(candidates)[:3] or ["探索"]
+    return _dedupe(candidates)[:3] or ["analysis"]
 
 
 def _extract_metric_phrases(text: str) -> list[str]:
     phrases = []
-    for suffix in ("复购率", "周转率", "销售额", "销售占比", "同比增长", "GMV", "ROI"):
-        if suffix in text:
+    upper_text = text.upper()
+    for suffix in ("复购率", "转化率", "占比", "GMV", "ROI", "SQL", "KPI"):
+        if suffix in text or suffix in upper_text:
             phrases.append(suffix)
     return phrases
+
+
 
 
 def _dedupe(values: list[str]) -> list[str]:

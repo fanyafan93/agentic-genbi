@@ -71,5 +71,5 @@ Agentic GenBI 是一个围绕业务问题展开的 Agentic BI 工作台。
 - 不把浏览器端隐藏按钮、筛选或提示词当安全边界。
 - 不在前端 mock 中伪装真实权限、真实共享或真实审批。
 - 不优先建设 Agent 中心；`SKILL.md` 先作为分析资产治理。
-- 不把 OpenAI Agents SDK 作为目标编排基座。
+- 编排基座统一收敛到 Codex / openai-codex，不再保留其他编排运行入口。
 - 不自研 Codex 已经提供的通用 Agent 工程底座；本项目只做业务语义、数据安全、分析资产治理、前端体验和 Codex 适配。

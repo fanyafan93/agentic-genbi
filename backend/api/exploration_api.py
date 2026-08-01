@@ -7,9 +7,8 @@ from uuid import uuid4
 
 from backend.config import check_runtime_env, load_project_env
 from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
-from backend.analysis.agent_runner import OpenAIAnalysisAgentRunner
 from backend.analysis.run_service import AnalysisRunRequest, AnalysisRunService
-from backend.exploration.agent_runner import LLMAgentRunner
+from backend.business_semantics.finereport_reports import FineReportReportRepository
 from backend.exploration.run_event_store import RunEventStore
 from backend.exploration.run_service import ExplorationRunEvent, ExplorationRunRequest, ExplorationRunService
 from backend.exploration.run_trace_store import RunTraceStore
@@ -35,6 +34,7 @@ def create_app(
     analysis_service: AnalysisRunService | None = None,
     analysis_asset_store: AnalysisAssetStore | None = None,
     thread_store: ThreadStore | None = None,
+    finereport_repository: FineReportReportRepository | None = None,
 ) -> Any:
     load_project_env()
     try:
@@ -173,6 +173,7 @@ def create_app(
     configured_thread_store = thread_store or getattr(configured_analysis_service, "thread_store", None) or ThreadStore()
     if getattr(configured_analysis_service, "thread_store", None) is None:
         configured_analysis_service.thread_store = configured_thread_store
+    configured_finereport_repository = finereport_repository or FineReportReportRepository()
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -181,6 +182,17 @@ def create_app(
     @app.get("/api/runtime/status")
     def runtime_status() -> dict[str, Any]:
         return check_runtime_env()
+
+    @app.get("/api/business-semantics/finereport/reports")
+    def list_finereport_reports() -> dict[str, Any]:
+        return {"reports": configured_finereport_repository.list_reports()}
+
+    @app.get("/api/business-semantics/finereport/reports/{report_id}")
+    def get_finereport_report(report_id: str) -> dict[str, Any]:
+        report = configured_finereport_repository.get_report(report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="finereport_report_not_found")
+        return report
 
     @app.post("/api/analysis/tasks/runs")
     def create_analysis_task_run(body: AnalysisRunBody = Body(...)) -> dict[str, Any]:
@@ -752,11 +764,11 @@ def build_default_service() -> ExplorationRunService:
 def build_default_analysis_service(run_service: ExplorationRunService) -> AnalysisRunService:
     load_project_env()
     analysis_runner = None
-    analysis_runtime = os.getenv("GENBI_ANALYSIS_RUNTIME", "local").lower()
+    analysis_runtime = os.getenv("GENBI_ANALYSIS_RUNTIME", "codex").lower()
     if analysis_runtime == "codex":
         analysis_runner = CodexSdkAnalysisRunner.from_env()
-    elif analysis_runtime in {"openai", "llm"}:
-        analysis_runner = OpenAIAnalysisAgentRunner.from_env()
+    elif analysis_runtime not in {"", "local", "mock"}:
+        raise RuntimeError("GENBI_ANALYSIS_RUNTIME only supports codex, local, or mock.")
     return AnalysisRunService(
         agent_runner=analysis_runner,
         thread_store=_build_default_thread_store(),
@@ -770,17 +782,10 @@ def build_default_service_with_stores() -> tuple[ExplorationRunService, Knowledg
     if Path(DEFAULT_INDEX_PATH).exists() and Path(DEFAULT_SUMMARY_PATH).exists():
         library = ResourceLibrary(index_path=DEFAULT_INDEX_PATH, summary_path=DEFAULT_SUMMARY_PATH)
     db_tools = ReadonlyDatabaseTools(DatabaseConfig.from_env())
-    agent_runner = None
-    if os.getenv("GENBI_EXPLORATION_RUNTIME", "local").lower() in {"openai", "llm"}:
-        agent_runner = LLMAgentRunner.from_env(
-            resource_library=library,
-            db_tools=db_tools,
-            knowledge_store=knowledge_store,
-        )
     service = ExplorationRunService(
         resource_library=library,
         db_tools=db_tools,
-        agent_runner=agent_runner,
+        agent_runner=None,
         trace_store=trace_store,
         event_store=event_store,
     )

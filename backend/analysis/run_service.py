@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterable, Literal
 from uuid import uuid4
 
-from backend.analysis.agent_runner import AnalysisAgentRunResult, AnalysisAgentRunner, build_analysis_runner_prompt
+from backend.analysis.runner_contracts import AnalysisAgentRunResult, AnalysisAgentRunner, build_analysis_runner_prompt
 from backend.exploration.run_event_store import RunEventStore
 from backend.exploration.run_service import ExplorationRunEvent
 from backend.exploration.run_trace_store import RunTraceStore

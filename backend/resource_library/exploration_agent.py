@@ -9,9 +9,6 @@ from .knowledge_store import KnowledgeStore
 from .tools import ResourceLibrary
 
 
-DATA_EXPLORATION_AGENT_NAME = "Knowledge Exploration Agent"
-DEFAULT_MODEL = "gpt-4.1-mini"
-
 DATA_EXPLORATION_AGENT_INSTRUCTIONS = """
 你的固定身份名称是：Agentic GenBI 知识探索 Agent。
 服务对象是 BI 分析师和运营人员。
@@ -44,32 +41,6 @@ DATA_EXPLORATION_AGENT_INSTRUCTIONS = """
 - run_readonly_query 只能运行单条只读 SQL，并由服务端校验、限行和审计。
 - 任何敏感信息、密码、连接串或个人数据都不能写入知识沉淀。
 """.strip()
-
-
-class AgentsSdkUnavailable(RuntimeError):
-    pass
-
-
-def build_data_exploration_agent(
-    *,
-    resource_library: ResourceLibrary | None = None,
-    db_tools: ReadonlyDatabaseTools | None = None,
-    knowledge_store: KnowledgeStore | None = None,
-    model: str = DEFAULT_MODEL,
-) -> Any:
-    Agent, function_tool = _load_agents_sdk()
-    tool_functions = create_data_exploration_tool_functions(
-        resource_library=resource_library,
-        db_tools=db_tools,
-        knowledge_store=knowledge_store,
-    )
-    tools = [function_tool(func) for func in tool_functions]
-    return Agent(
-        name=DATA_EXPLORATION_AGENT_NAME,
-        instructions=DATA_EXPLORATION_AGENT_INSTRUCTIONS,
-        model=model,
-        tools=tools,
-    )
 
 
 def create_data_exploration_tool_functions(
@@ -153,14 +124,6 @@ def create_data_exploration_tool_functions(
         run_readonly_query,
         save_verified_knowledge,
     ]
-
-
-def _load_agents_sdk() -> tuple[Any, Any]:
-    try:
-        from agents import Agent, function_tool
-    except ImportError as exc:
-        raise AgentsSdkUnavailable("Install the OpenAI Agents SDK package `openai-agents` to build the agent.") from exc
-    return Agent, function_tool
 
 
 def _compact_dataclass(value: Any) -> dict[str, Any]:
