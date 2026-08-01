@@ -128,21 +128,48 @@ describe("analysis task product language", () => {
     expect(sharedAssetLibrarySource).toContain("回到分析工作台继续");
   });
 
-  test("adds a business semantic library for semantic models and confirmed business knowledge", () => {
+  test("adds a business semantic library for structured knowledge and semantics", () => {
     expect(workspaceSource).toContain("BusinessSemanticLibrary");
-    expect(businessSemanticLibrarySource).toContain("业务语义库");
-    expect(businessSemanticLibrarySource).toContain("语义模型");
-    expect(businessSemanticLibrarySource).toContain("业务知识");
-    expect(businessSemanticLibrarySource).toContain("FineReport");
-    expect(businessSemanticLibrarySource).toContain("MySQL / Doris");
-    expect(businessSemanticLibrarySource).toContain("ETL");
-    expect(businessSemanticLibrarySource).toContain("金蝶");
-    expect(businessSemanticLibrarySource).toContain("SQL 示例");
-    expect(businessSemanticLibrarySource).toContain("指标 / 维度");
-    expect(businessSemanticLibrarySource).toContain("确认过的口径");
-    expect(businessSemanticLibrarySource).toContain("字段来源");
-    expect(businessSemanticLibrarySource).toContain("分析经验");
-    expect(businessSemanticLibrarySource).toContain("语义查证记录");
+    expect(workspaceSource).toContain("结构化知识");
+    expect(workspaceSource).toContain("系统里实际存在什么");
+    expect(workspaceSource).toContain("语义");
+    expect(workspaceSource).toContain("业务解释和使用规则");
+    expect(workspaceSource).toContain("FineReport");
+    expect(workspaceSource).toContain("报表解析");
+    expect(workspaceSource).toContain("Apache Hop");
+    expect(workspaceSource).toContain("ETL 血缘解析");
+    expect(workspaceSource).toContain("MySQL / Doris 元数据");
+    expect(workspaceSource).toContain("金蝶");
+    expect(workspaceSource).toContain("业务数据字典");
+    expect(businessSemanticLibrarySource).toContain("business-semantic-page-empty");
+    expect(businessSemanticLibrarySource).not.toContain("structured-knowledge-card");
+    expect(businessSemanticLibrarySource).not.toContain("semantic-flow-strip");
+  });
+
+  test("keeps the desktop page structure at every viewport width", () => {
+    expect(globalStylesSource).toContain("--app-canvas-min-width: 1180px");
+    expect(globalStylesSource).toContain(
+      "html { min-width: var(--app-canvas-min-width); overflow-x: auto; overflow-y: hidden; }",
+    );
+    expect(globalStylesSource).toContain(
+      "body { min-width: var(--app-canvas-min-width); overflow: hidden; }",
+    );
+    expect(globalStylesSource).toContain(
+      ".topbar, .shell { min-width: var(--app-canvas-min-width); }",
+    );
+    expect(globalStylesSource).not.toContain("@media (max-width: 900px)");
+    expect(globalStylesSource).not.toContain("@media (max-width: 620px)");
+    expect(globalStylesSource).not.toContain("@media (max-width: 520px)");
+  });
+
+  test("uses a fixed report catalog and scrollable FineReport grid", () => {
+    expect(globalStylesSource).toContain(
+      ".finereport-browser-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr);",
+    );
+    expect(globalStylesSource).toContain(
+      ".finereport-grid-scroll { min-width: 0; min-height: 0; overflow: auto;",
+    );
+    expect(globalStylesSource).toContain(".finereport-grid { position: relative; display: grid;");
   });
 
   test("keeps the lower-level interaction event generic for shared conversations", () => {

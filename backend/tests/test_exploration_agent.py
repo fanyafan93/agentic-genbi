@@ -11,8 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from resource_library.database_tools import DatabaseConfig, ReadonlyDatabaseTools
 from resource_library.exploration_agent import (
     DATA_EXPLORATION_AGENT_INSTRUCTIONS,
-    AgentsSdkUnavailable,
-    build_data_exploration_agent,
     create_data_exploration_tool_functions,
 )
 from resource_library.indexer import ResourceIndexer
@@ -100,28 +98,6 @@ class ExplorationAgentTest(unittest.TestCase):
             )
             self.assertTrue(knowledge["id"].startswith("kn_"))
             self.assertTrue(knowledge_path.exists())
-
-    def test_build_agent_has_clear_sdk_error_when_dependency_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            index_path = root / "resources.json"
-            summary_path = root / "summaries.json"
-            (root / "metric.sql").write_text("select metric_id from dm.metrics;", encoding="utf-8")
-            ResourceIndexer(root).write(index_path)
-            inspect_index(index_path, summary_path)
-
-            try:
-                build_data_exploration_agent(
-                    resource_library=ResourceLibrary(index_path=index_path, summary_path=summary_path),
-                    db_tools=ReadonlyDatabaseTools(
-                        DatabaseConfig(host="x", port=3306, user="u", password="p"),
-                        connection=FakeConnection([]),
-                    ),
-                    knowledge_store=KnowledgeStore(root / "unused.jsonl"),
-                )
-            except AgentsSdkUnavailable as exc:
-                self.assertIn("openai-agents", str(exc))
-
 
 if __name__ == "__main__":
     unittest.main()
