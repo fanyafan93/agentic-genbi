@@ -19,8 +19,8 @@ SENSITIVE_SEMANTIC_TOKEN_PATTERN = re.compile(
 
 class FineReportReportRepository:
     def __init__(self, root: Path | None = None) -> None:
-        resource_root = Path(os.getenv("GENBI_RESOURCE_LIBRARY_ROOT", "资源库"))
-        self.root = root or resource_root / "finereport" / "解析"
+        configured_root = Path(os.getenv("GENBI_FINEREPORT_ROOT", "资源库/finereport/解析"))
+        self.root = root or configured_root
 
     def list_reports(self) -> list[dict[str, Any]]:
         return [self._load_report(name, source)["report"] for name, source in self._report_sources().items()]

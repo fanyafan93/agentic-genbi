@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import os
@@ -11,10 +11,10 @@ from backend.config import load_project_env
 
 
 CODEX_ANALYSIS_INSTRUCTIONS = """
-浣犳槸 Agentic GenBI 鐨勫垎鏋愪换鍔?Agent銆?
-鍥寸粫鐢ㄦ埛鎻愬嚭鐨勪笟鍔￠棶棰樻帹杩涘垎鏋愶細蹇呰鏃惰鏄庡簲妫€绱笟鍔¤涔夊簱銆佺‘璁ゅ彛寰勩€佽皟鐢ㄥ彈鎺ф暟鎹伐鍏凤紝骞朵骇鍑哄彲澶嶇敤鍒嗘瀽璧勪骇銆?
-褰撳墠鏈€灏忔帴鍏ラ樁娈佃繕娌℃湁寮€鏀剧湡瀹炰笟鍔″伐鍏凤紱涓嶈兘缂栭€犺〃銆佸瓧娈点€佹寚鏍囥€佹暟鎹粨鏋滄垨鏉冮檺銆?
-杈撳嚭涓枃锛屾槑纭笅涓€姝ュ缓璁敓鎴愭垨鏇存柊鍝簺鍒嗘瀽璧勪骇銆?
+你是 Agentic GenBI 的分析任务 Agent。
+围绕用户提出的业务问题推进分析：必要时说明应检索业务语义库、确认口径、调用受控数据工具，并产出可复用分析资产。
+当前最小接入阶段还没有开放真实业务工具；不能编造表、字段、指标、数据结果或权限。
+输出中文，明确下一步建议生成或更新哪些分析资产。
 """.strip()
 
 
@@ -107,7 +107,6 @@ class CodexSdkAnalysisRunner:
         runner_context = _normalize_context(context, default_cwd=self.cwd)
         final_text_parts: list[str] = []
         codex_thread_id: str | None = runner_context.codex_thread_id
-        completed_status: str | None = None
         completed_items: list[Any] = []
         completed_payload: Any | None = None
 
@@ -129,17 +128,18 @@ class CodexSdkAnalysisRunner:
                     if event:
                         if event.type == "item/agentMessage/delta":
                             final_text_parts.append(str(event.payload.get("delta") or ""))
-                        if event.type == "turn/completed" and event.payload.get("status"):
-                            completed_status = str(event.payload["status"])
                         yield event
         except ImportError as exc:
             raise RuntimeError("Install the `openai-codex` Python package to use GENBI_ANALYSIS_RUNTIME=codex.") from exc
 
         turn_status = _turn_status(completed_payload)
         if turn_status == "failed":
-            error = getattr(getattr(completed_payload, "turn", None), "error", None)
-            detail = str(getattr(error, "message", "") or "openai-codex turn failed")
-            raise RuntimeError(detail)
+            yield AnalysisAgentResult(
+                final_output="",
+                raw_result_type=type(completed_payload).__name__ if completed_payload is not None else "CodexStream",
+                events=[],
+            )
+            return
 
         final_response = _collect_agent_text(completed_items)
         if not final_response:
@@ -150,16 +150,6 @@ class CodexSdkAnalysisRunner:
             raw_result_type=type(completed_payload).__name__ if completed_payload is not None else "CodexStream",
             events=[],
         )
-        if completed_status:
-            yield AnalysisAgentRunnerEvent(
-                type="turn/completed",
-                payload={
-                    "runtime": "openai-codex",
-                    "eventSource": "codex",
-                    "codex_thread_id": codex_thread_id,
-                    "status": completed_status,
-                },
-            )
 
     def _make_async_codex(self) -> Any:
         if self._async_codex_factory:
@@ -296,16 +286,21 @@ class CodexSdkAnalysisRunner:
                 },
             )
         if method == "turn/completed":
+            status = _turn_status(payload) or ""
+            error = _turn_error(payload)
+            completed_payload = {
+                "runtime": "openai-codex",
+                "eventSource": "codex",
+                "codex_method": method,
+                "codex_thread_id": codex_thread_id,
+                "codex_turn_id": _payload_turn_id(payload),
+                "status": status,
+            }
+            if error:
+                completed_payload["error"] = error
             return AnalysisAgentRunnerEvent(
                 type="turn/completed",
-                payload={
-                    "runtime": "openai-codex",
-                    "eventSource": "codex",
-                    "codex_method": method,
-                    "codex_thread_id": codex_thread_id,
-                    "codex_turn_id": _payload_turn_id(payload),
-                    "status": _turn_status(payload) or "",
-                },
+                payload=completed_payload,
             )
         return None
 
@@ -390,6 +385,13 @@ def _turn_status(completed_payload: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _turn_error(completed_payload: Any) -> str | None:
+    turn = getattr(completed_payload, "turn", None)
+    error = getattr(turn, "error", None)
+    message = getattr(error, "message", None) or error
+    return _string_or_none(message)
 
 
 def _codex_provider_from_env() -> str:

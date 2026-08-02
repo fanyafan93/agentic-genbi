@@ -5,9 +5,7 @@ import { Puck, Render, type Config, type Data } from "@puckeditor/core";
 import { AgGridReact } from "ag-grid-react";
 import { AllCommunityModule, ModuleRegistry, themeQuartz, type ColDef } from "ag-grid-community";
 import { EChartRenderer } from "@/shared/charts/EChartRenderer";
-import { channelSalesReportQueryRef, createDefaultReportFilters, mockInteractiveReport, queryMockDataset } from "../mocks/interactive-report";
-import { fetchInteractiveReportQuery, shouldUseBackendReportQueries } from "../api/interactive-report-query-service";
-import type { SavedInteractiveReport } from "../mocks/interactive-report-storage";
+import type { SavedInteractiveReport } from "../api/interactive-report-service";
 import type { InteractiveReportVersionSummary } from "../api/interactive-report-service";
 import type { InteractiveReport, ReportDatasetRow, ReportRuntimeFilters } from "../types/interactive-report";
 
@@ -44,7 +42,7 @@ function MarkdownBlock({ content }: { content: string }) {
 
 function KpiBlock({ metric }: { metric: "sales" | "share" | "growth" }) {
   const { getRows, report } = useReportRuntime();
-  const rows = getRows(Object.keys(report.queries)[0] ?? channelSalesReportQueryRef);
+  const rows = getRows(Object.keys(report.queries)[0] ?? "");
   const total = rows.reduce((sum, row) => sum + Number(row.salesAmount), 0);
   const lead = rows[0];
   const growthValues = rows.map((row) => Number(row.growth)).filter((value) => Number.isFinite(value));
@@ -91,45 +89,18 @@ export const interactiveReportPuckConfig: Config = {
     SectionBlock: { fields: { title: { type: "text" }, tone: { type: "select", options: [{ label: "珊瑚", value: "coral" }, { label: "深蓝", value: "navy" }] } }, defaultProps: { title: "新章节", tone: "navy" }, render: (props) => <SectionBlock title={String(props.title)} tone={props.tone === "coral" ? "coral" : "navy"} /> },
     MarkdownBlock: { fields: { content: { type: "textarea" } }, defaultProps: { content: "输入分析说明" }, render: (props) => <MarkdownBlock content={String(props.content)} /> },
     KpiBlock: { fields: { metric: { type: "select", options: [{ label: "销售额", value: "sales" }, { label: "主渠道占比", value: "share" }, { label: "最快增长", value: "growth" }] } }, defaultProps: { metric: "sales" }, render: (props) => <KpiBlock metric={props.metric === "share" || props.metric === "growth" ? props.metric : "sales"} /> },
-    ChartBlock: { fields: { chartSpecRef: { type: "text" }, queryRef: { type: "text" } }, defaultProps: { chartSpecRef: "channel-sales-chart", queryRef: channelSalesReportQueryRef }, render: (props) => <ChartBlock chartSpecRef={String(props.chartSpecRef)} queryRef={String(props.queryRef)} /> },
-    GridBlock: { fields: { gridSpecRef: { type: "text" }, queryRef: { type: "text" } }, defaultProps: { gridSpecRef: "channel-sales-grid", queryRef: channelSalesReportQueryRef }, render: (props) => <GridBlock gridSpecRef={String(props.gridSpecRef)} queryRef={String(props.queryRef)} /> },
+    ChartBlock: { fields: { chartSpecRef: { type: "text" }, queryRef: { type: "text" } }, defaultProps: { chartSpecRef: "", queryRef: "" }, render: (props) => <ChartBlock chartSpecRef={String(props.chartSpecRef)} queryRef={String(props.queryRef)} /> },
+    GridBlock: { fields: { gridSpecRef: { type: "text" }, queryRef: { type: "text" } }, defaultProps: { gridSpecRef: "", queryRef: "" }, render: (props) => <GridBlock gridSpecRef={String(props.gridSpecRef)} queryRef={String(props.queryRef)} /> },
     EvidenceBlock: { fields: { label: { type: "text" }, content: { type: "textarea" } }, defaultProps: { label: "证据与假设", content: "说明数据来源、口径与需要确认的内容。" }, render: (props) => <EvidenceBlock label={String(props.label)} content={String(props.content)} /> },
   },
 };
 
 function ReportRuntimeProvider({ report, filters, children }: { report: InteractiveReport; filters: ReportRuntimeFilters; children: ReactNode }) {
-  const [backendRows, setBackendRows] = useState<Record<string, ReportDatasetRow[]>>({});
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!shouldUseBackendReportQueries()) {
-      setBackendRows({});
-      return () => { cancelled = true; };
-    }
-    const queryRefs = Object.keys(report.queries);
-    void Promise.all(queryRefs.map(async (queryRef) => {
-      try {
-        const result = await fetchInteractiveReportQuery(queryRef, filters);
-        return [queryRef, result.rows] as const;
-      } catch {
-        return [queryRef, []] as const;
-      }
-    })).then((entries) => {
-      if (!cancelled) setBackendRows(Object.fromEntries(entries));
-    });
-    return () => { cancelled = true; };
-  }, [filters, report]);
-
   const runtime = useMemo<ReportRuntime>(() => ({
     report,
     filters,
-    getRows: (queryRef) => {
-      const query = report.queries[queryRef];
-      if (!query) return [];
-      if (shouldUseBackendReportQueries()) return backendRows[queryRef] ?? [];
-      return queryMockDataset(query.datasetId, filters);
-    },
-  }), [backendRows, filters, report]);
+    getRows: () => [],
+  }), [filters, report]);
   return <RuntimeContext.Provider value={runtime}>{children}</RuntimeContext.Provider>;
 }
 
@@ -143,7 +114,27 @@ type Props = {
   onLoadVersion?: (reportId: string, version: number) => Promise<SavedInteractiveReport>;
 };
 
-export function InteractiveReportPanel({ taskTitle, running, initialReport = mockInteractiveReport, initialVersion = 1, onSaveReport, onListVersions, onLoadVersion }: Props) {
+export function InteractiveReportPanel(props: Props) {
+  if (!props.initialReport) {
+    return (
+      <section className="interactive-report-panel report-awaiting" aria-label="分析结果">
+        <header className="result-panel-header">
+          <div>
+            <span className="result-kicker">INTERACTIVE RESULT</span>
+            <h2>暂无分析结果</h2>
+            <p>{props.taskTitle}</p>
+          </div>
+        </header>
+        <div className="report-awaiting-body" role="status">
+          <strong>{props.running ? "分析进行中" : "当前任务尚无报告"}</strong>
+        </div>
+      </section>
+    );
+  }
+  return <InteractiveReportContent {...props} initialReport={props.initialReport} />;
+}
+
+function InteractiveReportContent({ taskTitle, running, initialReport, initialVersion = 1, onSaveReport, onListVersions, onLoadVersion }: Props & { initialReport: InteractiveReport }) {
   const [report, setReport] = useState(initialReport);
   const [filters, setFilters] = useState(() => createDefaultReportFilters(initialReport));
   const [editorOpen, setEditorOpen] = useState(false);
@@ -249,4 +240,8 @@ export function InteractiveReportPanel({ taskTitle, running, initialReport = moc
       )}
     </section>
   );
+}
+
+function createDefaultReportFilters(report: InteractiveReport): ReportRuntimeFilters {
+  return Object.fromEntries(report.filters.map((filter) => [filter.id, filter.defaultValue])) as ReportRuntimeFilters;
 }

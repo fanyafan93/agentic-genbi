@@ -23,7 +23,7 @@ from backend.analysis.interactive_report_store import (
     InteractiveReportVersionConflict,
     InteractiveReportVersionRecord,
 )
-from backend.resource_library.knowledge_store import KnowledgeRecord, KnowledgeStore
+from backend.business_semantics.knowledge_store import KnowledgeRecord, KnowledgeStore
 
 
 POSTGRES_KNOWLEDGE_TABLE = "verified_knowledge"
@@ -35,7 +35,6 @@ POSTGRES_ANALYSIS_ASSET_TABLE = "analysis_assets"
 POSTGRES_ARTIFACT_LINEAGE_TABLE = "analysis_artifact_lineage"
 POSTGRES_INTERACTIVE_REPORT_TABLE = "analysis_reports"
 POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE = "analysis_report_versions"
-POSTGRES_REPORT_QUERY_AUDIT_TABLE = "analysis_report_query_audits"
 
 
 def postgres_persistence_enabled() -> bool:
@@ -77,13 +76,6 @@ def build_postgres_analysis_asset_store() -> "PostgresAnalysisAssetStore":
     if not database_url:
         raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres analysis asset persistence.")
     return PostgresAnalysisAssetStore(database_url)
-
-
-def build_postgres_report_query_audit_store() -> "PostgresReportQueryAuditStore":
-    database_url = get_postgres_database_url()
-    if not database_url:
-        raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres query auditing.")
-    return PostgresReportQueryAuditStore(database_url)
 
 
 class PostgresThreadStore(ThreadStore):
@@ -721,75 +713,6 @@ class PostgresInteractiveReportStore:
                 {"report_id": report_id},
             ).fetchall()
         return [_interactive_report_version_from_row(row) for row in rows]
-
-
-class PostgresReportQueryAuditStore:
-    """Append-only audit metadata for server-owned report queries; result rows are never stored."""
-
-    def __init__(self, database_url: str) -> None:
-        self.database_url = _normalize_postgres_url(database_url)
-        self.ensure_schema()
-
-    def ensure_schema(self) -> None:
-        with _connect(self.database_url) as conn:
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {POSTGRES_REPORT_QUERY_AUDIT_TABLE} (
-                    id TEXT PRIMARY KEY,
-                    query_ref TEXT NOT NULL,
-                    filters JSONB NOT NULL,
-                    row_count INTEGER NOT NULL,
-                    elapsed_ms INTEGER NOT NULL,
-                    truncated BOOLEAN NOT NULL,
-                    source TEXT NOT NULL,
-                    thread_id TEXT,
-                    turn_id TEXT,
-                    user_id TEXT,
-                    data_egress_authorized BOOLEAN NOT NULL DEFAULT FALSE,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                )
-                """
-            )
-            conn.execute(f"ALTER TABLE {POSTGRES_REPORT_QUERY_AUDIT_TABLE} ADD COLUMN IF NOT EXISTS thread_id TEXT")
-            conn.execute(f"ALTER TABLE {POSTGRES_REPORT_QUERY_AUDIT_TABLE} ADD COLUMN IF NOT EXISTS turn_id TEXT")
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_REPORT_QUERY_AUDIT_TABLE}_turn "
-                f"ON {POSTGRES_REPORT_QUERY_AUDIT_TABLE} (turn_id, created_at DESC)"
-            )
-
-    def record_query(
-        self,
-        *,
-        query_ref: str,
-        filters: dict[str, str],
-        response: Any,
-        context: dict[str, Any],
-    ) -> None:
-        with _connect(self.database_url) as conn:
-            conn.execute(
-                f"""
-                INSERT INTO {POSTGRES_REPORT_QUERY_AUDIT_TABLE} (
-                    id, query_ref, filters, row_count, elapsed_ms, truncated, source,
-                    thread_id, turn_id, user_id, data_egress_authorized
-                ) VALUES (
-                    %(id)s, %(query_ref)s, %(filters)s, %(row_count)s, %(elapsed_ms)s, %(truncated)s, %(source)s,
-                    %(thread_id)s, %(turn_id)s, %(user_id)s, %(data_egress_authorized)s
-                )
-                """,
-                {
-                    "id": f"query_audit_{uuid4().hex}",
-                    "query_ref": query_ref,
-                    "filters": _jsonb(filters),
-                    "row_count": response.rowCount,
-                    "elapsed_ms": response.elapsedMs,
-                    "truncated": response.truncated,
-                    "source": str(context.get("source") or "unspecified"),
-                    "thread_id": context.get("thread_id"),
-                    "turn_id": context.get("turn_id"),
-                    "user_id": context.get("user_id"),
-                    "data_egress_authorized": context.get("data_egress_authorized") is True,
-                },
-            )
 
 
 class PostgresKnowledgeStore(KnowledgeStore):

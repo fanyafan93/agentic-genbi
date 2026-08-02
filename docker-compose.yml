@@ -32,7 +32,7 @@ services:
     environment:
       GENBI_CORS_ORIGINS: ${GENBI_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://192.168.101.12:3000}
       NEXT_PUBLIC_GENBI_API_BASE_URL: ${GENBI_PUBLIC_API_BASE_URL:-http://192.168.101.12:8000}
-      GENBI_RESOURCE_LIBRARY_ROOT: ${GENBI_RESOURCE_LIBRARY_ROOT:-/app/资源库}
+      GENBI_FINEREPORT_ROOT: ${GENBI_FINEREPORT_ROOT:-/app/资源库/finereport/解析}
       GENBI_DATABASE_URL: ${GENBI_DATABASE_URL:-postgresql://agentic_genbi:agentic_genbi_dev_password@postgres:5432/agentic_genbi?schema=public}
       AUTH_DATABASE_URL: ${AUTH_DATABASE_URL:-postgresql://agentic_genbi:agentic_genbi_dev_password@postgres:5432/agentic_genbi?schema=public}
       GENBI_PERSISTENCE: ${GENBI_PERSISTENCE:-postgres}

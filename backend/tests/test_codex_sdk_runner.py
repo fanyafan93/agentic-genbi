@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import sys
@@ -100,12 +100,19 @@ class CodexSdkAnalysisRunnerTest(unittest.TestCase):
         self.assertIn("item/agentMessage/delta", event_types)
         self.assertIn("item/completed", event_types)
         self.assertIn("turn/completed", event_types)
+        self.assertEqual(event_types.count("turn/completed"), 1)
         self.assertTrue(any(item.payload.get("codex_method") == "item/completed" for item in item_events))
         self.assertTrue(any(item.payload.get("codex_item_id") == "codex_item_msg" for item in item_events))
         self.assertTrue(all(item.payload.get("codex_turn_id") == "codex_turn_1" for item in delta_events))
         self.assertTrue(all(item.payload.get("codex_item_id") == "codex_item_msg" for item in delta_events))
         self.assertEqual(result.final_output, "完整 Codex 输出")
         self.assertEqual(result.raw_result_type, "SimpleNamespace")
+
+    def test_instructions_use_utf8_text(self) -> None:
+        from backend.harness.codex_sdk_runner import CODEX_ANALYSIS_INSTRUCTIONS
+
+        self.assertIn("你是 Agentic GenBI 的分析任务 Agent", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertNotIn("浣犳槸", CODEX_ANALYSIS_INSTRUCTIONS)
 
     def test_async_stream_resumes_codex_thread_when_context_has_codex_thread_id(self) -> None:
         fake_codex = _FakeAsyncCodex()

@@ -49,14 +49,14 @@ def check_runtime_env(env_file: str | None = None) -> dict[str, Any]:
     checks = [
         _check_llm(),
         _check_mysql(),
-        _check_resource_library(),
+        _check_finereport_semantics(),
         _check_frontend_api_base(),
         _check_cost_config(),
     ]
     return {
         "env_file": str(env_path) if env_path else None,
         "env_loaded": loaded,
-        "ready": all(check.ok for check in checks if check.name in {"llm", "mysql", "resource_library"}),
+        "ready": all(check.ok for check in checks if check.name in {"llm", "mysql", "finereport_semantics"}),
         "checks": [asdict(check) for check in checks],
     }
 
@@ -100,11 +100,11 @@ def _check_mysql() -> EnvCheck:
     return EnvCheck("mysql", True, "MySQL 只读连接配置存在。", f"host={host}; port={port}; database={database or '-'}; business_query={enabled}")
 
 
-def _check_resource_library() -> EnvCheck:
-    root = Path(os.getenv("GENBI_RESOURCE_LIBRARY_ROOT", "资源库"))
+def _check_finereport_semantics() -> EnvCheck:
+    root = Path(os.getenv("GENBI_FINEREPORT_ROOT", "资源库/finereport/解析"))
     if root.exists() and root.is_dir():
-        return EnvCheck("resource_library", True, "资源库目录存在。", str(root.resolve()))
-    return EnvCheck("resource_library", False, "资源库目录不存在。", str(root))
+        return EnvCheck("finereport_semantics", True, "FineReport 语义目录存在。", str(root.resolve()))
+    return EnvCheck("finereport_semantics", False, "FineReport 语义目录不存在。", str(root))
 
 
 def _check_frontend_api_base() -> EnvCheck:

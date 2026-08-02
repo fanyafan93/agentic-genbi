@@ -17,15 +17,15 @@ export type AgentEvent =
   | ({ type: "step"; label: string; state: "queued" | "running" | "done"; nodeId?: string } & AgentEventSystemContext)
   | ({ type: "ask"; nodeId: string; question: string; options: { id: string; label: string }[] } & AgentEventSystemContext)
   | ({ type: "tokens"; nodeId: string; text: string } & AgentEventSystemContext)
-  | ({ type: "report-draft"; report: InteractiveReport } & AgentEventSystemContext)
+  | ({ type: "report-artifact"; report: InteractiveReport } & AgentEventSystemContext)
   | ({ type: "artifact"; path: string; kind: "html" | "sql" | "python" | "csv" | "markdown" | "json" } & AgentEventSystemContext)
   | ({ type: "error"; message: string } & AgentEventSystemContext)
   | ({ type: "done" } & AgentEventSystemContext);
 
 export type AgentInput =
-  | { kind: "start"; suggestionId?: string; question?: string; interactiveReport?: InteractiveReport }
-  | { kind: "message"; content: string; interactiveReport?: InteractiveReport }
-  | { kind: "reply"; optionId: string; interactiveReport?: InteractiveReport }
+  | { kind: "start"; suggestionId?: string; question?: string }
+  | { kind: "message"; content: string }
+  | { kind: "reply"; optionId: string }
   | { kind: "reset" };
 
 export interface AgentClient {

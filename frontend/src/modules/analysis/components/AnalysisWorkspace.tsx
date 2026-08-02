@@ -13,13 +13,13 @@ import { AnalysisTaskThread } from "./AnalysisTaskThread";
 import { InteractiveReportPanel } from "./InteractiveReportPanel";
 import { MyAnalysisPage } from "./MyAnalysisPage";
 import { findAnalysisTaskByTitle } from "../agentClients/scripts/analysis-tasks";
-import { loadSavedInteractiveReports, saveInteractiveReport, type SavedInteractiveReport } from "../mocks/interactive-report-storage";
 import {
   getInteractiveReportFromBackend,
   listInteractiveReportsFromBackend,
   listInteractiveReportVersionsFromBackend,
   saveInteractiveReportToBackend,
   shouldUseBackendInteractiveReports,
+  type SavedInteractiveReport,
 } from "../api/interactive-report-service";
 
 const navItems = [
@@ -83,8 +83,9 @@ export function AnalysisWorkspace() {
   const [currentAnalysisTaskId, setCurrentAnalysisTaskId] = useState<string | null>("channel");
   const [businessSemanticSection, setBusinessSemanticSection] = useState<BusinessSemanticSection>("structured");
   const [structuredKnowledgeSource, setStructuredKnowledgeSource] = useState<StructuredKnowledgeSource>("finereport");
-  const [savedReports, setSavedReports] = useState<SavedInteractiveReport[]>(loadSavedInteractiveReports);
+  const [savedReports, setSavedReports] = useState<SavedInteractiveReport[]>([]);
   const [openedReportId, setOpenedReportId] = useState<string | null>(null);
+  const [pendingStartQuestion, setPendingStartQuestion] = useState<string | null>(null);
   const reportOwnerId = session?.user?.id ?? "local-user";
   const analysisTaskScriptDef = selectedAnalysisTask ? findAnalysisTaskByTitle(selectedAnalysisTask) : undefined;
   const initialFlowMessages = useMemo(() => {
@@ -96,17 +97,22 @@ export function AnalysisWorkspace() {
   useEffect(() => {
     let cancelled = false;
     if (!shouldUseBackendInteractiveReports()) {
-      setSavedReports(loadSavedInteractiveReports());
+      setSavedReports([]);
       return () => { cancelled = true; };
     }
     void listInteractiveReportsFromBackend(reportOwnerId)
       .then((reports) => { if (!cancelled) setSavedReports(reports); })
-      .catch(() => { if (!cancelled) setSavedReports(loadSavedInteractiveReports()); });
+      .catch(() => { if (!cancelled) setSavedReports([]); });
     return () => { cancelled = true; };
   }, [reportOwnerId]);
   useEffect(() => {
     if (activeTool === "business-semantics") setCollapsed(false);
   }, [activeTool]);
+  useEffect(() => {
+    if (!pendingStartQuestion) return;
+    flow.start(pendingStartQuestion);
+    setPendingStartQuestion(null);
+  }, [flow, pendingStartQuestion]);
   const isAdmin = true;
   const isNewAnalysisTask = selectedAnalysisTask === null;
   const openedReport = savedReports.find((saved) => saved.report.id === openedReportId);
@@ -120,30 +126,31 @@ export function AnalysisWorkspace() {
   }
 
   function handleSendMessage(content: string) {
-    const interactiveReport = flow.draftReport ?? openedReport?.report ?? undefined;
     if (isNewAnalysisTask) {
-      flow.start(content);
       setSelectedAnalysisTask("未命名分析任务");
+      setCurrentAnalysisTaskId(`draft_${Date.now()}`);
+      setOpenedReportId(null);
+      setMobilePane("analysisTask");
+      setPendingStartQuestion(content);
     } else {
-      flow.send(content, interactiveReport);
+      flow.send(content);
     }
   }
 
   function handleStartFromSuggestion(_id: string, title: string) {
-    flow.start(`${title}。请基于当前数据展开分析。`);
     setSelectedAnalysisTask("未命名分析任务");
+    setCurrentAnalysisTaskId(`draft_${_id}_${Date.now()}`);
+    setOpenedReportId(null);
+    setMobilePane("analysisTask");
+    setPendingStartQuestion(`${title}。请基于当前数据展开分析。`);
   }
 
   async function handleSaveReport(saved: SavedInteractiveReport): Promise<SavedInteractiveReport> {
     const previous = savedReports.find((item) => item.report.id === saved.report.id);
-    if (shouldUseBackendInteractiveReports()) {
-      const persisted = await saveInteractiveReportToBackend(saved.report, previous?.version, reportOwnerId);
-      setSavedReports((reports) => [persisted, ...reports.filter((item) => item.report.id !== persisted.report.id)]);
-      return persisted;
-    }
-    const localSaved = { ...saved, version: previous ? previous.version + 1 : 1 };
-    setSavedReports(saveInteractiveReport(localSaved));
-    return localSaved;
+    if (!shouldUseBackendInteractiveReports()) throw new Error("分析结果存储不可用。");
+    const persisted = await saveInteractiveReportToBackend(saved.report, previous?.version, reportOwnerId);
+    setSavedReports((reports) => [persisted, ...reports.filter((item) => item.report.id !== persisted.report.id)]);
+    return persisted;
   }
 
   async function handleLoadReportVersion(reportId: string, version: number): Promise<SavedInteractiveReport> {
@@ -366,7 +373,7 @@ export function AnalysisWorkspace() {
                   assetNotice=""
                   mobileHidden={mobilePane !== "analysisTask"}
                   taskKey={currentAnalysisTaskId}
-                  onReply={(optionId) => { flow.reply(optionId, flow.draftReport ?? openedReport?.report ?? undefined); }}
+                  onReply={(optionId) => { flow.reply(optionId); }}
                   onStartFromSuggestion={handleStartFromSuggestion}
                   onSendMessage={handleSendMessage}
                 />
@@ -374,7 +381,7 @@ export function AnalysisWorkspace() {
                 <div className="workspace-resizer" role="separator" aria-label="调整分析工作台和当前任务资产宽度" aria-orientation="vertical" onPointerDown={startResize} onDoubleClick={() => setSplitPercent(40)}><span /></div>
 
                 <div className={`analysis-result-pane ${mobilePane !== "assetLibrary" ? "mobile-hidden" : ""}`}>
-                  <InteractiveReportPanel taskTitle={selectedAnalysisTask ?? "当前分析任务"} running={flow.running} initialReport={flow.draftReport ?? openedReport?.report ?? undefined} initialVersion={openedReport?.version} onSaveReport={handleSaveReport} onListVersions={shouldUseBackendInteractiveReports() ? listInteractiveReportVersionsFromBackend : undefined} onLoadVersion={shouldUseBackendInteractiveReports() ? handleLoadReportVersion : undefined} />
+                  <InteractiveReportPanel taskTitle={selectedAnalysisTask ?? "当前分析任务"} running={flow.running} initialReport={flow.reportArtifact ?? openedReport?.report ?? undefined} initialVersion={openedReport?.version} onSaveReport={handleSaveReport} onListVersions={shouldUseBackendInteractiveReports() ? listInteractiveReportVersionsFromBackend : undefined} onLoadVersion={shouldUseBackendInteractiveReports() ? handleLoadReportVersion : undefined} />
                 </div>
               </section>
           </div>

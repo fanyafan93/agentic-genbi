@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from resource_library.knowledge_store import KnowledgeStore
+from business_semantics.knowledge_store import KnowledgeStore
 
 
 class KnowledgeStoreTest(unittest.TestCase):

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
@@ -9,14 +9,9 @@ from backend.analysis.runner_contracts import (
     AnalysisAgentResult,
     AnalysisAgentRunner,
     build_analysis_runner_prompt,
-    extract_interactive_report_draft,
-    sanitize_interactive_report_context,
 )
 from backend.harness.events import AgentEvent
 from backend.harness.thread_store import ThreadStore
-from backend.analysis.report_query_service import (
-    ReportQueryService,
-)
 from backend.business_semantics.finereport_reports import FineReportReportRepository
 
 AnalysisTurnKind = Literal["start", "message", "reply"]
@@ -59,12 +54,10 @@ class AnalysisTurnService:
         *,
         agent_runner: AnalysisAgentRunner | None = None,
         thread_store: ThreadStore | None = None,
-        report_query_service: ReportQueryService | None = None,
         finereport_repository: FineReportReportRepository | None = None,
     ) -> None:
         self.agent_runner = agent_runner
         self.thread_store = thread_store
-        self.report_query_service = report_query_service
         self.finereport_repository = finereport_repository or FineReportReportRepository()
         self._turn_requests_by_turn: dict[str, AnalysisTurnRequest] = {}
         self._turn_contexts_by_turn: dict[str, dict[str, str]] = {}
@@ -111,12 +104,31 @@ class AnalysisTurnService:
                 return
         request = self._turn_requests_by_turn.get(turn_id)
         if not request:
-            yield self._event(turn_id, "turn/failed", {"error": "turn_not_found"})
+            yield self._failed_turn_event(turn_id, "turn_not_found")
             return
         yield from self.stream_events(request, turn_id=turn_id)
 
     async def astream_turn_events(self, turn_id: str) -> AsyncIterator[AgentEvent]:
-        for event in self.stream_turn_events(turn_id):
+        if turn_id in self._events_by_turn:
+            for event in self._events_by_turn[turn_id]:
+                yield event
+            return
+        if self.thread_store:
+            stored_items = self.thread_store.get_turn_events(turn_id)
+            if stored_items:
+                for item in stored_items:
+                    yield AgentEvent(
+                        type=str(item["type"]),
+                        turn_id=str(item["turn_id"]),
+                        payload=dict(item.get("payload") or {}),
+                        created_at=str(item["created_at"]),
+                    )
+                return
+        request = self._turn_requests_by_turn.get(turn_id)
+        if not request:
+            yield self._failed_turn_event(turn_id, "turn_not_found")
+            return
+        async for event in self.astream_events(request, turn_id=turn_id):
             yield event
 
     def stream_events(
@@ -160,7 +172,7 @@ class AnalysisTurnService:
 
         question = request.question.strip()
         if not question:
-            yield self._event(turn_id, "turn/failed", {"error": "question_required"})
+            yield self._failed_turn_event(turn_id, "question_required")
             return
 
         conversation_id = request.conversation_id or f"conv_analysis_{uuid4().hex[:12]}"
@@ -179,22 +191,16 @@ class AnalysisTurnService:
         ):
             yield event
         run_failed = False
+        runner_events: list[AgentEvent] = []
         async for event in self._agent_runner_events_async(turn_id, request, classification, semantic_models):
-            if event.type == "turn/failed":
+            runner_events.append(event)
+            if _is_failed_turn_event(event):
                 run_failed = True
             yield event
         if run_failed:
             return
-        yield self._event(
-            turn_id,
-            "turn/completed",
-            {
-                "title": title,
-                "status": "completed",
-                "domain": "analysis_task",
-                "codex_method": "turn/completed",
-            },
-        )
+        for event in self._complete_projection_if_needed(turn_id, title, events=runner_events):
+            yield event
 
     def _stream_events_unrecorded(
         self,
@@ -204,7 +210,7 @@ class AnalysisTurnService:
     ) -> Iterable[AgentEvent]:
         question = request.question.strip()
         if not question:
-            yield self._event(turn_id, "turn/failed", {"error": "question_required"})
+            yield self._failed_turn_event(turn_id, "question_required")
             return
 
         conversation_id = request.conversation_id or f"conv_analysis_{uuid4().hex[:12]}"
@@ -222,28 +228,15 @@ class AnalysisTurnService:
             semantic_models=semantic_models,
         )
 
-        if self.agent_runner:
-            branch_events = list(self._agent_runner_events(turn_id, request, classification, semantic_models))
-        elif _is_skill_request(question):
-            branch_events = list(self._skill_events(turn_id, title))
-        elif request.turn_kind in {"message", "reply"}:
-            branch_events = list(self._continuation_events(turn_id, title, question))
-        else:
-            branch_events = list(self._analysis_events(turn_id, classification))
+        if not self.agent_runner:
+            yield self._failed_turn_event(turn_id, "analysis_agent_runner_not_configured")
+            return
+        branch_events = list(self._agent_runner_events(turn_id, request, classification, semantic_models))
         yield from branch_events
-        if any(event.type == "turn/failed" for event in branch_events):
+        if any(_is_failed_turn_event(event) for event in branch_events):
             return
 
-        yield self._event(
-            turn_id,
-            "turn/completed",
-            {
-                "title": title,
-                "status": "completed",
-                "domain": "analysis_task",
-                "codex_method": "turn/completed",
-            },
-        )
+        yield from self._complete_projection_if_needed(turn_id, title, events=branch_events)
 
     def _analysis_start_events(
         self,
@@ -278,12 +271,10 @@ class AnalysisTurnService:
         classification: ProblemClassification,
         semantic_models: list[SemanticModelCandidate],
     ) -> Iterable[AgentEvent]:
-        report_context = self._authorized_report_context(request)
         prompt = build_analysis_runner_prompt(
             question=request.question.strip(),
             problem_label=classification.label,
             semantic_model_labels=[item.label for item in semantic_models],
-            current_report_context=report_context,
         )
         try:
             result = None
@@ -295,10 +286,9 @@ class AnalysisTurnService:
             if result is None:
                 raise RuntimeError("Analysis agent runner did not return a final result.")
         except Exception as exc:  # pragma: no cover - runtime boundary
-            yield self._event(turn_id, "turn/failed", {"error": "analysis_agent_runner_failed", "detail": str(exc)})
+            yield self._failed_turn_event(turn_id, "analysis_agent_runner_failed", detail=str(exc))
             return
-        yield from self._final_result_events(turn_id, result, current_report_context=report_context)
-        yield from self._post_runner_events(turn_id, request, classification)
+        yield from self._final_result_events(turn_id, result)
 
     async def _agent_runner_events_async(
         self,
@@ -307,12 +297,10 @@ class AnalysisTurnService:
         classification: ProblemClassification,
         semantic_models: list[SemanticModelCandidate],
     ) -> AsyncIterator[AgentEvent]:
-        report_context = self._authorized_report_context(request)
         prompt = build_analysis_runner_prompt(
             question=request.question.strip(),
             problem_label=classification.label,
             semantic_model_labels=[item.label for item in semantic_models],
-            current_report_context=report_context,
         )
         try:
             result = None
@@ -324,21 +312,17 @@ class AnalysisTurnService:
             if result is None:
                 raise RuntimeError("Analysis agent runner did not return a final result.")
         except Exception as exc:  # pragma: no cover - runtime boundary
-            yield self._event(turn_id, "turn/failed", {"error": "analysis_agent_runner_failed", "detail": str(exc)})
+            yield self._failed_turn_event(turn_id, "analysis_agent_runner_failed", detail=str(exc))
             return
-        for event in self._final_result_events(turn_id, result, current_report_context=report_context):
-            yield event
-        for event in self._post_runner_events(turn_id, request, classification):
+        for event in self._final_result_events(turn_id, result):
             yield event
 
     def _final_result_events(
         self,
         turn_id: str,
         result: AnalysisAgentResult,
-        *,
-        current_report_context: dict[str, Any] | None = None,
     ) -> Iterable[AgentEvent]:
-        message, draft = extract_interactive_report_draft(result.final_output)
+        message = result.final_output.strip()
         if message:
             yield self._event(
                 turn_id,
@@ -351,93 +335,6 @@ class AnalysisTurnService:
                     "codex_method": "item/completed",
                 },
             )
-        draft = draft or _fallback_report_draft(current_report_context)
-        if draft:
-            context = self._turn_contexts_by_turn.get(turn_id, {})
-            draft["artifactType"] = "interactive_report"
-            draft["schemaVersion"] = "1.0"
-            draft["renderer"] = "puck"
-            inherited_report_id = str((current_report_context or {}).get("id") or "").strip()
-            draft["id"] = inherited_report_id or f"report_draft_{turn_id}"
-            draft["source"] = {
-                "threadId": context.get("thread_id", ""),
-                "turnId": context.get("turn_id", ""),
-            }
-            yield self._event(turn_id, "genbi/artifact/updated", draft)
-
-    @staticmethod
-    def _authorized_report_context(request: AnalysisTurnRequest) -> dict[str, Any] | None:
-        return sanitize_interactive_report_context(request.metadata.get("interactive_report_context"))
-
-    def _post_runner_events(
-        self,
-        turn_id: str,
-        request: AnalysisTurnRequest,
-        classification: ProblemClassification,
-    ) -> Iterable[AgentEvent]:
-        question = request.question.strip()
-        if _is_skill_request(question):
-            yield self._event(turn_id, "genbi/artifact/created", {"path": "skills/analysis_skill.md", "kind": "markdown"})
-            return
-        if request.turn_kind in {"message", "reply"}:
-            yield self._event(turn_id, "genbi/artifact/updated", {"path": "reports/updated_report.html", "kind": "html"})
-            yield self._event(turn_id, "genbi/artifact/updated", {"path": "queries/revised_query.sql", "kind": "sql"})
-            yield self._event(turn_id, "genbi/artifact/updated", {"path": "paths/channel_analysis_path.md", "kind": "markdown"})
-            if re.search(r"python|棰勬祴|寮傚父|鑱氱被|鐩稿叧", question, flags=re.IGNORECASE):
-                yield self._event(turn_id, "genbi/artifact/created", {"path": "scripts/analysis_notebook.py", "kind": "python"})
-    def _analysis_events(
-        self,
-        turn_id: str,
-        classification: ProblemClassification,
-    ) -> Iterable[AgentEvent]:
-        yield self._event(
-            turn_id,
-            "item/completed",
-            {
-                "role": "assistant",
-                "title": "analysis draft",
-                "content": (
-                    f"I will draft this {classification.label} analysis using semantic models, "
-                    "verified knowledge, and reusable SQL examples. Unconfirmed assumptions will be marked."
-                ),
-                "codex_item_type": "agentMessage",
-                "codex_method": "item/completed",
-            },
-        )
-        for asset in _analysis_assets():
-            yield self._event(turn_id, "genbi/artifact/created", asset)
-
-    def _continuation_events(
-        self,
-        turn_id: str,
-        title: str,
-        question: str,
-    ) -> Iterable[AgentEvent]:
-        content = "I will update the current analysis task, keep existing versions, add evidence, and refresh report, SQL, and reusable method artifacts."
-        yield self._event(
-            turn_id,
-            "item/completed",
-            {"role": "assistant", "title": title, "content": content, "codex_item_type": "agentMessage", "codex_method": "item/completed"},
-        )
-        yield self._event(turn_id, "genbi/artifact/updated", {"path": "reports/updated_report.html", "kind": "html"})
-        yield self._event(turn_id, "genbi/artifact/updated", {"path": "queries/revised_query.sql", "kind": "sql"})
-        yield self._event(turn_id, "genbi/artifact/updated", {"path": "paths/channel_analysis_path.md", "kind": "markdown"})
-        if re.search(r"python|forecast|anomaly|cluster|correlation", question, flags=re.IGNORECASE):
-            yield self._event(turn_id, "genbi/artifact/created", {"path": "scripts/analysis_notebook.py", "kind": "python"})
-
-    def _skill_events(self, turn_id: str, title: str) -> Iterable[AgentEvent]:
-        yield self._event(
-            turn_id,
-            "item/completed",
-            {
-                "role": "assistant",
-                "title": title,
-                "content": "I will turn this verified analysis path into a reusable SKILL.md draft with scope, steps, references, and reuse rules.",
-                "codex_item_type": "agentMessage",
-                "codex_method": "item/completed",
-            },
-        )
-        yield self._event(turn_id, "genbi/artifact/created", {"path": "skills/analysis_skill.md", "kind": "markdown"})
 
     def _event(self, turn_id: str, event_type: str, payload: dict[str, Any]) -> AgentEvent:
         enriched_payload = dict(payload)
@@ -453,6 +350,37 @@ class AnalysisTurnService:
             enriched_payload.setdefault("item_kind", item_kind)
             enriched_payload.setdefault("item_id", self._next_item_id(turn_id, item_kind))
         return AgentEvent(type=event_type, turn_id=turn_id, payload=enriched_payload)
+
+    def _failed_turn_event(self, turn_id: str, error: str, *, detail: str | None = None) -> AgentEvent:
+        payload: dict[str, Any] = {
+            "status": "failed",
+            "error": error,
+            "domain": "analysis_task",
+            "codex_method": "turn/completed",
+        }
+        if detail:
+            payload["detail"] = detail
+        return self._event(turn_id, "turn/completed", payload)
+
+    def _complete_projection_if_needed(
+        self,
+        turn_id: str,
+        title: str,
+        *,
+        events: Iterable[AgentEvent] = (),
+    ) -> Iterable[AgentEvent]:
+        if any(event.type == "turn/completed" for event in events):
+            return
+        yield self._event(
+            turn_id,
+            "turn/completed",
+            {
+                "title": title,
+                "status": "completed",
+                "domain": "analysis_task",
+                "codex_method": "turn/completed",
+            },
+        )
 
     def _project_codex_style_events(self, turn_id: str, event: AgentEvent) -> list[AgentEvent]:
         return [event]
@@ -627,17 +555,13 @@ def build_semantic_model_plan(classification: ProblemClassification) -> list[Sem
             purpose="Reuse similar reports, SQL, charts, and skills.",
         ),
     ]
-def _fallback_report_draft(current_report_context: dict[str, Any] | None) -> dict[str, Any] | None:
-    """No server-side report fallback is generated without a model draft."""
-
-    return None
 
 def item_kind_for_event(event_type: str, payload: dict[str, Any]) -> str | None:
     if event_type == "turn/started" and payload.get("question"):
         return "message"
     if event_type == "item/agentMessage/delta":
         return "message"
-    if event_type in {"item/started", "item/completed", "item/failed"}:
+    if event_type in {"item/started", "item/completed"}:
         codex_item_type = str(payload.get("codex_item_type") or "")
         if codex_item_type == "agentMessage":
             return "message"
@@ -669,6 +593,10 @@ def _latest_payload_value(events: list[AgentEvent], key: str) -> str | None:
     return None
 
 
+def _is_failed_turn_event(event: AgentEvent) -> bool:
+    return event.type == "turn/completed" and event.payload.get("status") == "failed"
+
+
 def _requested_turn_id(metadata: dict[str, Any]) -> str | None:
     return _string_or_none(
         metadata.get("codex_turn_id")
@@ -693,22 +621,4 @@ def build_follow_up_question(classification: ProblemClassification) -> str:
     if classification.type == "report_understanding":
         return "Should I explain the business definition, data logic, or filter interaction rules first?"
     return "Should this analysis prioritize a fast draft or a stricter business-scope validation first?"
-
-
-def _is_skill_request(question: str) -> bool:
-    return bool(re.search(r"skill\.md|skill|reusable method|analysis skill", question, flags=re.IGNORECASE))
-
-
-def _analysis_assets() -> list[dict[str, str]]:
-    return [
-        {"path": "reports/analysis_report.html", "kind": "html"},
-        {"path": "queries/candidate.sql", "kind": "sql"},
-        {"path": "charts/channel_share.chart.json", "kind": "json"},
-        {"path": "notes/assumptions.md", "kind": "markdown"},
-        {"path": "definitions/channel_sales_metric.md", "kind": "markdown"},
-        {"path": "rules/order_scope_rule.md", "kind": "markdown"},
-        {"path": "paths/channel_analysis_path.md", "kind": "markdown"},
-        {"path": "dashboards/channel_overview.dashboard.json", "kind": "json"},
-    ]
-
 

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import sys
@@ -36,7 +36,7 @@ class _CodexThreadRecordingRunner:
 
 
 class AnalysisTurnServiceTest(unittest.TestCase):
-    def test_analysis_emits_turn_item_and_artifact_events(self) -> None:
+    def test_analysis_without_runner_fails_without_synthetic_items_or_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = AnalysisTurnService(thread_store=ThreadStore(Path(temp_dir) / "thread-store.jsonl"))
             events = service.run(
@@ -47,14 +47,13 @@ class AnalysisTurnServiceTest(unittest.TestCase):
             )
 
             event_types = [event.type for event in events]
-            artifact_paths = [event.payload["path"] for event in events if event.type == "genbi/artifact/created"]
-
             self.assertIn("turn/started", event_types)
-            self.assertIn("item/completed", event_types)
-            self.assertIn("genbi/artifact/created", event_types)
             self.assertIn("turn/completed", event_types)
-            self.assertIn("reports/analysis_report.html", artifact_paths)
-            self.assertIn("queries/candidate.sql", artifact_paths)
+            self.assertNotIn("item/completed", event_types)
+            self.assertFalse(any(event.type.startswith("genbi/artifact/") for event in events))
+            completed = next(event for event in events if event.type == "turn/completed")
+            self.assertEqual(completed.payload["status"], "failed")
+            self.assertEqual(completed.payload["error"], "analysis_agent_runner_not_configured")
 
             first = next(event for event in events if event.type == "turn/started")
             self.assertEqual(first.turn_id, first.payload["turn_id"])
@@ -68,7 +67,7 @@ class AnalysisTurnServiceTest(unittest.TestCase):
             self.assertEqual(thread["thread"]["productKind"], "analysis_task")
             self.assertEqual(thread["turns"][0]["inputKind"], "start")
             self.assertNotIn("runs", thread)
-            self.assertIn("sql", [item["kind"] for item in thread["items"]])
+            self.assertNotIn("sql", [item["kind"] for item in thread["items"]])
 
     def test_thread_service_submits_turn_with_thread_turn_contract(self) -> None:
         service = AnalysisThreadService()
@@ -91,8 +90,10 @@ class AnalysisTurnServiceTest(unittest.TestCase):
         service = AnalysisThreadService()
         events = list(service.stream_turn_events("missing_turn"))
 
-        self.assertEqual(events[0].type, "turn/failed")
+        self.assertEqual(events[0].type, "turn/completed")
+        self.assertEqual(events[0].payload["status"], "failed")
         self.assertEqual(events[0].payload["error"], "turn_not_found")
+        self.assertEqual(len([event for event in events if event.type == "turn/completed"]), 1)
 
     def test_async_turn_missing_uses_turn_error(self) -> None:
         async def collect():
@@ -104,8 +105,10 @@ class AnalysisTurnServiceTest(unittest.TestCase):
 
         events = asyncio.run(collect())
 
-        self.assertEqual(events[0].type, "turn/failed")
+        self.assertEqual(events[0].type, "turn/completed")
+        self.assertEqual(events[0].payload["status"], "failed")
         self.assertEqual(events[0].payload["error"], "turn_not_found")
+        self.assertEqual(len([event for event in events if event.type == "turn/completed"]), 1)
 
     def test_analysis_does_not_emit_synthetic_plan_or_question_events(self) -> None:
         events = AnalysisTurnService().run(

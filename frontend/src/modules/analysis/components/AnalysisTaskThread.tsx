@@ -71,7 +71,13 @@ export function AnalysisTaskThread({
       </header>
       {assetNotice && <div className="asset-notice" role="status">{assetNotice}</div>}
       <div className="thread-scroll" ref={threadScrollRef}>
-        {nodes.length === 0 ? (
+        {nodes.length === 0 && running ? (
+          <div className="flow-empty-running" role="status">
+            <span />
+            <strong>正在开始分析</strong>
+            <small>等待模型返回第一段内容...</small>
+          </div>
+        ) : nodes.length === 0 ? (
           <Suggestions onSelect={onStartFromSuggestion} />
         ) : (
           <ol className="flow">

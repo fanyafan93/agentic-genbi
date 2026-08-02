@@ -1,4 +1,4 @@
-﻿import type { ArtifactKind } from "@/modules/analysis/types/artifact";
+import type { ArtifactKind } from "@/modules/analysis/types/artifact";
 import type { InteractiveReport } from "@/modules/analysis/types/interactive-report";
 import type { AgentClient, AgentEvent, AgentInput } from "./types";
 
@@ -50,7 +50,6 @@ export class BackendAnalysisAgentClient implements AgentClient {
           turn_kind: input.kind,
           metadata: {
             frontend_client: "analysis_task",
-            ...(input.interactiveReport ? { interactive_report_context: input.interactiveReport } : {}),
           },
         }),
         signal: this.abortController.signal,
@@ -171,6 +170,13 @@ export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentIn
           ...context,
         };
       }
+      yield {
+        type: "step",
+        label: "模型响应",
+        state: "running",
+        nodeId: getAgentNodeId(event),
+        ...context,
+      };
       continue;
     }
 
@@ -201,21 +207,11 @@ export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentIn
     }
 
     if (event.type === "item/completed" && method === "item/completed" && codexItemType === "agentMessage") {
-      currentAgentNodeId ||= `agent-${event.turn_id}`;
+      const agentNodeId = getAgentNodeId(event);
       const content = asString(event.payload.content);
-      if (content) {
-        yield {
-          type: "debug",
-          title: "模型最终返回",
-          content,
-          nodeId: currentAgentNodeId,
-          itemId: asString(event.payload.item_id) || undefined,
-          ...context,
-        };
-      }
       yield {
         type: "agent",
-        nodeId: currentAgentNodeId,
+        nodeId: agentNodeId,
         content,
         mode: "replace",
         itemId: asString(event.payload.item_id) || undefined,
@@ -225,18 +221,9 @@ export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentIn
     }
 
     if (event.type === "item/agentMessage/delta" || method === "item/agentMessage/delta") {
-      currentAgentNodeId ||= `agent-${event.turn_id}`;
-      yield {
-        type: "debug",
-        title: "模型流式片段",
-        content: asString(event.payload.delta),
-        nodeId: currentAgentNodeId,
-        itemId: asString(event.payload.item_id) || undefined,
-        ...context,
-      };
       yield {
         type: "tokens",
-        nodeId: currentAgentNodeId,
+        nodeId: getAgentNodeId(event),
         text: asString(event.payload.delta),
         itemId: asString(event.payload.item_id) || undefined,
         ...context,
@@ -263,7 +250,7 @@ export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentIn
       const report = asInteractiveReport(event.payload);
       if (report) {
         yield {
-          type: "report-draft",
+          type: "report-artifact",
           report,
           ...context,
           threadId: report.source.threadId,
@@ -288,17 +275,23 @@ export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentIn
       continue;
     }
 
-    if (event.type === "turn/failed") {
-      yield { type: "error", message: asString(event.payload.detail) || asString(event.payload.error), ...context };
-      yield { type: "done", ...context };
-      continue;
-    }
-
     if (event.type === "turn/completed" || method === "turn/completed") {
+      if (asString(event.payload.status) === "failed") {
+        yield {
+          type: "error",
+          message: asString(event.payload.detail) || asString(event.payload.error) || "Analysis turn failed",
+          ...context,
+        };
+      }
       yield { type: "done", ...context };
       continue;
     }
   }
+}
+
+function getAgentNodeId(event: BackendTurnEvent): string {
+  const turnId = asString(event.payload.turn_id) || event.turn_id;
+  return `agent-${turnId}`;
 }
 
 function getSystemContext(event: BackendTurnEvent) {

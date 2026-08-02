@@ -9,7 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 
-DEFAULT_KNOWLEDGE_STORE_PATH = Path(".resource-index/knowledge.jsonl")
+DEFAULT_KNOWLEDGE_STORE_PATH = Path(".semantic-index/knowledge.jsonl")
 
 
 @dataclass(frozen=True)
