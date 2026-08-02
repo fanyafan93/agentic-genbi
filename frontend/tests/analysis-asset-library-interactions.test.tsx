@@ -11,14 +11,14 @@ import type { AnalysisAssetSaveRequest, AnalysisAssetSourceContext } from "../sr
 import type { ArtifactFile, ArtifactFolder } from "../src/modules/analysis/types/artifact";
 
 const reportFile: ArtifactFile = {
-  id: "reports-quick-report-html",
-  name: "quick_report.html",
+  id: "reports-analysis-report-html",
+  name: "analysis_report.html",
   kind: "html",
 };
 
 const sqlFile: ArtifactFile = {
-  id: "queries-quick-candidate-sql",
-  name: "quick_candidate.sql",
+  id: "queries-candidate-sql",
+  name: "candidate.sql",
   kind: "sql",
 };
 

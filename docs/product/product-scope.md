@@ -32,30 +32,23 @@ Agentic GenBI 是一个围绕业务问题展开的 Agentic BI 工作台。
 | `Analysis Task` | 产品层的分析任务，对应系统层 `Thread`。 |
 | `Analysis Session` | 产品层的分析会话，对应用户在一个 `Thread` 中与 Agent 的协作过程。 |
 | `Analysis Result` | 产品层的分析结果；第一类结果是交互式分析报告，对应内部可复用 `Artifact`。 |
-| `Thread` | 一个持续工作上下文，可对应分析任务、历史知识探索任务、资产继续编辑任务。 |
-| `Turn` | 用户触发的一轮 Agent 工作，从用户输入开始，到 Agent 暂停、追问、失败或完成结束。 |
-| `Run` | 一次实际执行尝试；多数情况下一个 `Turn` 对应一个 `Run`，重试、回放或多 Agent 并行时一个 `Turn` 可以有多个 `Run`。 |
-| `Item` | `Turn` 内产生的结构化单元，如 message、tool_call、tool_result、plan、question、artifact、sql、chart、report。 |
+| `GenBI Thread` | 产品入口、权限归属和工作空间映射，基本一对一指向 Codex Thread。 |
+| `Codex Thread` | Codex 管理的实际 Agent 会话、上下文和压缩状态。 |
+| `Codex Turn` | 用户触发的一轮 Agent 工作，从用户输入开始，到 Agent 暂停、追问、失败或完成结束。 |
+| `Codex Item` | `Codex Turn` 内产生的结构化单元，如 user message、reasoning、tool call、tool result、agent message。 |
 | `Plan` | Codex Harness 生成的分析计划，是一种 `Item`。 |
 | `Codex Harness Runtime` | 基于 openai-codex Python SDK / Codex 的编排执行基座，负责规划、执行、反思、工具调度、上下文管理、事件流和 Artifact 生成。 |
 | `Business Semantic Library` | 业务语义库，统一承载语义模型和业务知识。 |
 | `Semantic Model` | 让 Agent 看懂数据和系统，如报表语义、表字段、ETL 血缘、SQL 示例、指标维度。 |
 | `Business Knowledge` | 让 Agent 记住被确认的业务经验，如口径、规则、字段来源、分析经验。 |
-| `Artifact` | 可复用分析资产，如报告、图表、SQL、Python、数据快照、分析路径、`SKILL.md`；Artifact 也会作为 `Item` 出现在生成它的 `Turn` 中。 |
+| `Artifact` | 可复用分析资产，如报告、图表、SQL、Python、数据快照、分析路径、`SKILL.md`；Artifact 由 Codex Item 产生或更新，但由 GenBI 负责版本、治理和血缘。 |
 | `Artifact Version` | Artifact 的不可变历史版本。 |
 | `Interactive Report` | 一份结构化 JSON：页面布局、筛选定义、查询引用、Chart Spec 与 Grid Spec；运行时筛选状态不写入报告版本。 |
 | `Data Source` | MySQL、Doris、金蝶、FineReport、ETL、文件和其他业务系统连接。 |
 
-产品层叫“分析任务 / 分析会话 / 分析资产”；系统层统一叫 `Thread / Turn / Item`。业务用户不需要看到这些系统术语。
+产品层叫“分析任务 / 分析会话 / 分析资产”；系统层优先沿用 Codex `Thread / Turn / Item`。业务用户不需要看到这些系统术语。
 
 前台优先使用“分析结果 / 我的结果 / 分析模板”。`Artifact` 与版本只保留给系统、治理与 API 契约。
-
-## 分析模式
-
-- **快速分析**：少追问，先产出可用初稿；不确定处标注假设和风险。
-- **深度分析**：先补齐口径、范围、排除规则、维度、数据源和验证方式，再产出可复用资产。
-
-模式只影响交互策略，不是安全边界。
 
 ## 产品原则
 
@@ -68,6 +61,33 @@ Agentic GenBI 是一个围绕业务问题展开的 Agentic BI 工作台。
 - 可控：权限、SQL 安全、数据访问和审计必须在服务端。
 - 可替换：模型供应商只是 adapter，不能绑死产品架构。
 - Codex 优先：Codex 已有的编排、工具调用、MCP、Skills、Apps / Connectors、sandbox、approval、apply_patch、file search、git、模型适配和状态机制，优先复用，不自研替代品。
+
+## 最终边界
+
+Codex 负责：
+
+- Agent Loop
+- Thread
+- Turn
+- Item
+- 上下文
+- 上下文压缩
+- 工具调度
+- 流式执行事件
+- 中断和追加指令
+- Sandbox / Approval 基础能力
+
+GenBI 负责：
+
+- 用户和租户
+- 数据权限
+- 数据源
+- FineReport 语义案例
+- 指标与关联规则
+- 受控 SQL 工具
+- Artifact
+- Artifact 版本和血缘
+- 分享、发布和治理
 
 ## 当前非目标
 

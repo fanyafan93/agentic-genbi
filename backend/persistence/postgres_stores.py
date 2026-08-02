@@ -9,7 +9,17 @@ from uuid import uuid4
 
 from backend.exploration.run_event_store import RunEventStore
 from backend.exploration.run_trace_store import RunCost, RunTrace, RunTraceStore, TokenUsage, build_run_trace
-from backend.harness.thread_store import ItemRecord, RunRecord, ThreadRecord, ThreadStore, TurnRecord
+from backend.harness.thread_store import CodexItemProjectionRecord, ItemRecord, RunRecord, ThreadRecord, ThreadStore, TurnRecord
+from backend.analysis.asset_store import (
+    AnalysisAssetRecord,
+    AnalysisAssetReopenContext,
+    AnalysisAssetStore,
+    ArtifactLineageRecord,
+    _codex_lineage,
+    _optional_text,
+    _require_text,
+    _validate_reopen_context,
+)
 from backend.analysis.interactive_report_store import (
     InteractiveReportRecord,
     InteractiveReportVersionConflict,
@@ -25,6 +35,9 @@ POSTGRES_THREAD_TABLE = "analysis_threads"
 POSTGRES_TURN_TABLE = "analysis_turns"
 POSTGRES_RUN_TABLE = "analysis_runs"
 POSTGRES_ITEM_TABLE = "analysis_items"
+POSTGRES_CODEX_ITEM_PROJECTION_TABLE = "analysis_codex_item_projections"
+POSTGRES_ANALYSIS_ASSET_TABLE = "analysis_assets"
+POSTGRES_ARTIFACT_LINEAGE_TABLE = "analysis_artifact_lineage"
 POSTGRES_INTERACTIVE_REPORT_TABLE = "analysis_reports"
 POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE = "analysis_report_versions"
 POSTGRES_REPORT_QUERY_AUDIT_TABLE = "analysis_report_query_audits"
@@ -67,6 +80,13 @@ def build_postgres_interactive_report_store() -> "PostgresInteractiveReportStore
     if not database_url:
         raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres interactive report persistence.")
     return PostgresInteractiveReportStore(database_url)
+
+
+def build_postgres_analysis_asset_store() -> "PostgresAnalysisAssetStore":
+    database_url = get_postgres_database_url()
+    if not database_url:
+        raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres analysis asset persistence.")
+    return PostgresAnalysisAssetStore(database_url)
 
 
 def build_postgres_report_query_audit_store() -> "PostgresReportQueryAuditStore":
@@ -313,7 +333,10 @@ class PostgresThreadStore(ThreadStore):
                     id TEXT PRIMARY KEY,
                     product_kind TEXT NOT NULL,
                     title TEXT,
+                    tenant_id TEXT,
                     user_id TEXT,
+                    workspace_id TEXT,
+                    codex_thread_id TEXT,
                     status TEXT NOT NULL,
                     created_at TIMESTAMPTZ,
                     updated_at TIMESTAMPTZ,
@@ -321,6 +344,9 @@ class PostgresThreadStore(ThreadStore):
                 )
                 """
             )
+            conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS tenant_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS workspace_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS codex_thread_id TEXT")
             conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {POSTGRES_TURN_TABLE} (
@@ -332,10 +358,14 @@ class PostgresThreadStore(ThreadStore):
                     run_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     created_at TIMESTAMPTZ,
                     updated_at TIMESTAMPTZ,
+                    codex_thread_id TEXT,
+                    codex_turn_id TEXT,
                     metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb
                 )
                 """
             )
+            conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS codex_thread_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS codex_turn_id TEXT")
             conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {POSTGRES_RUN_TABLE} (
@@ -366,24 +396,55 @@ class PostgresThreadStore(ThreadStore):
                 )
                 """
             )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
+                    codex_item_id TEXT PRIMARY KEY,
+                    codex_thread_id TEXT,
+                    codex_turn_id TEXT,
+                    item_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    created_at TIMESTAMPTZ,
+                    completed_at TIMESTAMPTZ,
+                    genbi_thread_id TEXT REFERENCES {POSTGRES_THREAD_TABLE}(id) ON DELETE CASCADE,
+                    genbi_turn_id TEXT REFERENCES {POSTGRES_TURN_TABLE}(id) ON DELETE SET NULL,
+                    genbi_run_id TEXT REFERENCES {POSTGRES_RUN_TABLE}(id) ON DELETE SET NULL
+                )
+                """
+            )
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_updated ON {POSTGRES_THREAD_TABLE} (updated_at DESC NULLS LAST)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_product ON {POSTGRES_THREAD_TABLE} (product_kind)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_codex ON {POSTGRES_THREAD_TABLE} (codex_thread_id)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_tenant_user ON {POSTGRES_THREAD_TABLE} (tenant_id, user_id)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_thread ON {POSTGRES_TURN_TABLE} (thread_id, created_at)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_codex ON {POSTGRES_TURN_TABLE} (codex_thread_id, codex_turn_id)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_RUN_TABLE}_thread ON {POSTGRES_RUN_TABLE} (thread_id, started_at)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ITEM_TABLE}_run ON {POSTGRES_ITEM_TABLE} (run_id, created_at)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ITEM_TABLE}_thread ON {POSTGRES_ITEM_TABLE} (thread_id, created_at)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_thread ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (genbi_thread_id, created_at)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_turn ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (codex_thread_id, codex_turn_id)")
 
     def _write_state(self, state: dict[str, Any]) -> None:
         with _connect(self.database_url) as conn:
             for thread in state["threads"].values():
                 conn.execute(
                     f"""
-                    INSERT INTO {POSTGRES_THREAD_TABLE} (id, product_kind, title, user_id, status, created_at, updated_at, metadata)
-                    VALUES (%(id)s, %(product_kind)s, %(title)s, %(user_id)s, %(status)s, %(created_at)s, %(updated_at)s, %(metadata)s)
+                    INSERT INTO {POSTGRES_THREAD_TABLE} (
+                        id, product_kind, title, tenant_id, user_id, workspace_id, codex_thread_id,
+                        status, created_at, updated_at, metadata
+                    )
+                    VALUES (
+                        %(id)s, %(product_kind)s, %(title)s, %(tenant_id)s, %(user_id)s, %(workspace_id)s,
+                        %(codex_thread_id)s, %(status)s, %(created_at)s, %(updated_at)s, %(metadata)s
+                    )
                     ON CONFLICT (id) DO UPDATE SET
                         product_kind = EXCLUDED.product_kind,
                         title = EXCLUDED.title,
+                        tenant_id = EXCLUDED.tenant_id,
                         user_id = EXCLUDED.user_id,
+                        workspace_id = EXCLUDED.workspace_id,
+                        codex_thread_id = EXCLUDED.codex_thread_id,
                         status = EXCLUDED.status,
                         updated_at = EXCLUDED.updated_at,
                         metadata = EXCLUDED.metadata
@@ -393,14 +454,22 @@ class PostgresThreadStore(ThreadStore):
             for turn in state["turns"].values():
                 conn.execute(
                     f"""
-                    INSERT INTO {POSTGRES_TURN_TABLE} (id, thread_id, input_kind, question, status, run_ids, created_at, updated_at, metadata)
-                    VALUES (%(id)s, %(thread_id)s, %(input_kind)s, %(question)s, %(status)s, %(run_ids)s, %(created_at)s, %(updated_at)s, %(metadata)s)
+                    INSERT INTO {POSTGRES_TURN_TABLE} (
+                        id, thread_id, input_kind, question, status, run_ids, created_at, updated_at,
+                        codex_thread_id, codex_turn_id, metadata
+                    )
+                    VALUES (
+                        %(id)s, %(thread_id)s, %(input_kind)s, %(question)s, %(status)s, %(run_ids)s,
+                        %(created_at)s, %(updated_at)s, %(codex_thread_id)s, %(codex_turn_id)s, %(metadata)s
+                    )
                     ON CONFLICT (id) DO UPDATE SET
                         input_kind = EXCLUDED.input_kind,
                         question = EXCLUDED.question,
                         status = EXCLUDED.status,
                         run_ids = EXCLUDED.run_ids,
                         updated_at = EXCLUDED.updated_at,
+                        codex_thread_id = EXCLUDED.codex_thread_id,
+                        codex_turn_id = EXCLUDED.codex_turn_id,
                         metadata = EXCLUDED.metadata
                     """,
                     _turn_params(turn),
@@ -426,6 +495,7 @@ class PostgresThreadStore(ThreadStore):
                     _run_record_params(run),
                 )
                 conn.execute(f"DELETE FROM {POSTGRES_ITEM_TABLE} WHERE run_id = %(run_id)s", {"run_id": run.id})
+                conn.execute(f"DELETE FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} WHERE genbi_run_id = %(run_id)s", {"run_id": run.id})
             for item in state["items"]:
                 conn.execute(
                     f"""
@@ -438,6 +508,30 @@ class PostgresThreadStore(ThreadStore):
                         created_at = EXCLUDED.created_at
                     """,
                     _item_params(item),
+                )
+            for item in state["codex_item_projections"]:
+                conn.execute(
+                    f"""
+                    INSERT INTO {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
+                        codex_item_id, codex_thread_id, codex_turn_id, item_type, status, payload,
+                        created_at, completed_at, genbi_thread_id, genbi_turn_id, genbi_run_id
+                    )
+                    VALUES (
+                        %(codex_item_id)s, %(codex_thread_id)s, %(codex_turn_id)s, %(item_type)s, %(status)s, %(payload)s,
+                        %(created_at)s, %(completed_at)s, %(genbi_thread_id)s, %(genbi_turn_id)s, %(genbi_run_id)s
+                    )
+                    ON CONFLICT (codex_item_id) DO UPDATE SET
+                        codex_thread_id = EXCLUDED.codex_thread_id,
+                        codex_turn_id = EXCLUDED.codex_turn_id,
+                        item_type = EXCLUDED.item_type,
+                        status = EXCLUDED.status,
+                        payload = EXCLUDED.payload,
+                        completed_at = EXCLUDED.completed_at,
+                        genbi_thread_id = EXCLUDED.genbi_thread_id,
+                        genbi_turn_id = EXCLUDED.genbi_turn_id,
+                        genbi_run_id = EXCLUDED.genbi_run_id
+                    """,
+                    _codex_item_projection_params(item),
                 )
 
     def _read_state(self) -> dict[str, Any]:
@@ -455,15 +549,320 @@ class PostgresThreadStore(ThreadStore):
                 for row in conn.execute(f"SELECT * FROM {POSTGRES_RUN_TABLE}").fetchall()
             }
             items = [_item_record_from_row(row) for row in conn.execute(f"SELECT * FROM {POSTGRES_ITEM_TABLE}").fetchall()]
-        return {"threads": threads, "turns": turns, "runs": runs, "items": items}
+            codex_item_projections = [
+                _codex_item_projection_from_row(row)
+                for row in conn.execute(f"SELECT * FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}").fetchall()
+            ]
+        return {"threads": threads, "turns": turns, "runs": runs, "items": items, "codex_item_projections": codex_item_projections}
 
     def clear(self) -> int:
         with _connect(self.database_url) as conn:
             item_count = conn.execute(f"DELETE FROM {POSTGRES_ITEM_TABLE}").rowcount or 0
+            conn.execute(f"DELETE FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}")
             conn.execute(f"DELETE FROM {POSTGRES_RUN_TABLE}")
             conn.execute(f"DELETE FROM {POSTGRES_TURN_TABLE}")
             conn.execute(f"DELETE FROM {POSTGRES_THREAD_TABLE}")
             return item_count
+
+
+class PostgresAnalysisAssetStore(AnalysisAssetStore):
+    def __init__(self, database_url: str) -> None:
+        self.database_url = _normalize_postgres_url(database_url)
+        self.ensure_schema()
+
+    def ensure_schema(self) -> None:
+        with _connect(self.database_url) as conn:
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_ANALYSIS_ASSET_TABLE} (
+                    asset_id TEXT PRIMARY KEY,
+                    artifact_version_id TEXT NOT NULL,
+                    source_task_id TEXT NOT NULL,
+                    source_task_title TEXT NOT NULL,
+                    source_conversation_id TEXT NOT NULL,
+                    source_run_id TEXT NOT NULL,
+                    source_codex_thread_id TEXT,
+                    source_codex_turn_id TEXT,
+                    source_codex_item_id TEXT,
+                    asset_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    visibility TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    latest_version TEXT NOT NULL,
+                    file_id TEXT,
+                    reopen_context JSONB NOT NULL,
+                    metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_ARTIFACT_LINEAGE_TABLE} (
+                    artifact_id TEXT PRIMARY KEY,
+                    artifact_version_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL REFERENCES {POSTGRES_ANALYSIS_ASSET_TABLE}(asset_id) ON DELETE CASCADE,
+                    asset_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    source_task_id TEXT NOT NULL,
+                    source_conversation_id TEXT NOT NULL,
+                    source_run_id TEXT NOT NULL,
+                    codex_thread_id TEXT,
+                    codex_turn_id TEXT,
+                    codex_item_id TEXT,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ANALYSIS_ASSET_TABLE}_task_updated ON {POSTGRES_ANALYSIS_ASSET_TABLE} (source_task_id, updated_at DESC)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ANALYSIS_ASSET_TABLE}_codex_item ON {POSTGRES_ANALYSIS_ASSET_TABLE} (source_codex_item_id)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ARTIFACT_LINEAGE_TABLE}_codex_item ON {POSTGRES_ARTIFACT_LINEAGE_TABLE} (codex_item_id, updated_at DESC)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ARTIFACT_LINEAGE_TABLE}_codex_turn ON {POSTGRES_ARTIFACT_LINEAGE_TABLE} (codex_thread_id, codex_turn_id)")
+
+    def save_asset(
+        self,
+        *,
+        asset_id: str,
+        artifact_version_id: str,
+        source_task_id: str,
+        source_task_title: str,
+        source_conversation_id: str,
+        source_run_id: str,
+        source_execution_attempt_id: str | None = None,
+        source_codex_thread_id: str | None = None,
+        source_codex_turn_id: str | None = None,
+        source_codex_item_id: str | None = None,
+        asset_type: str,
+        title: str,
+        label: str,
+        description: str,
+        visibility: str,
+        status: str,
+        latest_version: str,
+        reopen_context: AnalysisAssetReopenContext,
+        file_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AnalysisAssetRecord:
+        execution_attempt_id = (source_execution_attempt_id or source_run_id).strip()
+        for field_name, value in {
+            "asset_id": asset_id,
+            "artifact_version_id": artifact_version_id,
+            "source_task_id": source_task_id,
+            "source_task_title": source_task_title,
+            "source_conversation_id": source_conversation_id,
+            "source_execution_attempt_id": execution_attempt_id,
+            "source_run_id": source_run_id,
+            "asset_type": asset_type,
+            "title": title,
+            "label": label,
+            "description": description,
+            "visibility": visibility,
+            "status": status,
+            "latest_version": latest_version,
+        }.items():
+            _require_text(field_name, value)
+        _validate_reopen_context(reopen_context)
+
+        now = datetime.now(UTC).isoformat()
+        existing = self.get_asset(asset_id)
+        codex_lineage = _codex_lineage(source_codex_thread_id, source_codex_turn_id, source_codex_item_id)
+        record_metadata = dict(metadata or {})
+        record_metadata.setdefault("source_execution_attempt_id", execution_attempt_id)
+        if codex_lineage:
+            record_metadata["codex_lineage"] = codex_lineage
+        record = AnalysisAssetRecord(
+            assetId=asset_id.strip(),
+            artifactVersionId=artifact_version_id.strip(),
+            sourceTaskId=source_task_id.strip(),
+            sourceTaskTitle=source_task_title.strip(),
+            sourceConversationId=source_conversation_id.strip(),
+            sourceExecutionAttemptId=execution_attempt_id,
+            sourceRunId=source_run_id.strip(),
+            sourceCodexThreadId=_optional_text(source_codex_thread_id),
+            sourceCodexTurnId=_optional_text(source_codex_turn_id),
+            sourceCodexItemId=_optional_text(source_codex_item_id),
+            assetType=asset_type.strip(),
+            title=title.strip(),
+            label=label.strip(),
+            description=description.strip(),
+            visibility=visibility.strip(),
+            status=status.strip(),
+            latestVersion=latest_version.strip(),
+            fileId=file_id.strip() if file_id else None,
+            reopenContext=reopen_context,
+            createdAt=existing.createdAt if existing else now,
+            updatedAt=now,
+            metadata=record_metadata,
+        )
+        with _connect(self.database_url) as conn:
+            with conn.transaction():
+                conn.execute(
+                    f"""
+                    INSERT INTO {POSTGRES_ANALYSIS_ASSET_TABLE} (
+                        asset_id, artifact_version_id, source_task_id, source_task_title, source_conversation_id,
+                        source_run_id, source_codex_thread_id, source_codex_turn_id, source_codex_item_id,
+                        asset_type, title, label, description, visibility, status, latest_version, file_id,
+                        reopen_context, metadata, created_at, updated_at
+                    )
+                    VALUES (
+                        %(asset_id)s, %(artifact_version_id)s, %(source_task_id)s, %(source_task_title)s, %(source_conversation_id)s,
+                        %(source_run_id)s, %(source_codex_thread_id)s, %(source_codex_turn_id)s, %(source_codex_item_id)s,
+                        %(asset_type)s, %(title)s, %(label)s, %(description)s, %(visibility)s, %(status)s, %(latest_version)s,
+                        %(file_id)s, %(reopen_context)s, %(metadata)s, %(created_at)s, %(updated_at)s
+                    )
+                    ON CONFLICT (asset_id) DO UPDATE SET
+                        artifact_version_id = EXCLUDED.artifact_version_id,
+                        source_task_id = EXCLUDED.source_task_id,
+                        source_task_title = EXCLUDED.source_task_title,
+                        source_conversation_id = EXCLUDED.source_conversation_id,
+                        source_run_id = EXCLUDED.source_run_id,
+                        source_codex_thread_id = EXCLUDED.source_codex_thread_id,
+                        source_codex_turn_id = EXCLUDED.source_codex_turn_id,
+                        source_codex_item_id = EXCLUDED.source_codex_item_id,
+                        asset_type = EXCLUDED.asset_type,
+                        title = EXCLUDED.title,
+                        label = EXCLUDED.label,
+                        description = EXCLUDED.description,
+                        visibility = EXCLUDED.visibility,
+                        status = EXCLUDED.status,
+                        latest_version = EXCLUDED.latest_version,
+                        file_id = EXCLUDED.file_id,
+                        reopen_context = EXCLUDED.reopen_context,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    _analysis_asset_params(record),
+                )
+                conn.execute(
+                    f"""
+                    INSERT INTO {POSTGRES_ARTIFACT_LINEAGE_TABLE} (
+                        artifact_id, artifact_version_id, asset_id, asset_type, title, source_task_id,
+                        source_conversation_id, source_run_id, codex_thread_id, codex_turn_id, codex_item_id,
+                        created_at, updated_at
+                    )
+                    VALUES (
+                        %(artifact_id)s, %(artifact_version_id)s, %(asset_id)s, %(asset_type)s, %(title)s, %(source_task_id)s,
+                        %(source_conversation_id)s, %(source_run_id)s, %(codex_thread_id)s, %(codex_turn_id)s,
+                        %(codex_item_id)s, %(created_at)s, %(updated_at)s
+                    )
+                    ON CONFLICT (artifact_id) DO UPDATE SET
+                        artifact_version_id = EXCLUDED.artifact_version_id,
+                        asset_id = EXCLUDED.asset_id,
+                        asset_type = EXCLUDED.asset_type,
+                        title = EXCLUDED.title,
+                        source_task_id = EXCLUDED.source_task_id,
+                        source_conversation_id = EXCLUDED.source_conversation_id,
+                        source_run_id = EXCLUDED.source_run_id,
+                        codex_thread_id = EXCLUDED.codex_thread_id,
+                        codex_turn_id = EXCLUDED.codex_turn_id,
+                        codex_item_id = EXCLUDED.codex_item_id,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    _artifact_lineage_params(_artifact_lineage_from_asset_record(record)),
+                )
+        return record
+
+    def list_assets(self, *, limit: int = 50, source_task_id: str | None = None, q: str = "") -> list[AnalysisAssetRecord]:
+        where = []
+        params: dict[str, Any] = {"limit": limit}
+        if source_task_id:
+            where.append("source_task_id = %(source_task_id)s")
+            params["source_task_id"] = source_task_id
+        if q.strip():
+            where.append("(asset_id ILIKE %(q)s OR source_task_title ILIKE %(q)s OR asset_type ILIKE %(q)s OR title ILIKE %(q)s OR label ILIKE %(q)s OR description ILIKE %(q)s OR metadata::text ILIKE %(q)s)")
+            params["q"] = f"%{q.strip()}%"
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        with _connect(self.database_url) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM {POSTGRES_ANALYSIS_ASSET_TABLE} {clause} ORDER BY updated_at DESC LIMIT %(limit)s",
+                params,
+            ).fetchall()
+        return [_analysis_asset_from_row(row) for row in rows]
+
+    def get_asset(self, asset_id: str) -> AnalysisAssetRecord | None:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"SELECT * FROM {POSTGRES_ANALYSIS_ASSET_TABLE} WHERE asset_id = %(asset_id)s",
+                {"asset_id": asset_id},
+            ).fetchone()
+        return _analysis_asset_from_row(row) if row else None
+
+    def list_artifact_lineage(
+        self,
+        *,
+        artifact_id: str | None = None,
+        codex_thread_id: str | None = None,
+        codex_turn_id: str | None = None,
+        codex_item_id: str | None = None,
+        limit: int = 50,
+    ) -> list[ArtifactLineageRecord]:
+        where = []
+        params: dict[str, Any] = {"limit": limit}
+        if artifact_id:
+            where.append("artifact_id = %(artifact_id)s")
+            params["artifact_id"] = artifact_id
+        if codex_thread_id:
+            where.append("codex_thread_id = %(codex_thread_id)s")
+            params["codex_thread_id"] = codex_thread_id
+        if codex_turn_id:
+            where.append("codex_turn_id = %(codex_turn_id)s")
+            params["codex_turn_id"] = codex_turn_id
+        if codex_item_id:
+            where.append("codex_item_id = %(codex_item_id)s")
+            params["codex_item_id"] = codex_item_id
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        with _connect(self.database_url) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM {POSTGRES_ARTIFACT_LINEAGE_TABLE} {clause} ORDER BY updated_at DESC LIMIT %(limit)s",
+                params,
+            ).fetchall()
+        return [_artifact_lineage_from_row(row) for row in rows]
+
+    def delete_asset(self, asset_id: str) -> bool:
+        with _connect(self.database_url) as conn:
+            cursor = conn.execute(
+                f"DELETE FROM {POSTGRES_ANALYSIS_ASSET_TABLE} WHERE asset_id = %(asset_id)s",
+                {"asset_id": asset_id},
+            )
+        return bool(cursor.rowcount)
+
+    def clear_assets(self) -> int:
+        with _connect(self.database_url) as conn:
+            count = conn.execute(f"DELETE FROM {POSTGRES_ANALYSIS_ASSET_TABLE}").rowcount or 0
+        return count
+
+    def _read_all(self) -> list[AnalysisAssetRecord]:
+        return self.list_assets(limit=10_000)
+
+    def _write_all(self, records: list[AnalysisAssetRecord]) -> None:
+        self.clear_assets()
+        for record in records:
+            self.save_asset(
+                asset_id=record.assetId,
+                artifact_version_id=record.artifactVersionId,
+                source_task_id=record.sourceTaskId,
+                source_task_title=record.sourceTaskTitle,
+                source_conversation_id=record.sourceConversationId,
+                source_execution_attempt_id=record.sourceExecutionAttemptId,
+                source_run_id=record.sourceRunId,
+                source_codex_thread_id=record.sourceCodexThreadId,
+                source_codex_turn_id=record.sourceCodexTurnId,
+                source_codex_item_id=record.sourceCodexItemId,
+                asset_type=record.assetType,
+                title=record.title,
+                label=record.label,
+                description=record.description,
+                visibility=record.visibility,
+                status=record.status,
+                latest_version=record.latestVersion,
+                reopen_context=record.reopenContext,
+                file_id=record.fileId,
+                metadata=record.metadata,
+            )
 
 
 class PostgresInteractiveReportStore:
@@ -961,7 +1360,10 @@ def _thread_params(record: ThreadRecord) -> dict[str, Any]:
         "id": record.id,
         "product_kind": record.productKind,
         "title": record.title,
+        "tenant_id": record.tenantId,
         "user_id": record.userId,
+        "workspace_id": record.workspaceId,
+        "codex_thread_id": record.codexThreadId,
         "status": record.status,
         "created_at": record.createdAt,
         "updated_at": record.updatedAt,
@@ -979,6 +1381,8 @@ def _turn_params(record: TurnRecord) -> dict[str, Any]:
         "run_ids": _jsonb(record.runIds),
         "created_at": record.createdAt,
         "updated_at": record.updatedAt,
+        "codex_thread_id": record.codexThreadId,
+        "codex_turn_id": record.codexTurnId,
         "metadata": _jsonb(record.metadata),
     }
 
@@ -1011,8 +1415,69 @@ def _item_params(record: ItemRecord) -> dict[str, Any]:
     }
 
 
+def _codex_item_projection_params(record: CodexItemProjectionRecord) -> dict[str, Any]:
+    return {
+        "codex_item_id": record.codexItemId,
+        "codex_thread_id": record.codexThreadId,
+        "codex_turn_id": record.codexTurnId,
+        "item_type": record.itemType,
+        "status": record.status,
+        "payload": _jsonb(record.payload),
+        "created_at": record.createdAt,
+        "completed_at": record.completedAt,
+        "genbi_thread_id": record.genbiThreadId,
+        "genbi_turn_id": record.genbiTurnId,
+        "genbi_run_id": record.genbiRunId,
+    }
+
+
+def _analysis_asset_params(record: AnalysisAssetRecord) -> dict[str, Any]:
+    return {
+        "asset_id": record.assetId,
+        "artifact_version_id": record.artifactVersionId,
+        "source_task_id": record.sourceTaskId,
+        "source_task_title": record.sourceTaskTitle,
+        "source_conversation_id": record.sourceConversationId,
+        "source_run_id": record.sourceRunId,
+        "source_codex_thread_id": record.sourceCodexThreadId,
+        "source_codex_turn_id": record.sourceCodexTurnId,
+        "source_codex_item_id": record.sourceCodexItemId,
+        "asset_type": record.assetType,
+        "title": record.title,
+        "label": record.label,
+        "description": record.description,
+        "visibility": record.visibility,
+        "status": record.status,
+        "latest_version": record.latestVersion,
+        "file_id": record.fileId,
+        "reopen_context": _jsonb(asdict(record.reopenContext)),
+        "metadata": _jsonb(record.metadata),
+        "created_at": record.createdAt,
+        "updated_at": record.updatedAt,
+    }
+
+
+def _artifact_lineage_params(record: ArtifactLineageRecord) -> dict[str, Any]:
+    return {
+        "artifact_id": record.artifactId,
+        "artifact_version_id": record.artifactVersionId,
+        "asset_id": record.assetId,
+        "asset_type": record.assetType,
+        "title": record.title,
+        "source_task_id": record.sourceTaskId,
+        "source_conversation_id": record.sourceConversationId,
+        "source_run_id": record.sourceRunId,
+        "codex_thread_id": record.codexThreadId,
+        "codex_turn_id": record.codexTurnId,
+        "codex_item_id": record.codexItemId,
+        "created_at": record.createdAt,
+        "updated_at": record.updatedAt,
+    }
+
+
 def _interactive_report_params(payload: dict[str, Any], *, latest_version: int) -> dict[str, Any]:
     source = dict(payload["source"])
+    execution_attempt_id = str(source.get("executionAttemptId") or source.get("runId")).strip()
     return {
         "id": str(payload["id"]).strip(),
         "title": str(payload["title"]).strip(),
@@ -1022,19 +1487,20 @@ def _interactive_report_params(payload: dict[str, Any], *, latest_version: int) 
         "owner_id": str(payload["ownerId"]).strip(),
         "source_thread_id": str(source["threadId"]).strip(),
         "source_turn_id": str(source["turnId"]).strip(),
-        "source_run_id": str(source["runId"]).strip(),
+        "source_run_id": execution_attempt_id,
         "latest_version": latest_version,
     }
 
 
 def _interactive_report_version_params(payload: dict[str, Any], *, version: int) -> dict[str, Any]:
     source = dict(payload["source"])
+    execution_attempt_id = str(source.get("executionAttemptId") or source.get("runId")).strip()
     return {
         "report_id": str(payload["id"]).strip(),
         "version": version,
         "source_thread_id": str(source["threadId"]).strip(),
         "source_turn_id": str(source["turnId"]).strip(),
-        "source_run_id": str(source["runId"]).strip(),
+        "source_run_id": execution_attempt_id,
         "document": _jsonb(payload["document"]),
         "filters": _jsonb(payload["filters"]),
         "queries": _jsonb(payload["queries"]),
@@ -1070,7 +1536,10 @@ def _thread_record_from_row(row: dict[str, Any]) -> ThreadRecord:
         id=str(row["id"]),
         productKind=str(row["product_kind"]),  # type: ignore[arg-type]
         title=row.get("title"),
+        tenantId=row.get("tenant_id"),
         userId=row.get("user_id"),
+        workspaceId=row.get("workspace_id"),
+        codexThreadId=row.get("codex_thread_id"),
         status=str(row["status"]),
         createdAt=_iso(row.get("created_at")) or "",
         updatedAt=_iso(row.get("updated_at")) or "",
@@ -1088,6 +1557,8 @@ def _turn_record_from_row(row: dict[str, Any]) -> TurnRecord:
         runIds=[str(item) for item in row.get("run_ids") or []],
         createdAt=_iso(row.get("created_at")) or "",
         updatedAt=_iso(row.get("updated_at")) or "",
+        codexThreadId=row.get("codex_thread_id"),
+        codexTurnId=row.get("codex_turn_id"),
         metadata=dict(row.get("metadata") or {}),
     )
 
@@ -1117,6 +1588,92 @@ def _item_record_from_row(row: dict[str, Any]) -> ItemRecord:
         eventType=str(row["event_type"]),
         payload=dict(row.get("payload") or {}),
         createdAt=_iso(row.get("created_at")) or "",
+    )
+
+
+def _codex_item_projection_from_row(row: dict[str, Any]) -> CodexItemProjectionRecord:
+    return CodexItemProjectionRecord(
+        codexItemId=str(row["codex_item_id"]),
+        codexThreadId=row.get("codex_thread_id"),
+        codexTurnId=row.get("codex_turn_id"),
+        itemType=str(row["item_type"]),
+        status=str(row["status"]),
+        payload=dict(row.get("payload") or {}),
+        createdAt=_iso(row.get("created_at")) or "",
+        completedAt=_iso(row.get("completed_at")),
+        genbiThreadId=row.get("genbi_thread_id"),
+        genbiTurnId=row.get("genbi_turn_id"),
+        genbiRunId=row.get("genbi_run_id"),
+    )
+
+
+def _analysis_asset_from_row(row: dict[str, Any]) -> AnalysisAssetRecord:
+    context_payload = dict(row.get("reopen_context") or {})
+    metadata = dict(row.get("metadata") or {})
+    source_run_id = str(row["source_run_id"])
+    source_execution_attempt_id = str(metadata.get("source_execution_attempt_id") or source_run_id)
+    context_payload.setdefault("sourceExecutionAttemptId", context_payload.get("sourceRunId") or source_execution_attempt_id)
+    return AnalysisAssetRecord(
+        assetId=str(row["asset_id"]),
+        artifactVersionId=str(row["artifact_version_id"]),
+        sourceTaskId=str(row["source_task_id"]),
+        sourceTaskTitle=str(row["source_task_title"]),
+        sourceConversationId=str(row["source_conversation_id"]),
+        sourceExecutionAttemptId=source_execution_attempt_id,
+        sourceRunId=source_run_id,
+        sourceCodexThreadId=row.get("source_codex_thread_id"),
+        sourceCodexTurnId=row.get("source_codex_turn_id"),
+        sourceCodexItemId=row.get("source_codex_item_id"),
+        assetType=str(row["asset_type"]),
+        title=str(row["title"]),
+        label=str(row["label"]),
+        description=str(row["description"]),
+        visibility=str(row["visibility"]),
+        status=str(row["status"]),
+        latestVersion=str(row["latest_version"]),
+        fileId=row.get("file_id"),
+        reopenContext=AnalysisAssetReopenContext(**context_payload),
+        createdAt=_iso(row.get("created_at")) or "",
+        updatedAt=_iso(row.get("updated_at")) or "",
+        metadata=metadata,
+    )
+
+
+def _artifact_lineage_from_asset_record(record: AnalysisAssetRecord) -> ArtifactLineageRecord:
+    return ArtifactLineageRecord(
+        artifactId=record.artifactVersionId,
+        artifactVersionId=record.artifactVersionId,
+        assetId=record.assetId,
+        assetType=record.assetType,
+        title=record.title,
+        sourceTaskId=record.sourceTaskId,
+        sourceConversationId=record.sourceConversationId,
+        sourceExecutionAttemptId=record.sourceExecutionAttemptId,
+        sourceRunId=record.sourceRunId,
+        codexThreadId=record.sourceCodexThreadId,
+        codexTurnId=record.sourceCodexTurnId,
+        codexItemId=record.sourceCodexItemId,
+        createdAt=record.createdAt,
+        updatedAt=record.updatedAt,
+    )
+
+
+def _artifact_lineage_from_row(row: dict[str, Any]) -> ArtifactLineageRecord:
+    return ArtifactLineageRecord(
+        artifactId=str(row["artifact_id"]),
+        artifactVersionId=str(row["artifact_version_id"]),
+        assetId=str(row["asset_id"]),
+        assetType=str(row["asset_type"]),
+        title=str(row["title"]),
+        sourceTaskId=str(row["source_task_id"]),
+        sourceConversationId=str(row["source_conversation_id"]),
+        sourceExecutionAttemptId=str(row["source_run_id"]),
+        sourceRunId=str(row["source_run_id"]),
+        codexThreadId=row.get("codex_thread_id"),
+        codexTurnId=row.get("codex_turn_id"),
+        codexItemId=row.get("codex_item_id"),
+        createdAt=_iso(row.get("created_at")) or "",
+        updatedAt=_iso(row.get("updated_at")) or "",
     )
 
 

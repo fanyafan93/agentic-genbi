@@ -36,15 +36,15 @@ const dashboardSpecJson = `{
   "title": "渠道销售分析 Dashboard 片段",
   "layout": ["channel_share", "growth_rank", "assumption_risks"],
   "refresh": "manual",
-  "sourceAssets": ["quick_candidate.sql", "channel_share.chart.json"]
+  "sourceAssets": ["candidate.sql", "channel_share.chart.json"]
 }`;
 
-const assumptionsMarkdown = `# 快速分析假设
+const assumptionsMarkdown = `# 分析假设
 
 - 暂按支付成功订单计算销售额。
 - 暂未排除退款、取消和测试订单。
 - 渠道归因优先使用订单主渠道字段。
-- 保存为正式资产前建议切换到深度分析确认口径。`;
+- 保存为正式资产前建议确认口径。`;
 
 const metricMarkdown = `# 渠道销售额指标口径
 
@@ -59,7 +59,7 @@ const metricMarkdown = `# 渠道销售额指标口径
 const ruleMarkdown = `# 订单范围业务规则
 
 ## 当前规则
-快速分析阶段暂保留所有支付成功订单，未正式排除退款、取消和测试订单。
+当前草稿暂保留所有支付成功订单，未正式排除退款、取消和测试订单。
 
 ## 风险
 该规则会影响销售额、渠道占比和增长判断；沉淀为正式资产前需要业务确认。`;
@@ -83,10 +83,10 @@ const skillMarkdown = `# 渠道销售占比分析 Skill
 - 是否排除退款、取消、测试订单。
 - 是否需要按门店、平台、SKU 或新老用户继续拆分。
 - 是否允许把当前分析路径发布给团队复用。
-- 后续 Agent 运行时是否必须先追问口径，还是允许快速生成假设版。
+- 后续 Agent 运行时是否必须先追问口径，还是允许先生成假设草稿。
 
 ## 推荐步骤
-1. 确认业务口径和分析模式。
+1. 确认业务口径和分析范围。
 2. 检索业务语义库，读取报表级语义模型、数据库元数据、ETL 血缘和历史 SQL 示例。
 3. 生成只读 SQL，并校验表、字段、过滤条件和 limit。
 4. 生成渠道占比图表和结果表。
@@ -199,7 +199,7 @@ export function buildAnalysisAssetCards(files: ArtifactFile[]): AnalysisAssetCar
     confirmations: ["口径确认", "适用场景", "复用权限"],
     fileId: skill.id,
   });
-  pushCard(assumptions && { id: "assumptions", title: "假设与风险", label: "假设", description: "快速分析里未确认的业务前提", status: "draft", intent: "save", fileId: assumptions.id });
+  pushCard(assumptions && { id: "assumptions", title: "假设与风险", label: "假设", description: "当前草稿里未确认的业务前提", status: "draft", intent: "save", fileId: assumptions.id });
 
   return cards;
 }

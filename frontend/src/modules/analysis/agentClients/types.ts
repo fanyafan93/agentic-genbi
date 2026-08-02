@@ -1,19 +1,23 @@
 import type { InteractiveReport } from "../types/interactive-report";
 
-export type AnalysisMode = "quick" | "deep";
-
 export type AgentEventSystemContext = {
   threadId?: string;
   turnId?: string;
+  executionAttemptId?: string;
+  /** Compatibility mirror for the old Run-based contract. */
   runId?: string;
   itemId?: string;
+  codexThreadId?: string;
+  codexTurnId?: string;
+  codexItemId?: string;
 };
 
 export type AgentEvent =
-  | ({ type: "conversation-init"; runId: string; conversationId?: string; question?: string } & AgentEventSystemContext)
-  | ({ type: "run-init"; runId: string; conversationId?: string } & AgentEventSystemContext)
+  | ({ type: "conversation-init"; executionAttemptId: string; runId?: string; conversationId?: string; question?: string } & AgentEventSystemContext)
+  | ({ type: "run-init"; executionAttemptId: string; runId?: string; conversationId?: string } & AgentEventSystemContext)
   | ({ type: "user"; nodeId: string; content: string } & AgentEventSystemContext)
   | ({ type: "agent"; nodeId: string; content: string; mode?: "delta" | "replace" } & AgentEventSystemContext)
+  | ({ type: "debug"; nodeId: string; title: string; content: string } & AgentEventSystemContext)
   | ({ type: "step"; label: string; state: "queued" | "running" | "done"; nodeId?: string } & AgentEventSystemContext)
   | ({ type: "ask"; nodeId: string; question: string; options: { id: string; label: string }[] } & AgentEventSystemContext)
   | ({ type: "tokens"; nodeId: string; text: string } & AgentEventSystemContext)
@@ -23,9 +27,9 @@ export type AgentEvent =
   | ({ type: "done" } & AgentEventSystemContext);
 
 export type AgentInput =
-  | { kind: "start"; suggestionId?: string; question?: string; analysisMode?: AnalysisMode; dataEgressAuthorized?: boolean; interactiveReport?: InteractiveReport }
-  | { kind: "message"; content: string; analysisMode?: AnalysisMode; dataEgressAuthorized?: boolean; interactiveReport?: InteractiveReport }
-  | { kind: "reply"; optionId: string; analysisMode?: AnalysisMode; dataEgressAuthorized?: boolean; interactiveReport?: InteractiveReport }
+  | { kind: "start"; suggestionId?: string; question?: string; interactiveReport?: InteractiveReport }
+  | { kind: "message"; content: string; interactiveReport?: InteractiveReport }
+  | { kind: "reply"; optionId: string; interactiveReport?: InteractiveReport }
   | { kind: "reset" };
 
 export interface AgentClient {

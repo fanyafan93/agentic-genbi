@@ -134,6 +134,82 @@ class FineReportReportsApiTest(unittest.TestCase):
                 self.assertNotIn("=sum(A3)", encoded)
                 self.assertNotIn("fine_username", encoded)
 
+    def test_lists_and_loads_recursive_merged_parsed_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parsed_root = Path(temp_dir) / "finereport" / "解析"
+            report_path = parsed_root / "ADV" / "DY" / "直播复盘表.原始解析.json"
+            report_path.parent.mkdir(parents=True)
+            self._write_json(
+                report_path,
+                {
+                    "report": {
+                        "name": "直播复盘表",
+                        "source_cpt_path": "reports/ADV/DY/直播复盘表.cpt",
+                        "sheet_names": ["sheet1"],
+                    },
+                    "datasets": [
+                        {
+                            "name": "basic_data",
+                            "type": "database_query",
+                            "connection_name": "fat_dm",
+                            "raw_sql": "select amount from dm.live_review",
+                            "parameters": [{"name": "sMonth"}, {"name": "fine_username"}],
+                        }
+                    ],
+                    "parameters_and_interactions": {
+                        "parameters": [{"name": "sMonth"}],
+                        "parameter_widgets": [{"parameter": "sMonth", "widget_class": "ComboBox", "label": "月份"}],
+                        "conditional_rules": [{"cell": "B2", "condition": "amount > 0", "action": "highlight"}],
+                    },
+                    "report_structure": {
+                        "sheets": [
+                            {
+                                "name": "sheet1",
+                                "cells": [
+                                    {"cell": "A1", "row": 1, "column": "A", "value": "直播复盘"},
+                                    {
+                                        "cell": "B2",
+                                        "row": 2,
+                                        "column": "B",
+                                        "formula": "=sum(B3)",
+                                        "binding": {"dataset": "basic_data", "field": "amount"},
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+
+            repository = FineReportReportRepository(parsed_root)
+            listed = repository.list_reports()
+
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["name"], "直播复盘表")
+            self.assertEqual(listed[0]["availableParts"], ["merged"])
+            self.assertEqual(listed[0]["counts"]["datasets"], 1)
+            self.assertEqual(listed[0]["counts"]["parameterWidgets"], 1)
+            self.assertEqual(listed[0]["counts"]["conditionalRules"], 1)
+            self.assertEqual(listed[0]["counts"]["cells"], 2)
+
+            detail = repository.get_report(listed[0]["id"])
+
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertEqual(detail["datasets"][0]["name"], "basic_data")
+            self.assertEqual(detail["parameterWidgets"][0]["label"], "月份")
+            self.assertEqual(detail["sheets"][0]["cells"][1]["columnIndex"], 2)
+
+            semantic_context = repository.build_agent_semantic_context()
+
+            self.assertIsNotNone(semantic_context)
+            assert semantic_context is not None
+            encoded = json.dumps(semantic_context, ensure_ascii=False)
+            self.assertIn("直播复盘表", encoded)
+            self.assertIn("sMonth", encoded)
+            self.assertNotIn("select amount from dm.live_review", encoded)
+            self.assertNotIn("fine_username", encoded)
+
     @staticmethod
     def _write_json(path: Path, payload: dict[str, object]) -> None:
         path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")

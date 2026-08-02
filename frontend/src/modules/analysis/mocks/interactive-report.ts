@@ -12,6 +12,7 @@ export const mockInteractiveReport: InteractiveReport = {
   source: {
     threadId: "conv_analysis_channel",
     turnId: "turn_channel_202608",
+    executionAttemptId: "run_channel_202608",
     runId: "run_channel_202608",
   },
   filters: [

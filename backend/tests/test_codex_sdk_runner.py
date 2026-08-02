@@ -51,18 +51,25 @@ class _FakeTurn:
         self.kwargs = kwargs
 
     async def stream(self):
-        yield SimpleNamespace(method="turn/started", payload=SimpleNamespace())
-        yield SimpleNamespace(method="item/agentMessage/delta", payload=SimpleNamespace(delta="第一段"))
-        yield SimpleNamespace(method="item/agentMessage/delta", payload=SimpleNamespace(delta="第二段"))
+        yield SimpleNamespace(method="turn/started", payload=SimpleNamespace(turn=SimpleNamespace(id="codex_turn_1")))
+        yield SimpleNamespace(
+            method="item/agentMessage/delta",
+            payload=SimpleNamespace(turn=SimpleNamespace(id="codex_turn_1"), item=SimpleNamespace(root=SimpleNamespace(id="codex_item_msg")), delta="第一段"),
+        )
+        yield SimpleNamespace(
+            method="item/agentMessage/delta",
+            payload=SimpleNamespace(turn=SimpleNamespace(id="codex_turn_1"), item=SimpleNamespace(root=SimpleNamespace(id="codex_item_msg")), delta="第二段"),
+        )
         yield SimpleNamespace(
             method="item/completed",
             payload=SimpleNamespace(
-                item=SimpleNamespace(root=SimpleNamespace(type="agentMessage", text="完整 Codex 输出")),
+                turn=SimpleNamespace(id="codex_turn_1"),
+                item=SimpleNamespace(root=SimpleNamespace(id="codex_item_msg", type="agentMessage", text="完整 Codex 输出")),
             ),
         )
         yield SimpleNamespace(
             method="turn/completed",
-            payload=SimpleNamespace(turn=SimpleNamespace(status=SimpleNamespace(value="completed"))),
+            payload=SimpleNamespace(turn=SimpleNamespace(id="codex_turn_1", status=SimpleNamespace(value="completed"))),
         )
 
     async def run(self):
@@ -87,11 +94,16 @@ class CodexSdkAnalysisRunnerTest(unittest.TestCase):
         event_types = [item.type for item in items if not isinstance(item, AnalysisAgentRunResult)]
         result = next(item for item in items if isinstance(item, AnalysisAgentRunResult))
         raw_events = [item for item in items if not isinstance(item, AnalysisAgentRunResult) and item.type == "agent.runner.raw"]
+        delta_events = [item for item in items if not isinstance(item, AnalysisAgentRunResult) and item.type == "agent.message.delta"]
 
         self.assertIn("agent.runner.raw", event_types)
         self.assertIn("agent.message.delta", event_types)
         self.assertNotIn("agent.message.created", event_types)
         self.assertTrue(any(item.payload.get("phase") == "agent_message.completed" for item in raw_events))
+        self.assertTrue(any(item.payload.get("codex_method") == "turn/started" for item in raw_events))
+        self.assertTrue(any(item.payload.get("codex_item_id") == "codex_item_msg" for item in raw_events))
+        self.assertTrue(all(item.payload.get("codex_turn_id") == "codex_turn_1" for item in delta_events))
+        self.assertTrue(all(item.payload.get("codex_item_id") == "codex_item_msg" for item in delta_events))
         self.assertEqual(result.final_output, "完整 Codex 输出")
         self.assertEqual(result.raw_result_type, "SimpleNamespace")
 

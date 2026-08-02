@@ -34,21 +34,12 @@ class AnalysisAgentRunner(Protocol):
 def build_analysis_runner_prompt(
     *,
     question: str,
-    analysis_mode: str,
     problem_label: str,
     semantic_model_labels: list[str],
-    authorized_data_snapshot: dict[str, Any] | None = None,
-    authorized_semantic_context: dict[str, Any] | None = None,
     current_report_context: dict[str, Any] | None = None,
 ) -> str:
-    mode_description = (
-        "快速分析：少追问，先给可用初稿并标注假设。"
-        if analysis_mode == "quick"
-        else "深度分析：先补齐业务口径和验证范围，再产出可靠资产。"
-    )
     lines = [
             f"用户问题：{question}",
-            f"分析模式：{mode_description}",
             f"初步问题类型：{problem_label}",
             "可参考的语义模型：",
             *[f"- {label}" for label in semantic_model_labels],
@@ -60,22 +51,6 @@ def build_analysis_runner_prompt(
             "若使用已登记查询，ChartBlock/GridBlock 的 queryRef、queries 键与 chartSpecs/gridSpecs 的 datasetId 必须一致；没有真实工具结果时，只能写待验证假设，不得写具体金额、占比或增长结论。",
             "不要在普通回复中解释或重复该 JSON。",
     ]
-    if authorized_data_snapshot:
-        lines.extend(
-            [
-                "本轮已获用户授权：以下是服务端受控查询返回的聚合数据快照。只能依据这些行给出数值结论，不得推测未提供的数据。",
-                "本轮必须在回复末尾输出完整的 <interactive_report_draft>。它必须引用快照中的 queryRef，并用 ChartBlock 与 GridBlock 呈现该受控查询；不要只输出 HTML 或文件路径。",
-                json.dumps(authorized_data_snapshot, ensure_ascii=False, separators=(",", ":")),
-            ]
-        )
-    if authorized_semantic_context:
-        lines.extend(
-            [
-                "本轮已获用户授权：以下是服务端裁剪后的 FineReport 报表语义摘要，可用于理解已有报表的系统事实。"
-                "它不包含原始 SQL、数据源连接、文件路径、参数默认值或单元格正文；不得据此虚构未提供的数据值。",
-                json.dumps(authorized_semantic_context, ensure_ascii=False, separators=(",", ":")),
-            ]
-        )
     if current_report_context:
         lines.extend(
             [

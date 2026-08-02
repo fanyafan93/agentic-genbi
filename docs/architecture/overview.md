@@ -4,8 +4,8 @@
 
 ```mermaid
 flowchart LR
-  UI["交互层\n分析工作台"] --> API["API / SSE\nThread/Turn/Item 事件边界"]
-  API --> Harness["编排层\nopenai-codex SDK / Codex"]
+  UI["交互层\n分析工作台"] --> API["API / SSE\nCodex 事件 + GenBI 业务事件"]
+  API --> Harness["编排层\nopenai-codex SDK / Codex Thread/Turn/Item"]
   Harness --> Semantic["语义层\n业务语义库"]
   Harness --> Data["数据层\n只读 / RLS / SQL 安全"]
   Harness --> Artifact["Artifact 层\n报告/图表/SQL/Skill"]
@@ -20,8 +20,8 @@ flowchart LR
 | 层 | 职责 | 边界 |
 | --- | --- | --- |
 | 交互层 | 左侧展示分析任务、Agent 过程和追问；右侧展示当前交互式分析结果；“我的分析”展示已保存结果和模板 | 不做真实权限判断，不直接访问生产数据 |
-| API / SSE | 接收请求，返回 Thread/Turn/Item 事件流，隔离前后端契约 | 不泄漏内部工具实现 |
-| openai-codex SDK / Codex | 规划、执行、反思、上下文组装、工具调度、模型调用、sandbox、approval、tool/MCP/Skill 编排 | 不自研 Codex 已经提供的通用 Agent 工程能力 |
+| API / SSE | 接收请求，返回尽量贴近 Codex 原生 `turn/*`、`item/*` 的事件流，并补充 `genbi/*` 业务事件 | 不把 Codex 事件重新翻译成另一套相似 runtime |
+| openai-codex SDK / Codex | Thread、Turn、Item、上下文、压缩、Agent Loop、工具调度、模型调用、sandbox、approval、tool/MCP/Skill 编排 | 不自研 Codex 已经提供的通用 Agent 工程能力 |
 | 业务语义库 | 提供语义模型和业务知识检索、引用、版本、认证 | 不返回完整敏感业务文件正文 |
 | 数据层 | 数据源连接、只读查询、SQL AST 校验、limit、超时、RLS、脱敏、审计 | 不允许浏览器绕过 |
 | Artifact 层 | 保存报告、图表、SQL、代码、数据快照、分析路径、`SKILL.md` 和版本 | 不把本地 mock 当真实共享 |
@@ -33,7 +33,7 @@ flowchart LR
 
 ```text
 编排执行：优先通过 openai-codex Python SDK 接 Codex；需要更底层能力时再研究 codex-core。
-会话状态：对齐 Codex Thread / Turn / Item。
+会话状态：直接使用 Codex Thread / Turn / Item；GenBI 只保存权限归属、索引和业务投影。
 工具生态：优先用 Codex tool / MCP / Skills / Apps / Connectors。
 执行环境：优先用 Codex shell / apply_patch / sandbox / approval。
 检索与版本：优先用 Codex file search / git 工具。
@@ -42,17 +42,44 @@ flowchart LR
 
 本项目只做业务层和适配层：业务语义库、数据源安全访问、分析资产治理、前端分析工作台，以及 Codex 与这些业务能力之间的 adapters。
 
+## 最终职责边界
+
+Codex 负责：
+
+- Agent Loop
+- Thread
+- Turn
+- Item
+- 上下文
+- 上下文压缩
+- 工具调度
+- 流式执行事件
+- 中断和追加指令
+- Sandbox / Approval 基础能力
+
+GenBI 负责：
+
+- 用户和租户
+- 数据权限
+- 数据源
+- FineReport 语义案例
+- 指标与关联规则
+- 受控 SQL 工具
+- Artifact
+- Artifact 版本和血缘
+- 分享、发布和治理
+
 ## Codex 适配契约
 
 目标后端不自建通用 runtime，而是提供这些接入 openai-codex SDK / Codex 的稳定适配接口：
 
 ```text
-RunContextAdapter：把用户、thread、turn、权限、模式、业务上下文映射给 Codex。
+ThreadMappingAdapter：把 GenBI 用户、租户、工作空间和权限归属映射到 Codex Thread。
 ToolAdapter：把资源库、数据库、业务语义库、Artifact 存储包装成 Codex 可调用工具。
 ModelAdapter：优先复用 Codex 模型适配；只在业务需要时补供应商配置。
-ArtifactAdapter：把 Codex 产物登记为分析资产、版本、来源 thread/turn/run 和依赖。
-EventAdapter：把 Codex items/events 转成现有 HTTP/SSE 事件。
-StateAdapter：把 Codex Thread / Turn / Item 映射到项目的 Postgres ThreadStore。
+ArtifactAdapter：把 Codex 产物登记为分析资产、版本、来源 codex_thread/codex_turn/codex_item 和依赖。
+EventProjectionAdapter：透传 Codex 事件，并为查询、审计和前端展示保存轻量 projection。
+StateAdapter：保存 GenBI Thread 映射和 Codex Item projection，不再扩充自研 Run Runtime。
 ```
 
 模型供应商只是 adapter。分析任务运行入口统一走 Codex / openai-codex；项目侧只保留业务语义、数据安全、资产治理和 Codex 适配代码。
@@ -60,35 +87,33 @@ StateAdapter：把 Codex Thread / Turn / Item 映射到项目的 Postgres Thread
 ## 系统对象口径
 
 ```text
-Thread：持续工作上下文，对应产品层的分析任务、探索任务或资产继续编辑任务。
-Turn：用户触发的一轮 Agent 工作，从输入到暂停、追问、失败或完成。
-Run：一次实际执行尝试；一个 Turn 可有多个 Run，用于重试、回放或多 Agent 并行。
-Item：Turn 内产生的结构化单元，包括 message、tool_call、tool_result、plan、question、artifact、sql、chart、report。
-Artifact：可复用分析资产，是可治理的 Item 子集。
+GenBI Thread：产品入口、权限归属和工作空间映射，基本一对一指向 Codex Thread。
+Codex Thread：实际 Agent 会话和上下文来源。
+Codex Turn：用户触发的一轮 Agent 工作，从输入到暂停、追问、失败或完成。
+Codex Item：Turn 内产生的消息、推理、工具调用、工具结果和模型输出。
+GenBI Artifact：可复用分析资产，由 Codex Item 产生或更新，但由 GenBI 负责版本、治理和血缘。
+execution_attempt：仅作为内部重试/审计记录存在，不是产品或主领域对象；当前 `Run` API 属于过渡兼容层。
 ```
 
-产品层继续使用“分析任务 / 分析会话 / 分析资产”；系统层、存储层、审计层和 Harness 层统一使用 `Thread / Turn / Item`。
+产品层继续使用“分析任务 / 分析会话 / 分析资产”；系统层优先对齐 Codex `Thread / Turn / Item`。GenBI 不再扩充自研 `Thread / Turn / Run / Item` runtime。
 
 ## 核心事件
 
-Thread/Turn/Item 事件是前后端主契约。现阶段事件名保持兼容，后续逐步补齐 `thread_id`、`turn_id`、`run_id`、`item_id`：
+Codex 事件是前后端主契约，后端只加 GenBI 权限和业务外壳。目标事件形态优先保留 Codex 原生 `method` 与 `payload.item.id/type`：
 
 ```text
-run.created
-run.plan.updated
-agent.message.delta
-agent.message.created
-agent.question.requested
-tool.call.started
-tool.call.completed
-tool.call.failed
-agent.evidence.available
-artifact.created
-artifact.updated
-interactive_report.draft
-run.completed
-run.failed
+turn/started
+item/started
+item/agentMessage/delta
+item/completed
+turn/completed
+genbi/artifact/created
+genbi/artifact/updated
+genbi/approval/requested
+genbi/dataAccess/denied
 ```
+
+探索模块的 `run.created` / `run.completed` 事件仅限历史探索能力；分析工作台不再以 Run lifecycle 作为目标契约，外部事件主线是 `turn/*`、`item/*` 和 `genbi/artifact/*`。
 
 所有事件必须有 TypeScript schema；真实 API 建立后用 OpenAPI 或等价 schema 校验。
 
@@ -108,12 +133,12 @@ gridSpecs：平台级 Grid Spec，前端适配为 AG Grid 配置
 
 报告读取真实数据时，浏览器只能提交已登记的 `queryRef` 和运行时筛选；SQL 模板、允许筛选键、AST 校验、参数绑定、只读账户、RLS 与审计均属于服务端数据层。首个实现是 FineReport“财务经营管报日报”的渠道销售汇总，尚未具备用户绑定 RLS 与完整审计。
 
-FineReport 的解析详情也不能直接进入外部模型。服务端只在本轮 `semantic_context_egress_authorized=true` 时，导出至多三份报表的受限语义摘要：报表标识、名称、页签、结构计数、数据集名称/类型、普通参数名与绑定字段；原始 SQL、数据源连接、CPT 路径、参数默认值、单元格正文和疑似敏感标识一律不外发。授权事件只记录摘要的报表 ID 与数量，保留 Thread / Turn / Run 关联。
+FineReport 的解析详情不能直接进入外部模型。当前分析运行不提供前端逐次授权外发语义摘要的能力；服务端可在业务语义库页面展示解析结果，但不会把原始 SQL、数据源连接、CPT 路径、参数默认值、单元格正文或报表解析摘要作为模型上下文外发。
 
 ## 当前实现快照
 
 - 前端：Next.js + TypeScript，`modules/analysis` 已承载左侧分析对话、右侧交互式分析结果、“我的分析”结果列表和业务语义库 mock。
-- 后端：FastAPI 已有分析 Run API / SSE、资源库工具、数据库只读工具、知识记录、分析资产最小存储；分析任务已写入新的 `ThreadStore`，保存 Thread/Turn/Run/Item。交互式报告使用 `analysis_reports` 与 `analysis_report_versions` 保存 JSONB 与不可变版本；数据库不可用时仅开发环境回退 JSON 文件，并提供分析 Thread 与报告查询接口；`GENBI_ANALYSIS_RUNTIME=codex` 可切到 openai-codex Python SDK runner。
+- 后端：FastAPI 已有分析 Thread/Turn API / SSE、资源库工具、数据库只读工具、知识记录、分析资产最小存储；`ThreadStore` 正在收敛为 GenBI Thread 映射 + Codex Item projection，旧 Run 结构仅允许作为内部 execution attempt 兼容投影存在。交互式报告使用 `analysis_reports` 与 `analysis_report_versions` 保存 JSONB 与不可变版本；数据库不可用时仅开发环境回退 JSON 文件，并提供分析 Thread 与报告查询接口；`GENBI_ANALYSIS_RUNTIME=codex` 可切到 openai-codex Python SDK runner。
 - 编排：`backend/harness/codex_sdk_runner.py` 是当前分析任务唯一真实 runner；探索侧只保留服务契约和工具函数，后续通过 Codex tools / MCP / Skills 接入。
 
 ## Codex 运行配置
@@ -138,8 +163,8 @@ MINIMAX_API_KEY=...
 
 ## 演进顺序
 
-1. 先通过 openai-codex Python SDK 接入 Codex，把 `backend/harness/` 收敛为 Codex adapters，而不是自研 runtime。
-2. 把分析任务执行迁到 Codex SDK runner，同时保持现有 HTTP/SSE 契约。
-3. 把资源库、数据库、业务语义库改成 Codex tool / MCP / Skill adapters。
-4. 把 Artifact 版本、权限、发布、回到任务继续迁入新的 Thread/Item 血缘。
-5. 再做自动刷新、评估、成本和治理。
+1. 保留现有 API 兼容层，但停止扩充 GenBI Run Runtime。
+2. 把分析任务执行收敛为 GenBI Thread 映射到 Codex Thread；Turn 使用 Codex Turn，Item 使用 Codex Item ID/Type。
+3. 前端 SSE 逐步改为消费 Codex `turn/*`、`item/*` 事件和 `genbi/*` 业务事件。
+4. 把资源库、数据库、业务语义库改成 Codex tool / MCP / Skill adapters。
+5. 把 Artifact 版本、权限、发布、回到任务继续迁入 Codex Item 血缘，再做自动刷新、评估、成本和治理。

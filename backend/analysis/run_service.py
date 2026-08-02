@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterable, Literal
@@ -18,15 +17,10 @@ from backend.exploration.run_service import ExplorationRunEvent
 from backend.exploration.run_trace_store import RunTraceStore
 from backend.harness.thread_store import ThreadStore
 from backend.analysis.report_query_service import (
-    CHANNEL_SALES_QUERY_REF,
-    REGION_CHANNEL_SALES_QUERY_REF,
-    ReportQueryFilterError,
     ReportQueryService,
-    response_to_dict,
 )
 from backend.business_semantics.finereport_reports import FineReportReportRepository
 
-AnalysisMode = Literal["quick", "deep"]
 AnalysisTurnKind = Literal["start", "message", "reply"]
 
 
@@ -35,9 +29,15 @@ class AnalysisRunRequest:
     question: str
     conversation_id: str | None = None
     user_id: str | None = None
-    analysis_mode: AnalysisMode = "quick"
     turn_kind: AnalysisTurnKind = "start"
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AnalysisTurnSubmission:
+    thread_id: str
+    turn_id: str
+    execution_attempt_id: str
 
 
 @dataclass(frozen=True)
@@ -73,26 +73,44 @@ class AnalysisRunService:
         self.thread_store = thread_store
         self.report_query_service = report_query_service
         self.finereport_repository = finereport_repository or FineReportReportRepository()
-        self._requests: dict[str, AnalysisRunRequest] = {}
-        self._run_contexts: dict[str, dict[str, str]] = {}
-        self._run_item_counts: dict[str, int] = {}
-        self._run_events: dict[str, list[ExplorationRunEvent]] = {}
+        self._turn_requests_by_attempt: dict[str, AnalysisRunRequest] = {}
+        self._turn_contexts_by_attempt: dict[str, dict[str, str]] = {}
+        self._item_counts_by_attempt: dict[str, int] = {}
+        self._events_by_attempt: dict[str, list[ExplorationRunEvent]] = {}
+
+    def submit_turn(self, request: AnalysisRunRequest) -> AnalysisTurnSubmission:
+        thread_id = request.conversation_id or f"conv_analysis_{uuid4().hex[:12]}"
+        execution_attempt_id = f"run_analysis_{uuid4().hex[:12]}"
+        request_metadata = dict(request.metadata or {})
+        request_metadata.setdefault("execution_attempt_id", execution_attempt_id)
+        turn_id = _requested_turn_id(request_metadata) or f"analysis_turn_{uuid4().hex[:12]}"
+        turn_request = AnalysisRunRequest(
+            question=request.question,
+            conversation_id=thread_id,
+            user_id=request.user_id,
+            turn_kind=request.turn_kind,
+            metadata={**request_metadata, "turn_id": turn_id},
+        )
+        self._turn_requests_by_attempt[execution_attempt_id] = turn_request
+        return AnalysisTurnSubmission(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            execution_attempt_id=execution_attempt_id,
+        )
 
     def create_run(self, request: AnalysisRunRequest) -> str:
-        run_id = f"run_analysis_{uuid4().hex[:12]}"
-        self._requests[run_id] = request
-        return run_id
+        return self.submit_turn(request).execution_attempt_id
 
     def run(self, request: AnalysisRunRequest) -> list[ExplorationRunEvent]:
-        run_id = self.create_run(request)
-        return list(self.stream_run_events(run_id))
+        submission = self.submit_turn(request)
+        return list(self.stream_turn_events(submission.execution_attempt_id))
 
-    def stream_run_events(self, run_id: str) -> Iterable[ExplorationRunEvent]:
-        if run_id in self._run_events:
-            yield from self._run_events[run_id]
+    def stream_turn_events(self, execution_attempt_id: str) -> Iterable[ExplorationRunEvent]:
+        if execution_attempt_id in self._events_by_attempt:
+            yield from self._events_by_attempt[execution_attempt_id]
             return
         if self.thread_store:
-            stored_items = self.thread_store.get_run_events(run_id)
+            stored_items = self.thread_store.get_run_events(execution_attempt_id)
             if stored_items:
                 for item in stored_items:
                     yield ExplorationRunEvent(
@@ -102,36 +120,58 @@ class AnalysisRunService:
                         created_at=str(item["created_at"]),
                     )
                 return
-        request = self._requests.get(run_id)
+        request = self._turn_requests_by_attempt.get(execution_attempt_id)
         if not request:
-            yield self._event(run_id, "run.failed", {"error": "run_not_found"})
+            yield self._event(execution_attempt_id, "run.failed", {"error": "execution_attempt_not_found"})
             return
-        yield from self.stream_events(request, run_id=run_id)
+        yield from self.stream_events(request, execution_attempt_id=execution_attempt_id)
+
+    def stream_run_events(self, run_id: str) -> Iterable[ExplorationRunEvent]:
+        for event in self.stream_turn_events(run_id):
+            if event.type == "run.failed" and event.payload.get("error") == "execution_attempt_not_found":
+                payload = dict(event.payload)
+                payload["error"] = "run_not_found"
+                yield ExplorationRunEvent(type=event.type, run_id=event.run_id, payload=payload, created_at=event.created_at)
+            else:
+                yield event
 
     async def astream_run_events(self, run_id: str) -> AsyncIterator[ExplorationRunEvent]:
         for event in self.stream_run_events(run_id):
             yield event
 
-    def stream_events(self, request: AnalysisRunRequest, *, run_id: str | None = None) -> Iterable[ExplorationRunEvent]:
-        events = []
-        actual_run_id = run_id or f"run_analysis_{uuid4().hex[:12]}"
-        for event in self._stream_events_unrecorded(request, run_id=actual_run_id):
-            events.append(event)
+    async def astream_turn_events(self, execution_attempt_id: str) -> AsyncIterator[ExplorationRunEvent]:
+        for event in self.stream_turn_events(execution_attempt_id):
             yield event
-        self._save_run_artifacts(actual_run_id, request, events)
+
+    def stream_events(
+        self,
+        request: AnalysisRunRequest,
+        *,
+        execution_attempt_id: str | None = None,
+        run_id: str | None = None,
+    ) -> Iterable[ExplorationRunEvent]:
+        events = []
+        actual_execution_attempt_id = execution_attempt_id or run_id or f"run_analysis_{uuid4().hex[:12]}"
+        for event in self._stream_events_unrecorded(request, run_id=actual_execution_attempt_id):
+            for projected_event in self._project_codex_style_events(actual_execution_attempt_id, event):
+                events.append(projected_event)
+                yield projected_event
+        self._save_turn_projection(actual_execution_attempt_id, request, events)
 
     async def astream_events(
         self,
         request: AnalysisRunRequest,
         *,
+        execution_attempt_id: str | None = None,
         run_id: str | None = None,
     ) -> AsyncIterator[ExplorationRunEvent]:
         events = []
-        actual_run_id = run_id or f"run_analysis_{uuid4().hex[:12]}"
-        async for event in self._astream_events_unrecorded(request, run_id=actual_run_id):
-            events.append(event)
-            yield event
-        self._save_run_artifacts(actual_run_id, request, events)
+        actual_execution_attempt_id = execution_attempt_id or run_id or f"run_analysis_{uuid4().hex[:12]}"
+        async for event in self._astream_events_unrecorded(request, run_id=actual_execution_attempt_id):
+            for projected_event in self._project_codex_style_events(actual_execution_attempt_id, event):
+                events.append(projected_event)
+                yield projected_event
+        self._save_turn_projection(actual_execution_attempt_id, request, events)
 
     async def _astream_events_unrecorded(
         self,
@@ -152,7 +192,7 @@ class AnalysisRunService:
         conversation_id = request.conversation_id or f"conv_analysis_{uuid4().hex[:12]}"
         title = generate_analysis_title(question)
         classification = classify_analysis_problem(question)
-        semantic_models = build_semantic_model_plan(classification, request.analysis_mode)
+        semantic_models = build_semantic_model_plan(classification)
 
         for event in self._analysis_start_events(
             request=request,
@@ -173,12 +213,12 @@ class AnalysisRunService:
             return
         yield self._event(
             run_id,
-            "run.completed",
+            "turn/completed",
             {
                 "title": title,
                 "status": "completed",
-                "analysis_mode": request.analysis_mode,
                 "domain": "analysis_task",
+                "codex_method": "turn/completed",
             },
         )
 
@@ -196,7 +236,7 @@ class AnalysisRunService:
         conversation_id = request.conversation_id or f"conv_analysis_{uuid4().hex[:12]}"
         title = generate_analysis_title(question)
         classification = classify_analysis_problem(question)
-        semantic_models = build_semantic_model_plan(classification, request.analysis_mode)
+        semantic_models = build_semantic_model_plan(classification)
 
         yield from self._analysis_start_events(
             request=request,
@@ -213,23 +253,21 @@ class AnalysisRunService:
         elif _is_skill_request(question):
             branch_events = list(self._skill_events(run_id, title))
         elif request.turn_kind in {"message", "reply"}:
-            branch_events = list(self._continuation_events(run_id, title, request.analysis_mode, question))
-        elif request.analysis_mode == "deep":
-            branch_events = list(self._deep_analysis_events(run_id, classification))
+            branch_events = list(self._continuation_events(run_id, title, question))
         else:
-            branch_events = list(self._quick_analysis_events(run_id, classification))
+            branch_events = list(self._analysis_events(run_id, classification))
         yield from branch_events
         if any(event.type == "run.failed" for event in branch_events):
             return
 
         yield self._event(
             run_id,
-            "run.completed",
+            "turn/completed",
             {
                 "title": title,
                 "status": "completed",
-                "analysis_mode": request.analysis_mode,
                 "domain": "analysis_task",
+                "codex_method": "turn/completed",
             },
         )
 
@@ -244,17 +282,18 @@ class AnalysisRunService:
         classification: ProblemClassification,
         semantic_models: list[SemanticModelCandidate],
     ) -> Iterable[ExplorationRunEvent]:
-        self._register_run_context(run_id, conversation_id, request)
+        self._register_turn_context(run_id, conversation_id, request)
         yield self._event(
             run_id,
-            "run.created",
+            "turn/started",
             {
                 "conversation_id": conversation_id,
+                "thread_id": conversation_id,
                 "user_id": request.user_id,
                 "question": question,
-                "analysis_mode": request.analysis_mode,
                 "turn_kind": request.turn_kind,
                 "domain": "analysis_task",
+                "codex_method": "turn/started",
             },
         )
         yield self._event(run_id, "agent.title.generated", {"title": title})
@@ -271,7 +310,6 @@ class AnalysisRunService:
             run_id,
             "analysis.retrieval.plan",
             {
-                "analysis_mode": request.analysis_mode,
                 "items": [candidate.__dict__ for candidate in semantic_models],
             },
         )
@@ -283,29 +321,21 @@ class AnalysisRunService:
         classification: ProblemClassification,
         semantic_models: list[SemanticModelCandidate],
     ) -> Iterable[ExplorationRunEvent]:
-        snapshot = self._authorized_data_snapshot(request, run_id=run_id)
-        if snapshot:
-            yield self._event(run_id, "agent.evidence.available", {"kind": "authorized_aggregate_snapshot", **snapshot})
         report_context = self._authorized_report_context(request)
-        semantic_context = self._authorized_semantic_context(request)
-        if semantic_context:
-            yield self._event(
-                run_id,
-                "agent.evidence.available",
-                {
-                    "kind": "authorized_finereport_semantic_summary",
-                    "reportCount": len(semantic_context["reports"]),
-                    "reportIds": [report["id"] for report in semantic_context["reports"]],
-                },
-            )
         prompt = build_analysis_runner_prompt(
             question=request.question.strip(),
-            analysis_mode=request.analysis_mode,
             problem_label=classification.label,
             semantic_model_labels=[item.label for item in semantic_models],
-            authorized_data_snapshot=snapshot,
-            authorized_semantic_context=semantic_context,
             current_report_context=report_context,
+        )
+        yield self._event(
+            run_id,
+            "agent.prompt.created",
+            {
+                "runtime": self._agent_runner_runtime(),
+                "domain": "analysis_task",
+                "prompt": prompt,
+            },
         )
         yield self._event(
             run_id,
@@ -334,7 +364,7 @@ class AnalysisRunService:
             "agent.runner.completed",
             {"runtime": self._agent_runner_runtime(), "domain": "analysis_task", "raw_result_type": result.raw_result_type},
         )
-        yield from self._final_result_events(run_id, result, current_report_context=report_context, authorized_data_snapshot=snapshot)
+        yield from self._final_result_events(run_id, result, current_report_context=report_context)
         yield from self._post_runner_events(run_id, request, classification)
 
     async def _agent_runner_events_async(
@@ -344,29 +374,21 @@ class AnalysisRunService:
         classification: ProblemClassification,
         semantic_models: list[SemanticModelCandidate],
     ) -> AsyncIterator[ExplorationRunEvent]:
-        snapshot = self._authorized_data_snapshot(request, run_id=run_id)
-        if snapshot:
-            yield self._event(run_id, "agent.evidence.available", {"kind": "authorized_aggregate_snapshot", **snapshot})
         report_context = self._authorized_report_context(request)
-        semantic_context = self._authorized_semantic_context(request)
-        if semantic_context:
-            yield self._event(
-                run_id,
-                "agent.evidence.available",
-                {
-                    "kind": "authorized_finereport_semantic_summary",
-                    "reportCount": len(semantic_context["reports"]),
-                    "reportIds": [report["id"] for report in semantic_context["reports"]],
-                },
-            )
         prompt = build_analysis_runner_prompt(
             question=request.question.strip(),
-            analysis_mode=request.analysis_mode,
             problem_label=classification.label,
             semantic_model_labels=[item.label for item in semantic_models],
-            authorized_data_snapshot=snapshot,
-            authorized_semantic_context=semantic_context,
             current_report_context=report_context,
+        )
+        yield self._event(
+            run_id,
+            "agent.prompt.created",
+            {
+                "runtime": self._agent_runner_runtime(),
+                "domain": "analysis_task",
+                "prompt": prompt,
+            },
         )
         yield self._event(
             run_id,
@@ -395,7 +417,7 @@ class AnalysisRunService:
             "agent.runner.completed",
             {"runtime": self._agent_runner_runtime(), "domain": "analysis_task", "raw_result_type": result.raw_result_type},
         )
-        for event in self._final_result_events(run_id, result, current_report_context=report_context, authorized_data_snapshot=snapshot):
+        for event in self._final_result_events(run_id, result, current_report_context=report_context):
             yield event
         for event in self._post_runner_events(run_id, request, classification):
             yield event
@@ -406,7 +428,6 @@ class AnalysisRunService:
         result: AnalysisAgentRunResult,
         *,
         current_report_context: dict[str, Any] | None = None,
-        authorized_data_snapshot: dict[str, Any] | None = None,
     ) -> Iterable[ExplorationRunEvent]:
         message, draft = extract_interactive_report_draft(result.final_output)
         if message:
@@ -415,9 +436,9 @@ class AnalysisRunService:
                 "agent.message.created",
                 {"role": "assistant", "title": "分析结果", "content": message},
             )
-        draft = draft or _fallback_report_draft(current_report_context, authorized_data_snapshot)
+        draft = draft or _fallback_report_draft(current_report_context)
         if draft:
-            context = self._run_contexts.get(run_id, {})
+            context = self._turn_contexts_by_attempt.get(run_id, {})
             draft["artifactType"] = "interactive_report"
             draft["schemaVersion"] = "1.0"
             draft["renderer"] = "puck"
@@ -426,57 +447,13 @@ class AnalysisRunService:
             draft["source"] = {
                 "threadId": context.get("thread_id", ""),
                 "turnId": context.get("turn_id", ""),
+                "executionAttemptId": run_id,
                 "runId": run_id,
             }
             yield self._event(run_id, "interactive_report.draft", draft)
 
-    def _authorized_data_snapshot(self, request: AnalysisRunRequest, *, run_id: str) -> dict[str, Any] | None:
-        """Return only a bounded, server-owned aggregate snapshot after explicit per-run consent."""
-
-        if not self.report_query_service or request.metadata.get("data_egress_authorized") is not True:
-            return None
-        question = request.question
-        if not re.search(r"渠道.*(销售|占比)|销售.*渠道", question):
-            return None
-        month_match = re.search(r"\b(20\d{2}-(?:0[1-9]|1[0-2]))\b", question)
-        if not month_match:
-            return None
-        try:
-            query_ref = REGION_CHANNEL_SALES_QUERY_REF if re.search(r"按区域|区域.*(拆|分|渠道)", question) else CHANNEL_SALES_QUERY_REF
-            response = self.report_query_service.run(
-                query_ref,
-                {"month": month_match.group(1)},
-                audit_context={
-                    "source": "codex_authorized_snapshot",
-                    "thread_id": request.conversation_id,
-                    "run_id": run_id,
-                    "user_id": request.user_id,
-                    "data_egress_authorized": True,
-                },
-            )
-        except ReportQueryFilterError:
-            return None
-        payload = response_to_dict(response)
-        return {
-            "queryRef": payload["queryRef"],
-            "filters": payload["filters"],
-            "columns": payload["columns"],
-            "rows": payload["rows"],
-            "rowCount": payload["rowCount"],
-            "truncated": payload["truncated"],
-        }
-
-    def _authorized_semantic_context(self, request: AnalysisRunRequest) -> dict[str, Any] | None:
-        """Export only the repository's safe semantic summary after per-run consent."""
-
-        if request.metadata.get("semantic_context_egress_authorized") is not True:
-            return None
-        return self.finereport_repository.build_agent_semantic_context()
-
     @staticmethod
     def _authorized_report_context(request: AnalysisRunRequest) -> dict[str, Any] | None:
-        if request.metadata.get("data_egress_authorized") is not True:
-            return None
         return sanitize_interactive_report_context(request.metadata.get("interactive_report_context"))
 
     def _post_runner_events(
@@ -496,24 +473,10 @@ class AnalysisRunService:
             if re.search(r"python|预测|异常|聚类|相关", question, flags=re.IGNORECASE):
                 yield self._event(run_id, "artifact.created", {"path": "scripts/analysis_notebook.py", "kind": "python"})
             return
-        if request.analysis_mode == "deep":
-            yield self._event(
-                run_id,
-                "agent.question.requested",
-                {
-                    "question": build_follow_up_question(classification),
-                    "options": [
-                        {"id": "member_id", "label": "按会员 ID 去重"},
-                        {"id": "phone", "label": "按手机号去重"},
-                        {"id": "need_compare", "label": "先对比两种口径"},
-                    ],
-                },
-            )
-            return
-        for asset in _quick_assets():
+        for asset in _analysis_assets():
             yield self._event(run_id, "artifact.created", asset)
 
-    def _quick_analysis_events(
+    def _analysis_events(
         self,
         run_id: str,
         classification: ProblemClassification,
@@ -523,58 +486,24 @@ class AnalysisRunService:
             "agent.message.created",
             {
                 "role": "assistant",
-                "title": "快速分析初稿",
+                "title": "分析初稿",
                 "content": (
-                    f"我先按快速分析推进：这个问题更像「{classification.label}」。"
-                    "我会先复用语义模型、知识库和历史 SQL 示例生成可用初稿，"
+                    f"我会推进这个「{classification.label}」问题："
+                    "先复用语义模型、知识库和历史 SQL 示例生成可用初稿，"
                     "并把未确认口径作为假设标注到报告里。"
                 ),
             },
         )
-        for asset in _quick_assets():
+        for asset in _analysis_assets():
             yield self._event(run_id, "artifact.created", asset)
-
-    def _deep_analysis_events(
-        self,
-        run_id: str,
-        classification: ProblemClassification,
-    ) -> Iterable[ExplorationRunEvent]:
-        yield self._event(
-            run_id,
-            "agent.message.created",
-            {
-                "role": "assistant",
-                "title": "深度分析准备",
-                "content": (
-                    f"我会按深度分析推进：先确认「{classification.label}」的业务口径，"
-                    "再生成 SQL、图表、报告和可复用资产。"
-                ),
-            },
-        )
-        yield self._event(
-            run_id,
-            "agent.question.requested",
-            {
-                "question": build_follow_up_question(classification),
-                "options": [
-                    {"id": "member_id", "label": "按会员 ID 去重"},
-                    {"id": "phone", "label": "按手机号去重"},
-                    {"id": "need_compare", "label": "先对比两种口径"},
-                ],
-            },
-        )
 
     def _continuation_events(
         self,
         run_id: str,
         title: str,
-        analysis_mode: AnalysisMode,
         question: str,
     ) -> Iterable[ExplorationRunEvent]:
-        if analysis_mode == "deep":
-            content = "我会基于当前分析任务继续改资产：保留已有版本，补充证据，再更新报告、SQL 和可复用方法。"
-        else:
-            content = "我会先直接更新当前资产草稿，并继续把未确认业务假设保留在说明里。"
+        content = "我会基于当前分析任务继续更新结果：保留已有版本，补充证据，再更新报告、SQL 和可复用方法。"
         yield self._event(run_id, "agent.message.created", {"role": "assistant", "title": title, "content": content})
         yield self._event(run_id, "artifact.updated", {"path": "reports/updated_report.html", "kind": "html"})
         yield self._event(run_id, "artifact.updated", {"path": "queries/revised_query.sql", "kind": "sql"})
@@ -600,7 +529,7 @@ class AnalysisRunService:
     def _event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> ExplorationRunEvent:
         enriched_payload = dict(payload)
         enriched_payload.setdefault("run_id", run_id)
-        context = self._run_contexts.get(run_id)
+        context = self._turn_contexts_by_attempt.get(run_id)
         if context:
             enriched_payload.setdefault("thread_id", context["thread_id"])
             enriched_payload.setdefault("turn_id", context["turn_id"])
@@ -611,13 +540,32 @@ class AnalysisRunService:
             enriched_payload.setdefault("item_id", self._next_item_id(run_id, item_kind))
         return ExplorationRunEvent(type=event_type, run_id=run_id, payload=enriched_payload)
 
-    def _register_run_context(self, run_id: str, thread_id: str, request: AnalysisRunRequest) -> None:
-        turn_id = str(request.metadata.get("turn_id") or f"turn_{run_id.removeprefix('run_')}")
-        self._run_contexts[run_id] = {"thread_id": thread_id, "turn_id": turn_id}
+    def _project_codex_style_events(self, run_id: str, event: ExplorationRunEvent) -> list[ExplorationRunEvent]:
+        projected_type = _codex_style_event_type(event.type)
+        if not projected_type:
+            return [event]
+        payload = dict(event.payload)
+        payload.setdefault("compatibility_source_event", event.type)
+        payload.setdefault("codex_method", projected_type if projected_type.startswith("item/") else payload.get("codex_method"))
+        if projected_type.startswith("item/"):
+            payload.setdefault("codex_item_type", _codex_item_type_for_event(event.type, payload))
+            if payload.get("item_id"):
+                payload.setdefault("codex_item_id", payload["item_id"])
+        projected = ExplorationRunEvent(
+            type=projected_type,
+            run_id=run_id,
+            payload=payload,
+            created_at=event.created_at,
+        )
+        return [projected, event]
+
+    def _register_turn_context(self, run_id: str, thread_id: str, request: AnalysisRunRequest) -> None:
+        turn_id = _requested_turn_id(request.metadata) or f"analysis_turn_{uuid4().hex[:12]}"
+        self._turn_contexts_by_attempt[run_id] = {"thread_id": thread_id, "turn_id": turn_id}
 
     def _next_item_id(self, run_id: str, item_kind: str) -> str:
-        next_index = self._run_item_counts.get(run_id, 0) + 1
-        self._run_item_counts[run_id] = next_index
+        next_index = self._item_counts_by_attempt.get(run_id, 0) + 1
+        self._item_counts_by_attempt[run_id] = next_index
         return f"item_{run_id.removeprefix('run_')}_{next_index:04d}_{item_kind}"
 
     def _run_agent_runner(self, prompt: str, *, run_id: str, request: AnalysisRunRequest) -> Iterable[Any]:
@@ -647,11 +595,12 @@ class AnalysisRunService:
             yield item
 
     def _agent_runner_context(self, run_id: str, request: AnalysisRunRequest) -> dict[str, Any]:
-        context = self._run_contexts.get(run_id, {})
+        context = self._turn_contexts_by_attempt.get(run_id, {})
         thread_id = context.get("thread_id")
         return {
             "genbi_thread_id": thread_id,
             "genbi_turn_id": context.get("turn_id"),
+            "execution_attempt_id": run_id,
             "genbi_run_id": run_id,
             "codex_thread_id": self._resolve_runtime_thread_id(
                 request,
@@ -665,8 +614,8 @@ class AnalysisRunService:
             return "local"
         return str(getattr(self.agent_runner, "runtime_name", "") or self.agent_runner.__class__.__name__)
 
-    def _save_run_artifacts(self, run_id: str, request: AnalysisRunRequest, events: list[ExplorationRunEvent]) -> None:
-        context = self._run_contexts.get(run_id, {})
+    def _save_turn_projection(self, run_id: str, request: AnalysisRunRequest, events: list[ExplorationRunEvent]) -> None:
+        context = self._turn_contexts_by_attempt.get(run_id, {})
         runtime = self._agent_runner_runtime()
         codex_thread_id = _latest_payload_value(events, "codex_thread_id") or self._resolve_runtime_thread_id(
             request,
@@ -675,7 +624,6 @@ class AnalysisRunService:
         )
         metadata = {
             "domain": "analysis_task",
-            "analysis_mode": request.analysis_mode,
             "thread_id": context.get("thread_id"),
             "turn_id": context.get("turn_id"),
             **(request.metadata or {}),
@@ -685,7 +633,7 @@ class AnalysisRunService:
             runtime_threads = dict(metadata.get("runtime_threads") or {})
             runtime_threads[runtime] = codex_thread_id
             metadata["runtime_threads"] = runtime_threads
-        self._run_events[run_id] = list(events)
+        self._events_by_attempt[run_id] = list(events)
         if self.thread_store and context.get("thread_id") and context.get("turn_id"):
             try:
                 self.thread_store.save_run(
@@ -720,6 +668,14 @@ class AnalysisRunService:
             return None
 
 
+class AnalysisThreadService(AnalysisRunService):
+    """Thread/Turn-facing analysis service.
+
+    The inherited Run-named methods are compatibility shims for the old API
+    surface; new callers should use submit_turn/stream_turn_events.
+    """
+
+
 def generate_analysis_title(question: str) -> str:
     text = re.sub(r"\s+", " ", question).strip(" \t\r\n。！？!?")
     if not text:
@@ -743,10 +699,7 @@ def classify_analysis_problem(question: str) -> ProblemClassification:
     return ProblemClassification(type="business_analysis", label="业务分析", confidence=0.72)
 
 
-def build_semantic_model_plan(
-    classification: ProblemClassification,
-    analysis_mode: AnalysisMode,
-) -> list[SemanticModelCandidate]:
+def build_semantic_model_plan(classification: ProblemClassification) -> list[SemanticModelCandidate]:
     base = [
         SemanticModelCandidate(
             id="semantic_sql_examples",
@@ -770,8 +723,6 @@ def build_semantic_model_plan(
             purpose="复用已确认口径、排除规则和业务解释",
         ),
     ]
-    if analysis_mode == "quick":
-        return base
     return [
         SemanticModelCandidate(
             id="semantic_finereport_report",
@@ -805,125 +756,13 @@ def build_semantic_model_plan(
     ]
 
 
-def _fallback_report_draft(
-    current_report_context: dict[str, Any] | None,
-    authorized_data_snapshot: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Keep the right-side result continuous when a constrained Codex reply omits only its report envelope."""
+def _fallback_report_draft(current_report_context: dict[str, Any] | None) -> dict[str, Any] | None:
+    """No server-side report fallback is generated without a model draft."""
 
-    if not authorized_data_snapshot:
-        return None
-    query_ref = str(authorized_data_snapshot.get("queryRef") or "")
-    if not current_report_context:
-        return _initial_snapshot_report_draft(authorized_data_snapshot)
-    if query_ref != REGION_CHANNEL_SALES_QUERY_REF:
-        return None
-    report = copy.deepcopy(current_report_context)
-    report["title"] = f"{str(report['title']).strip()}（按区域拆分）"
-    report["subtitle"] = "已切换为服务端登记的区域 × 渠道聚合视图；数值以本轮受控查询结果为准。"
-    dataset_id = "region_channel_sales"
-    report["queries"][query_ref] = {
-        "datasetId": dataset_id,
-        "filterBindings": ["month", "brand", "region"],
-    }
-    report["chartSpecs"]["region-channel-sales-chart"] = {
-        "id": "region-channel-sales-chart",
-        "datasetId": dataset_id,
-        "type": "bar",
-        "xField": "region",
-        "title": "区域渠道销售额",
-        "series": [{"field": "salesAmount", "label": "销售额", "format": "currency"}],
-    }
-    report["gridSpecs"]["region-channel-sales-grid"] = {
-        "id": "region-channel-sales-grid",
-        "datasetId": dataset_id,
-        "pageSize": 12,
-        "columns": [
-            {"field": "region", "label": "区域"},
-            {"field": "channel", "label": "渠道"},
-            {"field": "salesAmount", "label": "销售额", "format": "currency"},
-            {"field": "salesShare", "label": "销售占比", "format": "percent"},
-            {"field": "netRevenue", "label": "收入净额", "format": "currency"},
-            {"field": "refundAmount", "label": "退款金额", "format": "currency"},
-        ],
-    }
-    content = report["document"].get("content", [])
-    for block in content:
-        if not isinstance(block, dict) or not isinstance(block.get("props"), dict):
-            continue
-        if block.get("type") == "ChartBlock":
-            block["props"]["chartSpecRef"] = "region-channel-sales-chart"
-            block["props"]["queryRef"] = query_ref
-        elif block.get("type") == "GridBlock":
-            block["props"]["gridSpecRef"] = "region-channel-sales-grid"
-            block["props"]["queryRef"] = query_ref
-    return report
-
-
-def _initial_snapshot_report_draft(snapshot: dict[str, Any]) -> dict[str, Any] | None:
-    """Create a minimal, server-owned report when an authorized first-run response omits its draft."""
-
-    query_ref = str(snapshot.get("queryRef") or "")
-    filters = snapshot.get("filters")
-    if query_ref not in {CHANNEL_SALES_QUERY_REF, REGION_CHANNEL_SALES_QUERY_REF} or not isinstance(filters, dict):
-        return None
-
-    month = str(filters.get("month") or "本期")
-    is_region_view = query_ref == REGION_CHANNEL_SALES_QUERY_REF
-    dataset_id = "region_channel_sales" if is_region_view else "channel_sales"
-    chart_id = "region-channel-sales-chart" if is_region_view else "channel-sales-chart"
-    grid_id = "region-channel-sales-grid" if is_region_view else "channel-sales-grid"
-    subject = "区域 × 渠道销售结构" if is_region_view else "渠道销售结构"
-    chart_x_field = "region" if is_region_view else "channel"
-    grid_columns = ([
-        {"field": "region", "label": "区域"},
-        {"field": "channel", "label": "渠道"},
-    ] if is_region_view else [{"field": "channel", "label": "渠道"}]) + [
-        {"field": "salesAmount", "label": "销售额", "format": "currency"},
-        {"field": "salesShare", "label": "销售占比", "format": "percent"},
-        {"field": "netRevenue", "label": "收入净额", "format": "currency"},
-        {"field": "refundAmount", "label": "退款金额", "format": "currency"},
-    ]
-    return {
-        "title": f"{month} {subject}",
-        "subtitle": "基于服务端受控聚合查询生成；筛选仅改变运行时数据视图。",
-        "document": {
-            "root": {"props": {"title": f"{month} {subject}"}},
-            "content": [
-                {"type": "SectionBlock", "props": {"id": "summary-section", "title": "本期结论", "tone": "coral"}},
-                {"type": "MarkdownBlock", "props": {"id": "summary-note", "content": "本报告使用本轮已授权的受控聚合数据。具体结论请结合左侧分析说明与下方明细复核。"}},
-                {"type": "KpiBlock", "props": {"id": "kpi-sales", "metric": "sales"}},
-                {"type": "KpiBlock", "props": {"id": "kpi-share", "metric": "share"}},
-                {"type": "SectionBlock", "props": {"id": "contribution-section", "title": subject, "tone": "navy"}},
-                {"type": "ChartBlock", "props": {"id": "sales-chart", "chartSpecRef": chart_id, "queryRef": query_ref}},
-                {"type": "SectionBlock", "props": {"id": "detail-section", "title": "聚合明细", "tone": "navy"}},
-                {"type": "GridBlock", "props": {"id": "sales-grid", "gridSpecRef": grid_id, "queryRef": query_ref}},
-                {"type": "EvidenceBlock", "props": {"id": "evidence", "label": "数据证据", "content": "来源：FineReport 财务经营管报日报的服务端登记只读聚合查询。未读取业务明细，也未在浏览器提交 SQL。"}},
-            ],
-            "zones": {},
-        },
-        "filters": [
-            {"id": "month", "label": "月份", "defaultValue": month, "options": [{"label": month, "value": month}]},
-            {"id": "brand", "label": "品牌", "defaultValue": "all", "options": [{"label": "全部品牌", "value": "all"}]},
-            {"id": "region", "label": "区域", "defaultValue": "all", "options": [{"label": "全部区域", "value": "all"}]},
-        ],
-        "queries": {query_ref: {"datasetId": dataset_id, "filterBindings": ["month", "brand", "region"]}},
-        "chartSpecs": {
-            chart_id: {
-                "id": chart_id,
-                "datasetId": dataset_id,
-                "type": "bar",
-                "xField": chart_x_field,
-                "title": "销售额",
-                "series": [{"field": "salesAmount", "label": "销售额", "format": "currency"}],
-            }
-        },
-        "gridSpecs": {grid_id: {"id": grid_id, "datasetId": dataset_id, "pageSize": 12, "columns": grid_columns}},
-    }
-
+    return None
 
 def item_kind_for_event(event_type: str, payload: dict[str, Any]) -> str | None:
-    if event_type == "run.created" and payload.get("question"):
+    if event_type == "turn/started" and payload.get("question"):
         return "message"
     if event_type == "analysis.retrieval.plan" or event_type == "run.plan.updated":
         return "plan"
@@ -955,6 +794,39 @@ def _latest_payload_value(events: list[ExplorationRunEvent], key: str) -> str | 
     return None
 
 
+def _requested_turn_id(metadata: dict[str, Any]) -> str | None:
+    return _string_or_none(
+        metadata.get("codex_turn_id")
+        or metadata.get("codexTurnId")
+        or metadata.get("turn_id")
+        or metadata.get("turnId")
+    )
+
+
+def _codex_style_event_type(event_type: str) -> str | None:
+    return {
+        "agent.message.delta": "item/agentMessage/delta",
+        "agent.message.created": "item/completed",
+        "agent.question.requested": "item/completed",
+        "tool.call.started": "item/started",
+        "tool.call.completed": "item/completed",
+        "tool.call.failed": "item/completed",
+        "interactive_report.draft": "genbi/artifact/updated",
+        "artifact.created": "genbi/artifact/created",
+        "artifact.updated": "genbi/artifact/updated",
+    }.get(event_type)
+
+
+def _codex_item_type_for_event(event_type: str, payload: dict[str, Any]) -> str:
+    if event_type.startswith("agent.message"):
+        return "agentMessage"
+    if event_type == "agent.question.requested":
+        return "agentQuestion"
+    if event_type.startswith("tool.call"):
+        return "toolCall" if event_type == "tool.call.started" else "toolResult"
+    return _string_or_none(payload.get("item_kind")) or "unknown"
+
+
 def _string_or_none(value: Any) -> str | None:
     if value is None:
         return None
@@ -982,10 +854,10 @@ def _is_skill_request(question: str) -> bool:
     )
 
 
-def _quick_assets() -> list[dict[str, str]]:
+def _analysis_assets() -> list[dict[str, str]]:
     return [
-        {"path": "reports/quick_report.html", "kind": "html"},
-        {"path": "queries/quick_candidate.sql", "kind": "sql"},
+        {"path": "reports/analysis_report.html", "kind": "html"},
+        {"path": "queries/candidate.sql", "kind": "sql"},
         {"path": "charts/channel_share.chart.json", "kind": "json"},
         {"path": "notes/assumptions.md", "kind": "markdown"},
         {"path": "definitions/channel_sales_metric.md", "kind": "markdown"},
@@ -993,3 +865,4 @@ def _quick_assets() -> list[dict[str, str]]:
         {"path": "paths/channel_analysis_path.md", "kind": "markdown"},
         {"path": "dashboards/channel_overview.dashboard.json", "kind": "json"},
     ]
+

@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.analysis.runner_contracts import AnalysisAgentRunResult, build_analysis_runner_prompt, extract_interactive_report_draft, sanitize_interactive_report_context
 from backend.analysis.run_service import AnalysisRunRequest, AnalysisRunService
-from backend.analysis.report_query_service import CHANNEL_SALES_QUERY_REF, REGION_CHANNEL_SALES_QUERY_REF, ReportQueryResponse
+from backend.analysis.report_query_service import CHANNEL_SALES_QUERY_REF
 from backend.exploration.agent_runner import ExplorationAgentRunnerEvent
 
 
@@ -17,26 +17,27 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
     def test_analysis_service_forwards_sync_agent_runner_events(self) -> None:
         class FakeRunner:
             def stream(self, prompt: str):
-                yield ExplorationAgentRunnerEvent(type="agent.runner.raw", payload={"prompt_has_mode": "快速分析" in prompt})
+                yield ExplorationAgentRunnerEvent(type="agent.runner.raw", payload={"prompt_mentions_mode": "分析模式" in prompt})
                 yield AnalysisAgentRunResult(final_output="真实 Codex Runner 输出", raw_result_type="FakeResult")
 
         service = AnalysisRunService(agent_runner=FakeRunner())
         events = service.run(
-            AnalysisRunRequest(
-                question="分析一下渠道销售占比",
-                conversation_id="conv_analysis_runner",
-                analysis_mode="quick",
-            )
+                AnalysisRunRequest(
+                    question="分析一下渠道销售占比",
+                    conversation_id="conv_analysis_runner",
+                )
         )
 
         self.assertIn("agent.runner.started", [event.type for event in events])
         self.assertIn("agent.runner.completed", [event.type for event in events])
         self.assertIn("agent.runner.raw", [event.type for event in events])
+        prompt_event = next(event for event in events if event.type == "agent.prompt.created")
+        self.assertIn("用户问题：分析一下渠道销售占比", prompt_event.payload["prompt"])
         message = next(event for event in events if event.type == "agent.message.created")
         self.assertEqual(message.payload["content"], "真实 Codex Runner 输出")
         artifact_paths = [event.payload["path"] for event in events if event.type == "artifact.created"]
-        self.assertIn("reports/quick_report.html", artifact_paths)
-        self.assertIn("queries/quick_candidate.sql", artifact_paths)
+        self.assertIn("reports/analysis_report.html", artifact_paths)
+        self.assertIn("queries/candidate.sql", artifact_paths)
 
     def test_analysis_service_does_not_complete_failed_agent_runner(self) -> None:
         class BrokenRunner:
@@ -45,11 +46,10 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
 
         service = AnalysisRunService(agent_runner=BrokenRunner())
         events = service.run(
-            AnalysisRunRequest(
-                question="分析一下渠道销售占比",
-                conversation_id="conv_analysis_runner_failed",
-                analysis_mode="quick",
-            )
+                AnalysisRunRequest(
+                    question="分析一下渠道销售占比",
+                    conversation_id="conv_analysis_runner_failed",
+                )
         )
 
         event_types = [event.type for event in events]
@@ -64,12 +64,11 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
 
         service = AnalysisRunService(agent_runner=FakeRunner())
         events = service.run(
-            AnalysisRunRequest(
-                question="把这次分析沉淀成 skill.md",
-                conversation_id="conv_analysis_skill_runner",
-                analysis_mode="quick",
-                turn_kind="message",
-            )
+                AnalysisRunRequest(
+                    question="把这次分析沉淀成 skill.md",
+                    conversation_id="conv_analysis_skill_runner",
+                    turn_kind="message",
+                )
         )
 
         artifact_paths = [event.payload["path"] for event in events if event.type == "artifact.created"]
@@ -82,22 +81,21 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
 
         service = AnalysisRunService(agent_runner=FakeRunner())
         events = service.run(
-            AnalysisRunRequest(
-                question="生成可复用的分析报告和SQL资产",
-                conversation_id="conv_analysis_reusable_assets_runner",
-                analysis_mode="quick",
-            )
+                AnalysisRunRequest(
+                    question="生成可复用的分析报告和SQL资产",
+                    conversation_id="conv_analysis_reusable_assets_runner",
+                )
         )
 
         artifact_paths = [event.payload["path"] for event in events if event.type == "artifact.created"]
-        self.assertIn("reports/quick_report.html", artifact_paths)
-        self.assertIn("queries/quick_candidate.sql", artifact_paths)
+        self.assertIn("reports/analysis_report.html", artifact_paths)
+        self.assertIn("queries/candidate.sql", artifact_paths)
         self.assertNotIn("skills/analysis_skill.md", artifact_paths)
 
     def test_analysis_service_forwards_async_agent_runner_events(self) -> None:
         class FakeRunner:
             async def async_stream(self, prompt: str):
-                yield ExplorationAgentRunnerEvent(type="agent.runner.raw", payload={"prompt_has_deep": "深度分析" in prompt})
+                yield ExplorationAgentRunnerEvent(type="agent.runner.raw", payload={"prompt_mentions_mode": "分析模式" in prompt})
                 yield AnalysisAgentRunResult(final_output="异步 Codex Runner 输出", raw_result_type="FakeStreamedResult")
 
         async def collect_events() -> list:
@@ -107,7 +105,6 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
                 AnalysisRunRequest(
                     question="首购后 30 天复购率怎么算",
                     conversation_id="conv_analysis_runner_async",
-                    analysis_mode="deep",
                 )
             ):
                 events.append(event)
@@ -118,18 +115,19 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
         self.assertIn("agent.runner.started", [event.type for event in events])
         self.assertIn("agent.runner.completed", [event.type for event in events])
         self.assertIn("agent.runner.raw", [event.type for event in events])
+        prompt_event = next(event for event in events if event.type == "agent.prompt.created")
+        self.assertIn("用户问题：首购后 30 天复购率怎么算", prompt_event.payload["prompt"])
         message = next(event for event in events if event.type == "agent.message.created")
         self.assertEqual(message.payload["content"], "异步 Codex Runner 输出")
 
-    def test_analysis_runner_prompt_names_mode_models_and_problem_type(self) -> None:
+    def test_analysis_runner_prompt_names_models_and_problem_type(self) -> None:
         prompt = build_analysis_runner_prompt(
             question="首购后 30 天复购率怎么算",
-            analysis_mode="deep",
             problem_label="指标口径",
             semantic_model_labels=["FineReport 报表级语义模型", "知识库已确认业务经验"],
         )
 
-        self.assertIn("深度分析", prompt)
+        self.assertNotIn("分析模式", prompt)
         self.assertIn("指标口径", prompt)
         self.assertIn("FineReport 报表级语义模型", prompt)
         self.assertIn("finereport-operation-management-channel-sales", prompt)
@@ -246,7 +244,6 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
         context = sanitize_interactive_report_context(report)
         prompt = build_analysis_runner_prompt(
             question="按区域拆开",
-            analysis_mode="quick",
             problem_label="经营复盘",
             semantic_model_labels=[],
             current_report_context=context,
@@ -260,7 +257,7 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
         report["queries"] = {"not-registered": {}}
         self.assertIsNone(sanitize_interactive_report_context(report))
 
-    def test_report_context_requires_per_run_data_egress_authorization(self) -> None:
+    def test_report_context_is_not_controlled_by_data_egress_authorization(self) -> None:
         report = {
             "id": "report_channel_sales",
             "title": "渠道销售结构",
@@ -280,7 +277,7 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
         runner = FakeRunner()
         service = AnalysisRunService(agent_runner=runner)
         service.run(AnalysisRunRequest(question="按区域拆开", metadata={"interactive_report_context": report}))
-        self.assertNotIn("渠道销售结构", runner.prompt)
+        self.assertIn("渠道销售结构", runner.prompt)
 
         service.run(
             AnalysisRunRequest(
@@ -316,29 +313,17 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
                 )
 
         events = AnalysisRunService(agent_runner=FakeRunner()).run(
-            AnalysisRunRequest(question="补充说明", metadata={"data_egress_authorized": True, "interactive_report_context": report})
+            AnalysisRunRequest(question="补充说明", metadata={"interactive_report_context": report})
         )
         draft = next(event.payload for event in events if event.type == "interactive_report.draft")
         self.assertEqual(draft["id"], "report_channel_sales")
 
-    def test_authorized_channel_snapshot_is_included_in_runner_prompt(self) -> None:
+    def test_legacy_data_egress_authorization_is_ignored(self) -> None:
         test_case = self
 
         class QueryService:
             def run(self, query_ref: str, filters: dict[str, object], *, audit_context: dict[str, object] | None = None) -> ReportQueryResponse:
-                test_case.assertEqual(query_ref, CHANNEL_SALES_QUERY_REF)
-                test_case.assertEqual(filters, {"month": "2026-05"})
-                test_case.assertIsNotNone(audit_context)
-                test_case.assertEqual(audit_context["source"], "codex_authorized_snapshot")
-                return ReportQueryResponse(
-                    queryRef=query_ref,
-                    filters={"month": "2026-05"},
-                    columns=["channel", "salesAmount", "salesShare"],
-                    rows=[{"channel": "线上", "salesAmount": 100, "salesShare": 1}],
-                    rowCount=1,
-                    truncated=False,
-                    elapsedMs=12,
-                )
+                test_case.fail("Legacy data egress metadata must not trigger report query snapshots.")
 
         class FakeRunner:
             def stream(self, prompt: str):
@@ -353,16 +338,11 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
             )
         )
 
-        self.assertIn('"salesAmount":100', runner.prompt)
-        self.assertIn("本轮必须在回复末尾输出完整的 <interactive_report_draft>", runner.prompt)
-        evidence = next(event for event in events if event.type == "agent.evidence.available")
-        self.assertEqual(evidence.payload["rowCount"], 1)
-        draft = next(event.payload for event in events if event.type == "interactive_report.draft")
-        self.assertEqual(draft["title"], "2026-05 渠道销售结构")
-        self.assertIn(CHANNEL_SALES_QUERY_REF, draft["queries"])
-        self.assertEqual(draft["document"]["content"][5]["props"]["queryRef"], CHANNEL_SALES_QUERY_REF)
+        self.assertNotIn('"salesAmount":100', runner.prompt)
+        self.assertNotIn("本轮必须在回复末尾输出完整的 <interactive_report_draft>", runner.prompt)
+        self.assertNotIn("agent.evidence.available", [event.type for event in events])
 
-    def test_finereport_semantic_context_requires_its_own_per_run_authorization(self) -> None:
+    def test_legacy_finereport_semantic_context_authorization_is_ignored(self) -> None:
         class SemanticRepository:
             def __init__(self) -> None:
                 self.calls = 0
@@ -388,31 +368,16 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
         self.assertNotIn("finereport_safe", runner.prompt)
 
         events = service.run(AnalysisRunRequest(question="分析预算", metadata={"semantic_context_egress_authorized": True}))
-        self.assertEqual(repository.calls, 1)
-        self.assertIn("finereport_safe", runner.prompt)
-        evidence = next(event for event in events if event.type == "agent.evidence.available")
-        self.assertEqual(evidence.payload["kind"], "authorized_finereport_semantic_summary")
-        self.assertEqual(evidence.payload["reportCount"], 1)
-        self.assertEqual(evidence.payload["reportIds"], ["finereport_safe"])
-        self.assertTrue(str(evidence.payload["thread_id"]).startswith("conv_analysis_"))
-        self.assertTrue(str(evidence.payload["run_id"]).startswith("run_analysis_"))
+        self.assertEqual(repository.calls, 0)
+        self.assertNotIn("finereport_safe", runner.prompt)
+        self.assertNotIn("agent.evidence.available", [event.type for event in events])
 
-    def test_authorized_region_request_uses_region_channel_query(self) -> None:
+    def test_legacy_region_snapshot_request_does_not_rewrite_report(self) -> None:
         test_case = self
 
         class QueryService:
             def run(self, query_ref: str, filters: dict[str, object], *, audit_context: dict[str, object] | None = None) -> ReportQueryResponse:
-                test_case.assertEqual(query_ref, REGION_CHANNEL_SALES_QUERY_REF)
-                test_case.assertEqual(filters, {"month": "2026-05"})
-                return ReportQueryResponse(
-                    queryRef=query_ref,
-                    filters={"month": "2026-05"},
-                    columns=["region", "channel", "salesAmount", "salesShare"],
-                    rows=[{"region": "华东", "channel": "线下分销", "salesAmount": 100, "salesShare": 1}],
-                    rowCount=1,
-                    truncated=False,
-                    elapsedMs=12,
-                )
+                test_case.fail("Legacy data egress metadata must not trigger region snapshots.")
 
         class FakeRunner:
             def stream(self, prompt: str):
@@ -437,16 +402,14 @@ class AnalysisAgentRunnerTest(unittest.TestCase):
             "chartSpecs": {},
             "gridSpecs": {},
         }
-        events = AnalysisRunService(agent_runner=runner, report_query_service=QueryService()).run(
+        AnalysisRunService(agent_runner=runner, report_query_service=QueryService()).run(
             AnalysisRunRequest(
                 question="请按区域拆开 2026-05 渠道销售",
                 metadata={"data_egress_authorized": True, "interactive_report_context": report_context},
             )
         )
-        self.assertIn('"region":"华东"', runner.prompt)
-        draft = next(event.payload for event in events if event.type == "interactive_report.draft")
-        self.assertIn(REGION_CHANNEL_SALES_QUERY_REF, draft["queries"])
-        self.assertEqual(draft["document"]["content"][0]["props"]["queryRef"], REGION_CHANNEL_SALES_QUERY_REF)
+        self.assertNotIn('"region":"华东"', runner.prompt)
+        self.assertIn("渠道销售结构", runner.prompt)
 
 
 if __name__ == "__main__":

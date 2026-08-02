@@ -16,6 +16,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     sourceTaskId: "analysis_task_rebuy_30d",
     sourceTaskTitle: "首购后 30 天复购率",
     sourceConversationId: "conv_analysis_rebuy_30d",
+    sourceExecutionAttemptId: "run_semantic_rebuy_30d",
     sourceRunId: "run_semantic_rebuy_30d",
     assetType: "报告",
     title: "首购后 30 天复购率分析报告",
@@ -28,6 +29,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     reopenContext: {
       sourceTaskId: "analysis_task_rebuy_30d",
       sourceConversationId: "conv_analysis_rebuy_30d",
+      sourceExecutionAttemptId: "run_semantic_rebuy_30d",
       sourceRunId: "run_semantic_rebuy_30d",
       continuationPrompt: "基于首购后 30 天复购率分析报告继续分析，并沿用已确认退款排除规则。",
       targetFileId: "reports-rebuy-30d-html",
@@ -39,6 +41,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     sourceTaskId: "analysis_task_channel_share",
     sourceTaskTitle: "渠道销售占比分析",
     sourceConversationId: "conv_analysis_channel_share",
+    sourceExecutionAttemptId: "run_channel_sql_v2",
     sourceRunId: "run_channel_sql_v2",
     assetType: "SQL",
     title: "渠道销售占比只读 SQL",
@@ -51,6 +54,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     reopenContext: {
       sourceTaskId: "analysis_task_channel_share",
       sourceConversationId: "conv_analysis_channel_share",
+      sourceExecutionAttemptId: "run_channel_sql_v2",
       sourceRunId: "run_channel_sql_v2",
       continuationPrompt: "基于渠道销售占比 SQL 继续分析，优先检查渠道结构和时间范围。",
       targetFileId: "queries-channel-share-sql",
@@ -62,6 +66,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     sourceTaskId: "analysis_task_east_gmv",
     sourceTaskTitle: "华东 GMV 下滑原因",
     sourceConversationId: "conv_analysis_east_gmv",
+    sourceExecutionAttemptId: "run_east_gmv_rule_v1",
     sourceRunId: "run_east_gmv_rule_v1",
     assetType: "业务规则",
     title: "华东 GMV 下滑排查规则",
@@ -74,6 +79,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     reopenContext: {
       sourceTaskId: "analysis_task_east_gmv",
       sourceConversationId: "conv_analysis_east_gmv",
+      sourceExecutionAttemptId: "run_east_gmv_rule_v1",
       sourceRunId: "run_east_gmv_rule_v1",
       continuationPrompt: "基于华东 GMV 下滑排查规则继续分析，并补充最新渠道结构证据。",
       targetFileId: "rules-east-gmv-md",
@@ -85,6 +91,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     sourceTaskId: "analysis_task_report_parser",
     sourceTaskTitle: "FineReport 报表语义解析",
     sourceConversationId: "conv_analysis_report_parser",
+    sourceExecutionAttemptId: "run_report_parser_path",
     sourceRunId: "run_report_parser_path",
     assetType: "分析路径",
     title: "报表级语义模型解析路径",
@@ -97,6 +104,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     reopenContext: {
       sourceTaskId: "analysis_task_report_parser",
       sourceConversationId: "conv_analysis_report_parser",
+      sourceExecutionAttemptId: "run_report_parser_path",
       sourceRunId: "run_report_parser_path",
       continuationPrompt: "基于报表级语义模型解析路径继续完善解析器输出结构。",
       targetFileId: "paths-filereport-semantic-md",
@@ -108,6 +116,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     sourceTaskId: "analysis_task_metric_diagnostics",
     sourceTaskTitle: "指标异动诊断方法",
     sourceConversationId: "conv_analysis_metric_diagnostics",
+    sourceExecutionAttemptId: "run_metric_skill",
     sourceRunId: "run_metric_skill",
     assetType: "SKILL.md",
     title: "指标异动诊断 Skill.md",
@@ -120,6 +129,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     reopenContext: {
       sourceTaskId: "analysis_task_metric_diagnostics",
       sourceConversationId: "conv_analysis_metric_diagnostics",
+      sourceExecutionAttemptId: "run_metric_skill",
       sourceRunId: "run_metric_skill",
       continuationPrompt: "继续编辑指标异动诊断 Skill.md，确认适用场景、业务口径和复用权限。",
       targetFileId: "skills-metric-diagnostics-md",
@@ -175,7 +185,7 @@ export function AnalysisAssetLibraryPage({ onContinueFromAsset }: Props) {
           <dl>
             <div><dt>来源任务</dt><dd>{selectedEntry.sourceTaskTitle}</dd></div>
             <div><dt>来源 Conversation</dt><dd>{selectedEntry.sourceConversationId}</dd></div>
-            <div><dt>来源 Run</dt><dd>{selectedEntry.sourceRunId}</dd></div>
+            <div><dt>来源执行</dt><dd>{selectedEntry.sourceExecutionAttemptId}</dd></div>
             <div><dt>版本</dt><dd>{selectedEntry.latestVersion}</dd></div>
             <div><dt>状态</dt><dd>{selectedEntry.status}</dd></div>
             <div><dt>可见范围</dt><dd>{selectedEntry.visibility}</dd></div>

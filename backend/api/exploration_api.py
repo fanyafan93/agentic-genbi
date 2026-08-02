@@ -9,7 +9,7 @@ from backend.config import check_runtime_env, load_project_env
 from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
 from backend.analysis.interactive_report_store import InteractiveReportStore, InteractiveReportVersionConflict
 from backend.analysis.report_query_service import ReportQueryFilterError, ReportQueryNotFound, ReportQueryService, response_to_dict
-from backend.analysis.run_service import AnalysisRunRequest, AnalysisRunService
+from backend.analysis.run_service import AnalysisRunRequest, AnalysisRunService, AnalysisThreadService
 from backend.business_semantics.finereport_reports import FineReportReportRepository
 from backend.exploration.run_event_store import RunEventStore
 from backend.exploration.run_service import ExplorationRunEvent, ExplorationRunRequest, ExplorationRunService
@@ -17,6 +17,7 @@ from backend.exploration.run_trace_store import RunTraceStore
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRunner
 from backend.harness.thread_store import ThreadStore
 from backend.persistence.postgres_stores import (
+    build_postgres_analysis_asset_store,
     build_postgres_report_query_audit_store,
     build_postgres_stores,
     build_postgres_thread_store,
@@ -60,20 +61,23 @@ def create_app(
         user_id: str | None = None
         metadata: dict[str, Any] = Field(default_factory=dict)
 
-    class AnalysisRunBody(BaseModel):
+    class AnalysisTurnBody(BaseModel):
         question: str = Field(min_length=1)
         conversation_id: str | None = None
         user_id: str | None = None
-        analysis_mode: str = "quick"
         turn_kind: str = "start"
         metadata: dict[str, Any] = Field(default_factory=dict)
 
     class AnalysisAssetReopenContextBody(BaseModel):
         sourceTaskId: str = Field(min_length=1)
         sourceConversationId: str = Field(min_length=1)
-        sourceRunId: str = Field(min_length=1)
+        sourceExecutionAttemptId: str | None = None
+        sourceRunId: str | None = None
         continuationPrompt: str = Field(min_length=1)
         targetFileId: str | None = None
+        sourceCodexThreadId: str | None = None
+        sourceCodexTurnId: str | None = None
+        sourceCodexItemId: str | None = None
 
     class AnalysisAssetBody(BaseModel):
         assetId: str = Field(min_length=1)
@@ -81,7 +85,11 @@ def create_app(
         sourceTaskId: str = Field(min_length=1)
         sourceTaskTitle: str = Field(min_length=1)
         sourceConversationId: str = Field(min_length=1)
-        sourceRunId: str = Field(min_length=1)
+        sourceExecutionAttemptId: str | None = None
+        sourceRunId: str | None = None
+        sourceCodexThreadId: str | None = None
+        sourceCodexTurnId: str | None = None
+        sourceCodexItemId: str | None = None
         assetType: str = Field(min_length=1)
         title: str = Field(min_length=1)
         label: str | None = None
@@ -97,7 +105,8 @@ def create_app(
     class InteractiveReportSourceBody(BaseModel):
         threadId: str = Field(min_length=1)
         turnId: str = Field(min_length=1)
-        runId: str = Field(min_length=1)
+        executionAttemptId: str | None = None
+        runId: str | None = None
 
     class InteractiveReportBody(BaseModel):
         id: str = Field(min_length=1)
@@ -208,7 +217,7 @@ def create_app(
         run_service,
         report_query_service=configured_report_query_service,
     )
-    configured_analysis_asset_store = analysis_asset_store or AnalysisAssetStore()
+    configured_analysis_asset_store = analysis_asset_store or _build_default_analysis_asset_store()
     configured_interactive_report_store = interactive_report_store or _build_default_interactive_report_store()
     configured_thread_store = thread_store or getattr(configured_analysis_service, "thread_store", None) or ThreadStore()
     if getattr(configured_analysis_service, "thread_store", None) is None:
@@ -234,49 +243,27 @@ def create_app(
             raise HTTPException(status_code=404, detail="finereport_report_not_found")
         return report
 
-    @app.post("/api/analysis/tasks/runs")
-    def create_analysis_task_run(body: AnalysisRunBody = Body(...)) -> dict[str, Any]:
-        conversation_id = body.conversation_id or _new_analysis_conversation_id()
-        return _create_analysis_run_payload(configured_analysis_service, body, conversation_id=conversation_id)
-
-    @app.post("/api/analysis/tasks/runs/stream")
-    def stream_analysis_task_run(body: AnalysisRunBody = Body(...)) -> StreamingResponse:
-        conversation_id = body.conversation_id or _new_analysis_conversation_id()
-        request = _analysis_request_from_body(body, conversation_id=conversation_id)
-
-        async def event_stream() -> Any:
-            async for event in configured_analysis_service.astream_events(request):
-                yield event.to_sse()
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-    @app.get("/api/analysis/tasks/runs/{run_id}")
-    def get_analysis_task_run(run_id: str) -> dict[str, Any]:
-        trace = configured_analysis_service.trace_store.get_trace(run_id) if configured_analysis_service.trace_store else None
-        events = configured_analysis_service.event_store.list_events(run_id) if configured_analysis_service.event_store else []
-        system_run = configured_thread_store.get_run(run_id)
-        if not events and system_run:
-            events = [
-                ExplorationRunEvent(
-                    type=str(item["type"]),
-                    run_id=str(item["run_id"]),
-                    payload=dict(item.get("payload") or {}),
-                    created_at=str(item["created_at"]),
-                )
-                for item in configured_thread_store.get_run_events(run_id)
-            ]
-        if not trace and not events and not system_run:
-            raise HTTPException(status_code=404, detail="analysis_run_not_found")
-        return {
-            "run": asdict(trace) if trace else None,
-            "systemRun": system_run,
-            "events_url": f"/api/analysis/tasks/runs/{run_id}/events",
-            "events": [asdict(event) for event in events],
-        }
-
     @app.get("/api/analysis/threads")
     def list_analysis_threads(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
         return {"threads": configured_thread_store.list_threads(limit=limit, product_kind="analysis_task")}
+
+    @app.post("/api/analysis/threads/turns")
+    def create_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
+        thread_id = body.conversation_id or _new_analysis_conversation_id()
+        return _create_analysis_turn_payload(configured_analysis_service, body, conversation_id=thread_id)
+
+    @app.post("/api/analysis/threads/turns/stream")
+    def stream_new_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> StreamingResponse:
+        thread_id = body.conversation_id or _new_analysis_conversation_id()
+        return _stream_analysis_turn_response(configured_analysis_service, body, thread_id=thread_id)
+
+    @app.post("/api/analysis/threads/{thread_id}/turns")
+    def create_existing_analysis_thread_turn(thread_id: str, body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
+        return _create_analysis_turn_payload(configured_analysis_service, body, conversation_id=thread_id)
+
+    @app.post("/api/analysis/threads/{thread_id}/turns/stream")
+    def stream_existing_analysis_thread_turn(thread_id: str, body: AnalysisTurnBody = Body(...)) -> StreamingResponse:
+        return _stream_analysis_turn_response(configured_analysis_service, body, thread_id=thread_id)
 
     @app.get("/api/analysis/threads/{thread_id}")
     def get_analysis_thread(thread_id: str) -> dict[str, Any]:
@@ -285,13 +272,12 @@ def create_app(
             raise HTTPException(status_code=404, detail="analysis_thread_not_found")
         return thread
 
-    @app.get("/api/analysis/tasks/runs/{run_id}/events")
-    def get_analysis_task_run_events(run_id: str) -> StreamingResponse:
-        async def event_stream() -> Any:
-            async for event in configured_analysis_service.astream_run_events(run_id):
-                yield event.to_sse()
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+    @app.get("/api/analysis/threads/{thread_id}/turns/{turn_id}")
+    def get_analysis_thread_turn(thread_id: str, turn_id: str) -> dict[str, Any]:
+        turn = configured_thread_store.get_turn(thread_id, turn_id)
+        if not turn:
+            raise HTTPException(status_code=404, detail="analysis_turn_not_found")
+        return turn
 
     @app.post("/api/analysis/report-queries/{query_ref}")
     def run_interactive_report_query(query_ref: str, body: ReportQueryBody = Body(...)) -> dict[str, Any]:
@@ -327,12 +313,22 @@ def create_app(
 
     @app.post("/api/analysis/assets")
     def save_analysis_asset(body: AnalysisAssetBody = Body(...)) -> dict[str, Any]:
+        source_execution_attempt_id = body.sourceExecutionAttemptId or body.sourceRunId
+        source_run_id = body.sourceRunId or source_execution_attempt_id
+        reopen_execution_attempt_id = body.reopenContext.sourceExecutionAttemptId or body.reopenContext.sourceRunId
+        reopen_run_id = body.reopenContext.sourceRunId or reopen_execution_attempt_id
+        if not source_execution_attempt_id or not source_run_id or not reopen_execution_attempt_id or not reopen_run_id:
+            raise HTTPException(status_code=400, detail="sourceExecutionAttemptId is required")
         context = AnalysisAssetReopenContext(
             sourceTaskId=body.reopenContext.sourceTaskId,
             sourceConversationId=body.reopenContext.sourceConversationId,
-            sourceRunId=body.reopenContext.sourceRunId,
+            sourceExecutionAttemptId=reopen_execution_attempt_id,
+            sourceRunId=reopen_run_id,
             continuationPrompt=body.reopenContext.continuationPrompt,
             targetFileId=body.reopenContext.targetFileId,
+            sourceCodexThreadId=body.reopenContext.sourceCodexThreadId,
+            sourceCodexTurnId=body.reopenContext.sourceCodexTurnId,
+            sourceCodexItemId=body.reopenContext.sourceCodexItemId,
         )
         try:
             record = configured_analysis_asset_store.save_asset(
@@ -341,7 +337,11 @@ def create_app(
                 source_task_id=body.sourceTaskId,
                 source_task_title=body.sourceTaskTitle,
                 source_conversation_id=body.sourceConversationId,
-                source_run_id=body.sourceRunId,
+                source_execution_attempt_id=source_execution_attempt_id,
+                source_run_id=source_run_id,
+                source_codex_thread_id=body.sourceCodexThreadId,
+                source_codex_turn_id=body.sourceCodexTurnId,
+                source_codex_item_id=body.sourceCodexItemId,
                 asset_type=body.assetType,
                 title=body.title,
                 label=body.label or body.assetType,
@@ -363,6 +363,35 @@ def create_app(
         if not record:
             raise HTTPException(status_code=404, detail="analysis_asset_not_found")
         return {"asset": asdict(record)}
+
+    @app.get("/api/analysis/artifact-lineage")
+    def list_artifact_lineage(
+        artifact_id: str | None = None,
+        codex_thread_id: str | None = None,
+        codex_turn_id: str | None = None,
+        codex_item_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        return {
+            "lineage": [
+                asdict(record)
+                for record in configured_analysis_asset_store.list_artifact_lineage(
+                    artifact_id=artifact_id,
+                    codex_thread_id=codex_thread_id,
+                    codex_turn_id=codex_turn_id,
+                    codex_item_id=codex_item_id,
+                    limit=limit,
+                )
+            ]
+        }
+
+    @app.get("/api/analysis/assets/{asset_id}/lineage")
+    def get_analysis_asset_lineage(asset_id: str) -> dict[str, Any]:
+        record = configured_analysis_asset_store.get_asset(asset_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="analysis_asset_not_found")
+        lineage = configured_analysis_asset_store.list_artifact_lineage(artifact_id=record.artifactVersionId, limit=1)
+        return {"lineage": asdict(lineage[0]) if lineage else None}
 
     @app.post("/api/analysis/assets/{asset_id}/reopen")
     def reopen_analysis_asset(asset_id: str) -> dict[str, Any]:
@@ -769,34 +798,62 @@ def _create_exploration_run_payload(run_service: ExplorationRunService, body: An
     }
 
 
-def _create_analysis_run_payload(analysis_service: AnalysisRunService, body: Any, *, conversation_id: str) -> dict[str, Any]:
+def _create_analysis_turn_payload(
+    analysis_service: AnalysisRunService,
+    body: Any,
+    *,
+    conversation_id: str,
+) -> dict[str, Any]:
     request = _analysis_request_from_body(body, conversation_id=conversation_id)
-    run_id = analysis_service.create_run(request)
-    events = list(analysis_service.stream_run_events(run_id))
+    submission = analysis_service.submit_turn(request)
+    execution_attempt_id = submission.execution_attempt_id
+    events = list(analysis_service.stream_turn_events(execution_attempt_id))
+    turn_id = _first_event_payload_value(events, "turn_id") or submission.turn_id
     return {
+        "thread_id": conversation_id,
         "conversation_id": conversation_id,
-        "latest_run_id": run_id,
-        "run_id": run_id,
-        "events_url": f"/api/analysis/tasks/runs/{run_id}/events",
+        "turn_id": turn_id,
+        "latest_execution_attempt_id": execution_attempt_id,
+        "execution_attempt_id": execution_attempt_id,
+        "events_url": f"/api/analysis/threads/{conversation_id}/turns/{turn_id}",
         "events": [asdict(event) for event in events],
     }
 
 
+def _first_event_payload_value(events: list[Any], key: str) -> str | None:
+    for event in events:
+        payload = getattr(event, "payload", None)
+        if isinstance(payload, dict) and payload.get(key):
+            return str(payload[key])
+    return None
+
+
+def _stream_analysis_turn_response(analysis_service: AnalysisRunService, body: Any, *, thread_id: str) -> Any:
+    from fastapi.responses import StreamingResponse
+
+    request = _analysis_request_from_body(body, conversation_id=thread_id)
+    submission = analysis_service.submit_turn(request)
+
+    async def event_stream() -> Any:
+        async for event in analysis_service.astream_turn_events(submission.execution_attempt_id):
+            yield event.to_sse()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 def _analysis_request_from_body(body: Any, *, conversation_id: str) -> AnalysisRunRequest:
-    mode = str(getattr(body, "analysis_mode", "quick") or "quick").strip().lower()
-    if mode not in {"quick", "deep"}:
-        mode = "quick"
     turn_kind = str(getattr(body, "turn_kind", "start") or "start").strip().lower()
     if turn_kind not in {"start", "message", "reply"}:
         turn_kind = "message"
     metadata = dict(getattr(body, "metadata", {}) or {})
+    metadata.pop("data_egress_authorized", None)
+    metadata.pop("semantic_context_egress_authorized", None)
     metadata.setdefault("domain", "analysis_task")
     metadata.setdefault("conversation_root", not bool(getattr(body, "conversation_id", None)))
     return AnalysisRunRequest(
         question=body.question,
         conversation_id=conversation_id,
         user_id=getattr(body, "user_id", None),
-        analysis_mode=mode,  # type: ignore[arg-type]
         turn_kind=turn_kind,  # type: ignore[arg-type]
         metadata=metadata,
     )
@@ -860,7 +917,7 @@ def build_default_analysis_service(
     run_service: ExplorationRunService,
     *,
     report_query_service: ReportQueryService | None = None,
-) -> AnalysisRunService:
+) -> AnalysisThreadService:
     load_project_env()
     analysis_runner = None
     analysis_runtime = os.getenv("GENBI_ANALYSIS_RUNTIME", "codex").lower()
@@ -868,7 +925,7 @@ def build_default_analysis_service(
         analysis_runner = CodexSdkAnalysisRunner.from_env()
     elif analysis_runtime not in {"", "local", "mock"}:
         raise RuntimeError("GENBI_ANALYSIS_RUNTIME only supports codex, local, or mock.")
-    return AnalysisRunService(
+    return AnalysisThreadService(
         agent_runner=analysis_runner,
         thread_store=_build_default_thread_store(),
         report_query_service=report_query_service,
@@ -910,6 +967,16 @@ def _build_default_thread_store() -> ThreadStore:
             if os.getenv("GENBI_PERSISTENCE", "").strip():
                 raise
     return ThreadStore()
+
+
+def _build_default_analysis_asset_store() -> AnalysisAssetStore:
+    if postgres_persistence_enabled():
+        try:
+            return build_postgres_analysis_asset_store()
+        except Exception:
+            if os.getenv("GENBI_PERSISTENCE", "").strip():
+                raise
+    return AnalysisAssetStore()
 
 
 def _build_default_interactive_report_store() -> Any:

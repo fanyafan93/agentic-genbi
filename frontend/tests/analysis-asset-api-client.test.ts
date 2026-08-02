@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
+  getAnalysisAssetLineageFromBackend,
+  listArtifactLineageFromBackend,
   listAnalysisAssetsFromBackend,
   reopenAnalysisAssetFromBackend,
   saveAnalysisAssetToBackend,
@@ -13,17 +15,25 @@ const saveRequest: AnalysisAssetSaveRequest = {
   sourceTaskId: "analysis_task_run_analysis_abc",
   sourceTaskTitle: "first purchase repurchase",
   sourceConversationId: "conv_analysis_abc",
+  sourceExecutionAttemptId: "run_analysis_abc",
   sourceRunId: "run_analysis_abc",
+  sourceCodexThreadId: "codex_thread_abc",
+  sourceCodexTurnId: "codex_turn_abc",
+  sourceCodexItemId: "codex_item_report",
   assetType: "report",
-  title: "quick_report.html",
+  title: "analysis_report.html",
   visibility: "team",
   saveReason: "user_confirmed",
   reopenContext: {
     sourceTaskId: "analysis_task_run_analysis_abc",
     sourceConversationId: "conv_analysis_abc",
+    sourceExecutionAttemptId: "run_analysis_abc",
     sourceRunId: "run_analysis_abc",
-    continuationPrompt: "continue from quick report",
-    targetFileId: "reports-quick-report-html",
+    continuationPrompt: "continue from analysis report",
+    targetFileId: "reports-analysis-report-html",
+    sourceCodexThreadId: "codex_thread_abc",
+    sourceCodexTurnId: "codex_turn_abc",
+    sourceCodexItemId: "codex_item_report",
   },
 };
 
@@ -50,10 +60,10 @@ describe("analysis asset backend API client", () => {
           asset: {
             ...saveRequest,
             label: "report",
-            description: "quick_report.html",
+            description: "analysis_report.html",
             status: "saved",
             latestVersion: "v1-draft",
-            fileId: "reports-quick-report-html",
+            fileId: "reports-analysis-report-html",
           },
           savedAt: "2026-07-30T20:30:00+08:00",
         }),
@@ -69,7 +79,13 @@ describe("analysis asset backend API client", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     expect(body.assetId).toBe("asset_mock_report");
     expect(body.sourceConversationId).toBe("conv_analysis_abc");
-    expect(body.reopenContext.targetFileId).toBe("reports-quick-report-html");
+    expect(body.sourceExecutionAttemptId).toBe("run_analysis_abc");
+    expect(body.sourceCodexThreadId).toBe("codex_thread_abc");
+    expect(body.sourceCodexTurnId).toBe("codex_turn_abc");
+    expect(body.sourceCodexItemId).toBe("codex_item_report");
+    expect(body.reopenContext.targetFileId).toBe("reports-analysis-report-html");
+    expect(body.reopenContext.sourceExecutionAttemptId).toBe("run_analysis_abc");
+    expect(body.reopenContext.sourceCodexItemId).toBe("codex_item_report");
     expect(body.status).toBe("saved");
     expect(result.asset.assetId).toBe("asset_mock_report");
   });
@@ -85,10 +101,10 @@ describe("analysis asset backend API client", () => {
               {
                 ...saveRequest,
                 label: "report",
-                description: "quick_report.html",
+                description: "analysis_report.html",
                 status: "saved",
                 latestVersion: "v1-draft",
-                fileId: "reports-quick-report-html",
+                fileId: "reports-analysis-report-html",
               },
             ],
           }),
@@ -116,6 +132,52 @@ describe("analysis asset backend API client", () => {
     );
     expect(fetchMock.mock.calls[1][0]).toBe("http://192.168.101.12:8000/api/analysis/assets/asset_mock_report/reopen");
     expect(listed.assets[0].sourceConversationId).toBe("conv_analysis_abc");
-    expect(reopened.context.continuationPrompt).toBe("continue from quick report");
+    expect(reopened.context.continuationPrompt).toBe("continue from analysis report");
+  });
+
+  test("queries artifact lineage by Codex item and asset id", async () => {
+    vi.stubEnv("NEXT_PUBLIC_GENBI_API_BASE_URL", "http://192.168.101.12:8000");
+    const lineage = {
+      artifactId: saveRequest.artifactVersionId,
+      artifactVersionId: saveRequest.artifactVersionId,
+      assetId: saveRequest.assetId,
+      assetType: saveRequest.assetType,
+      title: saveRequest.title,
+      sourceTaskId: saveRequest.sourceTaskId,
+      sourceConversationId: saveRequest.sourceConversationId,
+      sourceExecutionAttemptId: saveRequest.sourceExecutionAttemptId,
+      sourceRunId: saveRequest.sourceRunId,
+      codexThreadId: saveRequest.sourceCodexThreadId,
+      codexTurnId: saveRequest.sourceCodexTurnId,
+      codexItemId: saveRequest.sourceCodexItemId,
+      createdAt: "2026-07-30T20:30:00+08:00",
+      updatedAt: "2026-07-30T20:30:00+08:00",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ lineage: [lineage] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ lineage }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const listed = await listArtifactLineageFromBackend({ codexItemId: "codex_item_report", limit: 5 });
+    const single = await getAnalysisAssetLineageFromBackend("asset_mock_report");
+
+    expect(fetchMock.mock.calls[0][0].toString()).toBe(
+      "http://192.168.101.12:8000/api/analysis/artifact-lineage?codex_item_id=codex_item_report&limit=5",
+    );
+    expect(fetchMock.mock.calls[1][0]).toBe("http://192.168.101.12:8000/api/analysis/assets/asset_mock_report/lineage");
+    expect(listed.lineage[0].codexItemId).toBe("codex_item_report");
+    expect(listed.lineage[0].sourceExecutionAttemptId).toBe("run_analysis_abc");
+    expect(single.lineage?.assetId).toBe("asset_mock_report");
   });
 });

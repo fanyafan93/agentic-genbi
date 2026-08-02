@@ -53,10 +53,10 @@ function SkillDraftPreview() {
   const [published, setPublished] = useState(false);
   const [scenario, setScenario] = useState("当用户询问渠道销售占比、渠道增长来源或渠道结构变化时使用。");
   const [confirmations, setConfirmations] = useState("销售额口径\n时间范围\n退款/取消/测试订单排除\n复用权限");
-  const [steps, setSteps] = useState("确认业务口径和分析模式\n检索语义模型与历史 SQL\n生成并校验只读 SQL\n产出图表、报告和风险提示\n沉淀为可复用 Skill");
+  const [steps, setSteps] = useState("确认业务口径和分析范围\n检索语义模型与历史 SQL\n生成并校验只读 SQL\n产出图表、报告和风险提示\n沉淀为可复用 Skill");
   const confirmationList = confirmations.split("\n").map((item) => item.trim()).filter(Boolean);
   const stepList = steps.split("\n").map((item) => item.trim()).filter(Boolean);
-  const references = ["quick_candidate.sql", "channel_share.chart.json", "quick_report.html"];
+  const references = ["candidate.sql", "channel_share.chart.json", "analysis_report.html"];
   const referencesReady = references.length >= 3;
   const publishReady = saved && scenarioReady && metricReady && permissionReady && referencesReady;
   const publicationMetadata = {
@@ -168,7 +168,7 @@ function SkillDraftPreview() {
             <div><dt>版本</dt><dd>{publicationMetadata.version}</dd></div>
             <div><dt>可见范围</dt><dd>{publicationMetadata.visibility}</dd></div>
             <div><dt>来源分析任务</dt><dd>{publicationMetadata.sourceTask}</dd></div>
-            <div><dt>来源 Run</dt><dd>{publicationMetadata.sourceRun}</dd></div>
+            <div><dt>来源执行</dt><dd>{publicationMetadata.sourceRun}</dd></div>
             <div><dt>入库状态</dt><dd>等待审批 / mock</dd></div>
           </dl>
           <div className="skill-lineage">

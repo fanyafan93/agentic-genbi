@@ -248,7 +248,13 @@ class CodexSdkAnalysisRunner:
         if method == "turn/started":
             return ExplorationAgentRunnerEvent(
                 type="agent.runner.raw",
-                payload={"runtime": "openai-codex", "phase": "turn.started", "codex_thread_id": codex_thread_id},
+                payload={
+                    "runtime": "openai-codex",
+                    "phase": "turn.started",
+                    "codex_method": method,
+                    "codex_thread_id": codex_thread_id,
+                    "codex_turn_id": _payload_turn_id(payload),
+                },
             )
         if method == "item/agentMessage/delta":
             delta = str(getattr(payload, "delta", "") or "")
@@ -256,12 +262,20 @@ class CodexSdkAnalysisRunner:
                 return None
             return ExplorationAgentRunnerEvent(
                 type="agent.message.delta",
-                payload={"role": "assistant", "delta": delta, "codex_thread_id": codex_thread_id},
+                payload={
+                    "role": "assistant",
+                    "delta": delta,
+                    "codex_method": method,
+                    "codex_thread_id": codex_thread_id,
+                    "codex_turn_id": _payload_turn_id(payload),
+                    "codex_item_id": _payload_item_id(payload),
+                },
             )
         if method == "item/completed":
             item = _payload_item(payload)
             root = getattr(item, "root", item)
             root_type = _item_type(root)
+            codex_item_id = _item_id(root)
             if _is_agent_message(root):
                 text = _item_text(root)
                 if text:
@@ -270,15 +284,26 @@ class CodexSdkAnalysisRunner:
                         payload={
                             "runtime": "openai-codex",
                             "phase": "agent_message.completed",
+                            "codex_method": method,
                             "role": "assistant",
                             "content": text,
                             "codex_thread_id": codex_thread_id,
+                            "codex_turn_id": _payload_turn_id(payload),
+                            "codex_item_id": codex_item_id,
                             "codex_item_type": root_type,
                         },
                     )
             return ExplorationAgentRunnerEvent(
                 type="agent.runner.raw",
-                payload={"runtime": "openai-codex", "phase": "item.completed", "codex_thread_id": codex_thread_id, "codex_item_type": root_type},
+                payload={
+                    "runtime": "openai-codex",
+                    "phase": "item.completed",
+                    "codex_method": method,
+                    "codex_thread_id": codex_thread_id,
+                    "codex_turn_id": _payload_turn_id(payload),
+                    "codex_item_id": codex_item_id,
+                    "codex_item_type": root_type,
+                },
             )
         if method == "turn/completed":
             return ExplorationAgentRunnerEvent(
@@ -286,7 +311,9 @@ class CodexSdkAnalysisRunner:
                 payload={
                     "runtime": "openai-codex",
                     "phase": "turn.completed",
+                    "codex_method": method,
                     "codex_thread_id": codex_thread_id,
+                    "codex_turn_id": _payload_turn_id(payload),
                     "codex_status": _turn_status(payload) or "",
                 },
             )
@@ -334,11 +361,28 @@ def _payload_item(payload: Any) -> Any | None:
     return getattr(payload, "item", None)
 
 
+def _payload_turn_id(payload: Any) -> str | None:
+    if payload is None:
+        return None
+    turn = getattr(payload, "turn", None)
+    return _string_or_none(getattr(turn, "id", None) or getattr(payload, "turn_id", None) or getattr(payload, "turnId", None))
+
+
+def _payload_item_id(payload: Any) -> str | None:
+    item = _payload_item(payload)
+    root = getattr(item, "root", item)
+    return _item_id(root)
+
+
 def _item_type(root: Any) -> str:
     explicit_type = str(getattr(root, "type", "") or "")
     if explicit_type:
         return explicit_type
     return type(root).__name__
+
+
+def _item_id(root: Any) -> str | None:
+    return _string_or_none(getattr(root, "id", None) or getattr(root, "item_id", None) or getattr(root, "itemId", None))
 
 
 def _is_agent_message(root: Any) -> bool:

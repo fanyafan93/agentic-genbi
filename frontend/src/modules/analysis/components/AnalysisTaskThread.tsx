@@ -1,9 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { AnalysisMode } from "../agentClients";
 import type { FlowNode } from "../hooks/use-flow";
-import { AnalysisModeToggle } from "./AnalysisModeToggle";
 import { FlowComposer } from "./FlowComposer";
 import { FlowNodeView } from "./FlowNodeView";
 import { Suggestions } from "./Suggestions";
@@ -14,13 +12,8 @@ type Props = {
   running: boolean;
   nodes: FlowNode[];
   assetNotice: string;
-  analysisMode: AnalysisMode;
   mobileHidden: boolean;
   taskKey: string | null;
-  dataEgressAuthorized: boolean;
-  canAuthorizeDataEgress: boolean;
-  onModeChange: (mode: AnalysisMode) => void;
-  onDataEgressAuthorizedChange: (authorized: boolean) => void;
   onReply: (optionId: string) => void;
   onStartFromSuggestion: (suggestionId: string, title: string) => void;
   onSendMessage: (content: string) => void;
@@ -32,13 +25,8 @@ export function AnalysisTaskThread({
   running,
   nodes,
   assetNotice,
-  analysisMode,
   mobileHidden,
   taskKey,
-  dataEgressAuthorized,
-  canAuthorizeDataEgress,
-  onModeChange,
-  onDataEgressAuthorizedChange,
   onReply,
   onStartFromSuggestion,
   onSendMessage,
@@ -47,6 +35,7 @@ export function AnalysisTaskThread({
   const lastNodeCountRef = useRef<number>(-1);
   const streamTailRef = useRef<number>(-1);
   const lastTaskKeyRef = useRef<string | null>(taskKey);
+  const statusLabel = running ? "分析中" : isNewTask ? "等待提问" : "";
 
   useEffect(() => {
     const el = threadScrollRef.current;
@@ -77,13 +66,8 @@ export function AnalysisTaskThread({
       <header className="thread-header">
         <div>
           <h1>{title}</h1>
-          <em>{running ? "分析中" : isNewTask ? "等待提问" : ""}</em>
+          {statusLabel ? <em>{statusLabel}</em> : null}
         </div>
-        <AnalysisModeToggle value={analysisMode} onChange={onModeChange} />
-        {canAuthorizeDataEgress ? <label className="data-egress-toggle" title="仅本轮允许将服务端受控聚合结果和裁剪后的 FineReport 语义摘要发送给外部模型生成分析报告。原始 SQL、数据源连接和文件路径不会外发。">
-          <input type="checkbox" checked={dataEgressAuthorized} onChange={(event) => onDataEgressAuthorizedChange(event.target.checked)} disabled={running} />
-          <span>使用受控数据与语义摘要</span>
-        </label> : null}
       </header>
       {assetNotice && <div className="asset-notice" role="status">{assetNotice}</div>}
       <div className="thread-scroll" ref={threadScrollRef}>

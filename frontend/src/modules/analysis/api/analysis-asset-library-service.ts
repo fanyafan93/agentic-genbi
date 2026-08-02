@@ -35,6 +35,31 @@ export type BackendAnalysisAssetListResponse = {
   assets: BackendAnalysisAssetSaveResponse["asset"][];
 };
 
+export type AnalysisArtifactLineageRecord = {
+  artifactId: string;
+  artifactVersionId: string;
+  assetId: string;
+  assetType: string;
+  title: string;
+  sourceTaskId: string;
+  sourceConversationId: string;
+  sourceExecutionAttemptId?: string;
+  sourceRunId?: string;
+  codexThreadId?: string | null;
+  codexTurnId?: string | null;
+  codexItemId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BackendArtifactLineageListResponse = {
+  lineage: AnalysisArtifactLineageRecord[];
+};
+
+export type BackendArtifactLineageResponse = {
+  lineage: AnalysisArtifactLineageRecord | null;
+};
+
 export type AnalysisAssetLibraryService = {
   listEntries: (request: AnalysisAssetLibraryListRequest) => AnalysisAssetLibraryEntry[];
   saveAsset: (asset: AnalysisAssetCard, taskTitle: string, sourceContext: AnalysisAssetSourceContext) => AnalysisAssetSaveResult;
@@ -120,4 +145,36 @@ export async function reopenAnalysisAssetFromBackend(assetId: string): Promise<A
     throw new Error(`Analysis asset API returned ${response.status}`);
   }
   return (await response.json()) as AnalysisAssetReopenResult;
+}
+
+export async function listArtifactLineageFromBackend(params: {
+  artifactId?: string;
+  codexThreadId?: string;
+  codexTurnId?: string;
+  codexItemId?: string;
+  limit?: number;
+} = {}): Promise<BackendArtifactLineageListResponse> {
+  const apiBaseUrl = getBackendAnalysisAssetApiBaseUrl();
+  if (!apiBaseUrl) throw new Error("Analysis asset API base URL is not configured.");
+  const url = new URL(`${apiBaseUrl}/api/analysis/artifact-lineage`);
+  if (params.artifactId) url.searchParams.set("artifact_id", params.artifactId);
+  if (params.codexThreadId) url.searchParams.set("codex_thread_id", params.codexThreadId);
+  if (params.codexTurnId) url.searchParams.set("codex_turn_id", params.codexTurnId);
+  if (params.codexItemId) url.searchParams.set("codex_item_id", params.codexItemId);
+  if (params.limit) url.searchParams.set("limit", String(params.limit));
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Analysis artifact lineage API returned ${response.status}`);
+  }
+  return (await response.json()) as BackendArtifactLineageListResponse;
+}
+
+export async function getAnalysisAssetLineageFromBackend(assetId: string): Promise<BackendArtifactLineageResponse> {
+  const apiBaseUrl = getBackendAnalysisAssetApiBaseUrl();
+  if (!apiBaseUrl) throw new Error("Analysis asset API base URL is not configured.");
+  const response = await fetch(`${apiBaseUrl}/api/analysis/assets/${encodeURIComponent(assetId)}/lineage`);
+  if (!response.ok) {
+    throw new Error(`Analysis artifact lineage API returned ${response.status}`);
+  }
+  return (await response.json()) as BackendArtifactLineageResponse;
 }

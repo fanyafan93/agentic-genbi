@@ -28,6 +28,7 @@ export function FineReportReportBrowser() {
   const [activeSheetName, setActiveSheetName] = useState("");
   const [activeDatasetName, setActiveDatasetName] = useState("");
   const [zoom, setZoom] = useState(100);
+  const [catalogQuery, setCatalogQuery] = useState("");
   const [structureQuery, setStructureQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -79,6 +80,14 @@ export function FineReportReportBrowser() {
 
   const activeSheet = detail?.sheets.find((sheet) => sheet.name === activeSheetName) ?? detail?.sheets[0];
   const activeDataset = detail?.datasets.find((dataset) => dataset.name === activeDatasetName) ?? detail?.datasets[0];
+  const filteredReports = useMemo(() => {
+    const query = catalogQuery.trim().toLowerCase();
+    if (!query) return reports;
+    return reports.filter((report) => {
+      const haystack = [report.name, report.sourceCptPath, ...report.sheetNames].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [catalogQuery, reports]);
   const filteredCells = useMemo(() => {
     if (!activeSheet) return [];
     const query = structureQuery.trim().toLowerCase();
@@ -100,8 +109,17 @@ export function FineReportReportBrowser() {
       <div className="finereport-browser-layout">
         <aside className="finereport-report-catalog" aria-label="FineReport 报表目录">
           <span>报表目录</span>
+          <label className="finereport-catalog-search">
+            <input
+              type="search"
+              value={catalogQuery}
+              placeholder="搜索报表、路径或 Sheet"
+              aria-label="搜索报表"
+              onChange={(event) => setCatalogQuery(event.target.value)}
+            />
+          </label>
           <div>
-            {reports.map((report) => (
+            {filteredReports.map((report) => (
               <button
                 key={report.id}
                 type="button"
@@ -115,6 +133,7 @@ export function FineReportReportBrowser() {
                 {report.status === "incomplete" && <em>解析不完整</em>}
               </button>
             ))}
+            {filteredReports.length === 0 && <p className="finereport-catalog-empty">没有匹配的报表。</p>}
           </div>
         </aside>
 

@@ -82,6 +82,16 @@ export function FlowNodeView({ node, onReply }: Props) {
               ))}
             </ol>
           )}
+          {node.debug && node.debug.length > 0 && (
+            <div className="debug-events">
+              {node.debug.map((item, index) => (
+                <details key={`${item.title}-${index}`} className="debug-event">
+                  <summary>{item.title}</summary>
+                  <pre>{item.content}</pre>
+                </details>
+              ))}
+            </div>
+          )}
         </div>
       </li>
     );

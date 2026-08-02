@@ -6,9 +6,14 @@ export type AnalysisAssetVisibility = "private" | "team" | "org";
 export type AnalysisAssetReopenContext = {
   sourceTaskId: string;
   sourceConversationId: string;
-  sourceRunId: string;
+  sourceExecutionAttemptId: string;
+  /** Compatibility mirror for the old Run-based contract. */
+  sourceRunId?: string;
   continuationPrompt: string;
   targetFileId?: string;
+  sourceCodexThreadId?: string;
+  sourceCodexTurnId?: string;
+  sourceCodexItemId?: string;
 };
 
 export type AnalysisAssetLibraryEntry = {
@@ -17,7 +22,12 @@ export type AnalysisAssetLibraryEntry = {
   sourceTaskId: string;
   sourceTaskTitle: string;
   sourceConversationId: string;
+  sourceExecutionAttemptId: string;
+  /** Compatibility mirror for the old Run-based contract. */
   sourceRunId: string;
+  sourceCodexThreadId?: string;
+  sourceCodexTurnId?: string;
+  sourceCodexItemId?: string;
   assetType: string;
   title: string;
   label: string;
@@ -35,7 +45,12 @@ export type AnalysisAssetSaveRequest = {
   sourceTaskId: string;
   sourceTaskTitle: string;
   sourceConversationId: string;
-  sourceRunId: string;
+  sourceExecutionAttemptId: string;
+  /** Compatibility mirror for the old Run-based contract. */
+  sourceRunId?: string;
+  sourceCodexThreadId?: string;
+  sourceCodexTurnId?: string;
+  sourceCodexItemId?: string;
   assetType: string;
   title: string;
   visibility: AnalysisAssetVisibility;
@@ -52,7 +67,12 @@ export type AnalysisAssetSaveResult = {
 export type AnalysisAssetSourceContext = {
   sourceTaskId: string;
   sourceConversationId: string;
-  sourceRunId: string;
+  sourceExecutionAttemptId?: string;
+  /** Compatibility mirror for the old Run-based contract. */
+  sourceRunId?: string;
+  sourceCodexThreadId?: string;
+  sourceCodexTurnId?: string;
+  sourceCodexItemId?: string;
 };
 
 type BuildMockAnalysisAssetLibraryEntriesInput = {
@@ -87,7 +107,12 @@ function buildEntry(
   sourceContext: AnalysisAssetSourceContext,
   savedAssetIds: string[],
 ): AnalysisAssetLibraryEntry {
-  const sourceRunId = asset.intent === "edit-skill" ? `${sourceContext.sourceRunId}_skill` : sourceContext.sourceRunId;
+  const baseExecutionAttemptId = sourceContext.sourceExecutionAttemptId ?? sourceContext.sourceRunId;
+  if (!baseExecutionAttemptId) {
+    throw new Error("sourceExecutionAttemptId is required.");
+  }
+  const sourceExecutionAttemptId = asset.intent === "edit-skill" ? `${baseExecutionAttemptId}_skill` : baseExecutionAttemptId;
+  const sourceRunId = sourceExecutionAttemptId;
   const latestVersion = getLatestVersion(asset);
   return {
     assetId: `asset_mock_${asset.id}`,
@@ -95,7 +120,11 @@ function buildEntry(
     sourceTaskId: sourceContext.sourceTaskId,
     sourceTaskTitle: taskTitle,
     sourceConversationId: sourceContext.sourceConversationId,
+    sourceExecutionAttemptId,
     sourceRunId,
+    sourceCodexThreadId: sourceContext.sourceCodexThreadId,
+    sourceCodexTurnId: sourceContext.sourceCodexTurnId,
+    sourceCodexItemId: sourceContext.sourceCodexItemId,
     assetType: asset.label,
     title: asset.title,
     label: asset.label,
@@ -107,9 +136,13 @@ function buildEntry(
     reopenContext: {
       sourceTaskId: sourceContext.sourceTaskId,
       sourceConversationId: sourceContext.sourceConversationId,
+      sourceExecutionAttemptId,
       sourceRunId,
       continuationPrompt: getContinuationPrompt(asset),
       targetFileId: asset.fileId,
+      sourceCodexThreadId: sourceContext.sourceCodexThreadId,
+      sourceCodexTurnId: sourceContext.sourceCodexTurnId,
+      sourceCodexItemId: sourceContext.sourceCodexItemId,
     },
   };
 }
@@ -138,7 +171,11 @@ export function saveAnalysisAssetMock(
     sourceTaskId: entry.sourceTaskId,
     sourceTaskTitle: entry.sourceTaskTitle,
     sourceConversationId: entry.sourceConversationId,
+    sourceExecutionAttemptId: entry.sourceExecutionAttemptId,
     sourceRunId: entry.sourceRunId,
+    sourceCodexThreadId: entry.sourceCodexThreadId,
+    sourceCodexTurnId: entry.sourceCodexTurnId,
+    sourceCodexItemId: entry.sourceCodexItemId,
     assetType: entry.assetType,
     title: entry.title,
     visibility: entry.visibility,

@@ -28,10 +28,16 @@ Artifact 层：版本化保存报告、图表、SQL、代码、数据集快照�
 
 MiniMax、OpenAI-compatible 或其他模型只是 Codex 的 model adapter，不是系统架构本身。能用 Codex 的，绝不自研；本项目只做业务语义、数据安全、分析资产治理、前端体验和 Codex 适配。
 
+## 最终边界
+
+Codex 负责 Agent Loop、Thread、Turn、Item、上下文、上下文压缩、工具调度、流式执行事件、中断和追加指令、Sandbox / Approval 基础能力。
+
+GenBI 负责用户和租户、数据权限、数据源、FineReport 语义案例、指标与关联规则、受控 SQL 工具、Artifact、Artifact 版本和血缘、分享、发布和治理。
+
 ## 当前实现快照
 
 - 前端：Next.js + TypeScript。分析工作台提供左侧对话、右侧交互式分析结果；结果以 Puck JSON 描述布局，ECharts / AG Grid 分别渲染图表与表格，并优先读写后端报告版本接口。
-- 后端：FastAPI，已提供分析 Run API / SSE、资源库工具、数据库只读工具、知识记录、分析资产最小存储；分析 Thread/Turn/Run/Item 和交互式报告/版本已写入 Postgres；分析 runner 已有 openai-codex Python SDK 最小适配。
+- 后端：FastAPI，分析工作台主入口已收敛到 Thread/Turn API / SSE；资源库工具、数据库只读工具、知识记录、分析资产最小存储已可用；GenBI Thread 映射、Codex Item projection 和交互式报告/版本已写入 Postgres；分析 runner 已有 openai-codex Python SDK 最小适配。
 - 登录：Auth.js + 飞书 OAuth + PostgreSQL session。
 - 运行：Docker Compose 启动 frontend、backend、postgres。
 - 仍未完成：Codex 工具/MCP/Skill 接入、完整业务语义库持久化、完整 Artifact 治理、团队权限/RLS、生产数据源治理。

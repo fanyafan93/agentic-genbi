@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { getAgentClient } from "@/modules/analysis/agentClients";
-import type { AgentEvent, AgentInput, AnalysisMode } from "@/modules/analysis/agentClients";
+import type { AgentEvent, AgentInput } from "@/modules/analysis/agentClients";
 import type { ArtifactFolder, ArtifactKind } from "../types/artifact";
 import type { InteractiveReport } from "../types/interactive-report";
 
@@ -10,43 +10,61 @@ export type FlowRole = "user" | "agent" | "ask";
 
 export type FlowNode =
   | { id: string; role: "user"; content: string }
-  | { id: string; role: "agent"; content: string; mode?: "replace" | "delta"; steps?: { label: string; state: "queued" | "running" | "done" }[] }
+  | {
+      id: string;
+      role: "agent";
+      content: string;
+      mode?: "replace" | "delta";
+      steps?: { label: string; state: "queued" | "running" | "done" }[];
+      debug?: { title: string; content: string }[];
+    }
   | { id: string; role: "ask"; question: string; options: { id: string; label: string }[]; current?: boolean };
+
+export type FlowCodexLineage = {
+  sourceCodexThreadId?: string;
+  sourceCodexTurnId?: string;
+  sourceCodexItemId?: string;
+};
 
 export const STEP_INITIAL = ["识别业务口径", "查询可用数据表", "生成并校验 SQL", "整理图表与结论"];
 
 export function useFlow(conversationKey: string | null, initial: FlowNode[] = []) {
   const agent = useMemo(() => getAgentClient(), []);
-  const [runId, setRunId] = useState<string | null>(conversationKey);
+  const [executionAttemptId, setExecutionAttemptId] = useState<string | null>(conversationKey);
   const [conversationId, setConversationId] = useState<string | null>(conversationKey);
   const [nodes, setNodes] = useState<FlowNode[]>(initial);
   const [artifacts, setArtifacts] = useState<ArtifactFolder[]>([]);
   const [draftReport, setDraftReport] = useState<InteractiveReport | null>(null);
+  const [codexLineage, setCodexLineage] = useState<FlowCodexLineage>({});
   const [running, setRunning] = useState(false);
 
   useEffect(() => {
     cancelled = false;
-    setRunId(conversationKey);
+    setExecutionAttemptId(conversationKey);
     setConversationId(conversationKey);
     setNodes([...initial]);
     setArtifacts([]);
     setDraftReport(null);
+    setCodexLineage({});
     setRunning(false);
     return () => { cancelled = true; };
   }, [conversationKey, initial]);
 
   const applyEvent = useCallback((event: AgentEvent, currentNodes: FlowNode[]): FlowNode[] => {
+    updateCodexLineage(event, setCodexLineage);
+
     if (event.type === "conversation-init") {
-      setRunId(event.runId);
-      setConversationId(event.conversationId ?? event.runId);
+      setExecutionAttemptId(event.executionAttemptId);
+      setConversationId(event.conversationId ?? event.threadId ?? event.executionAttemptId);
       setNodes([]);
       setArtifacts([]);
       setDraftReport(null);
+      setCodexLineage(codexLineageFromEvent(event));
       return [];
     }
 
     if (event.type === "run-init") {
-      setRunId(event.runId);
+      setExecutionAttemptId(event.executionAttemptId);
       if (event.conversationId) setConversationId(event.conversationId);
       return currentNodes;
     }
@@ -102,6 +120,24 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
           }
           next[next.length - 1 - idx] = { ...target, steps, content: target.content };
         }
+      } else if (event.nodeId) {
+        next.push({ id: event.nodeId, role: "agent", content: "", mode: "delta", steps: [{ label: event.label, state: event.state }] });
+      }
+      setNodes(next);
+      return next;
+    }
+
+    if (event.type === "debug") {
+      const next: FlowNode[] = currentNodes.map((node) => ({ ...node }) as FlowNode);
+      const idx = next.findIndex((n) => n.id === event.nodeId && n.role === "agent");
+      const debugItem = { title: event.title, content: event.content };
+      if (idx >= 0) {
+        const target = next[idx];
+        if (target.role === "agent") {
+          next[idx] = { ...target, debug: [...(target.debug ?? []), debugItem] };
+        }
+      } else {
+        next.push({ id: event.nodeId, role: "agent", content: "", mode: "delta", steps: [], debug: [debugItem] });
       }
       setNodes(next);
       return next;
@@ -150,14 +186,44 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
     }
   }, [agent, applyEvent, nodes]);
 
-  const start = useCallback((question?: string, analysisMode?: AnalysisMode, dataEgressAuthorized?: boolean, interactiveReport?: InteractiveReport) => consume({ kind: "start", question, analysisMode, dataEgressAuthorized, interactiveReport }), [consume]);
-  const send = useCallback((content: string, analysisMode?: AnalysisMode, dataEgressAuthorized?: boolean, interactiveReport?: InteractiveReport) => consume({ kind: "message", content, analysisMode, dataEgressAuthorized, interactiveReport }), [consume]);
-  const reply = useCallback((optionId: string, analysisMode?: AnalysisMode, dataEgressAuthorized?: boolean, interactiveReport?: InteractiveReport) => consume({ kind: "reply", optionId, analysisMode, dataEgressAuthorized, interactiveReport }), [consume]);
+  const start = useCallback((question?: string, interactiveReport?: InteractiveReport) => consume({ kind: "start", question, interactiveReport }), [consume]);
+  const send = useCallback((content: string, interactiveReport?: InteractiveReport) => consume({ kind: "message", content, interactiveReport }), [consume]);
+  const reply = useCallback((optionId: string, interactiveReport?: InteractiveReport) => consume({ kind: "reply", optionId, interactiveReport }), [consume]);
 
-  return { runId, conversationId, nodes, artifacts, draftReport, running, start, send, reply };
+  return {
+    executionAttemptId,
+    // Compatibility mirror for components that have not moved off the old name.
+    runId: executionAttemptId,
+    conversationId,
+    nodes,
+    artifacts,
+    draftReport,
+    codexLineage,
+    running,
+    start,
+    send,
+    reply,
+  };
 }
 
 let cancelled = false;
+
+function updateCodexLineage(
+  event: AgentEvent,
+  setCodexLineage: Dispatch<SetStateAction<FlowCodexLineage>>,
+) {
+  const next = codexLineageFromEvent(event);
+  if (Object.keys(next).length === 0) return;
+  setCodexLineage((current) => ({ ...current, ...next }));
+}
+
+function codexLineageFromEvent(event: AgentEvent): FlowCodexLineage {
+  const lineage: FlowCodexLineage = {};
+  if (event.codexThreadId) lineage.sourceCodexThreadId = event.codexThreadId;
+  if (event.codexTurnId) lineage.sourceCodexTurnId = event.codexTurnId;
+  if (event.codexItemId) lineage.sourceCodexItemId = event.codexItemId;
+  return lineage;
+}
 
 function upsertArtifact(folders: ArtifactFolder[], path: string, kind: ArtifactKind): ArtifactFolder[] {
   const [folderName = "assets", fileName = path] = path.split("/");

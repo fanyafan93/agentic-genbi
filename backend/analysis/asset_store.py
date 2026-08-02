@@ -14,9 +14,13 @@ DEFAULT_ANALYSIS_ASSET_STORE_PATH = Path(".resource-index/analysis-assets.jsonl"
 class AnalysisAssetReopenContext:
     sourceTaskId: str
     sourceConversationId: str
-    sourceRunId: str
     continuationPrompt: str
+    sourceRunId: str = ""
     targetFileId: str | None = None
+    sourceExecutionAttemptId: str = ""
+    sourceCodexThreadId: str | None = None
+    sourceCodexTurnId: str | None = None
+    sourceCodexItemId: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,7 +42,29 @@ class AnalysisAssetRecord:
     createdAt: str
     updatedAt: str
     fileId: str | None = None
+    sourceCodexThreadId: str | None = None
+    sourceCodexTurnId: str | None = None
+    sourceCodexItemId: str | None = None
+    sourceExecutionAttemptId: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ArtifactLineageRecord:
+    artifactId: str
+    artifactVersionId: str
+    assetId: str
+    assetType: str
+    title: str
+    sourceTaskId: str
+    sourceConversationId: str
+    sourceRunId: str
+    codexThreadId: str | None
+    codexTurnId: str | None
+    codexItemId: str | None
+    createdAt: str
+    updatedAt: str
+    sourceExecutionAttemptId: str = ""
 
 
 class AnalysisAssetStore:
@@ -53,7 +79,11 @@ class AnalysisAssetStore:
         source_task_id: str,
         source_task_title: str,
         source_conversation_id: str,
-        source_run_id: str,
+        source_run_id: str | None = None,
+        source_execution_attempt_id: str | None = None,
+        source_codex_thread_id: str | None = None,
+        source_codex_turn_id: str | None = None,
+        source_codex_item_id: str | None = None,
         asset_type: str,
         title: str,
         label: str,
@@ -65,13 +95,16 @@ class AnalysisAssetStore:
         file_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AnalysisAssetRecord:
+        execution_attempt_id = (source_execution_attempt_id or source_run_id or "").strip()
+        compatibility_run_id = (source_run_id or execution_attempt_id).strip()
         for field_name, value in {
             "asset_id": asset_id,
             "artifact_version_id": artifact_version_id,
             "source_task_id": source_task_id,
             "source_task_title": source_task_title,
             "source_conversation_id": source_conversation_id,
-            "source_run_id": source_run_id,
+            "source_execution_attempt_id": execution_attempt_id,
+            "source_run_id": compatibility_run_id,
             "asset_type": asset_type,
             "title": title,
             "label": label,
@@ -82,16 +115,36 @@ class AnalysisAssetStore:
         }.items():
             _require_text(field_name, value)
         _validate_reopen_context(reopen_context)
+        normalized_reopen_context = AnalysisAssetReopenContext(
+            sourceTaskId=reopen_context.sourceTaskId,
+            sourceConversationId=reopen_context.sourceConversationId,
+            sourceExecutionAttemptId=(reopen_context.sourceExecutionAttemptId or reopen_context.sourceRunId or execution_attempt_id).strip(),
+            sourceRunId=(reopen_context.sourceRunId or reopen_context.sourceExecutionAttemptId or execution_attempt_id).strip(),
+            continuationPrompt=reopen_context.continuationPrompt,
+            targetFileId=reopen_context.targetFileId,
+            sourceCodexThreadId=reopen_context.sourceCodexThreadId,
+            sourceCodexTurnId=reopen_context.sourceCodexTurnId,
+            sourceCodexItemId=reopen_context.sourceCodexItemId,
+        )
 
         now = datetime.now(UTC).isoformat()
         existing = self.get_asset(asset_id)
+        codex_lineage = _codex_lineage(source_codex_thread_id, source_codex_turn_id, source_codex_item_id)
+        record_metadata = dict(metadata or {})
+        record_metadata.setdefault("source_execution_attempt_id", execution_attempt_id)
+        if codex_lineage:
+            record_metadata["codex_lineage"] = codex_lineage
         record = AnalysisAssetRecord(
             assetId=asset_id.strip(),
             artifactVersionId=artifact_version_id.strip(),
             sourceTaskId=source_task_id.strip(),
             sourceTaskTitle=source_task_title.strip(),
             sourceConversationId=source_conversation_id.strip(),
-            sourceRunId=source_run_id.strip(),
+            sourceExecutionAttemptId=execution_attempt_id,
+            sourceRunId=compatibility_run_id,
+            sourceCodexThreadId=_optional_text(source_codex_thread_id),
+            sourceCodexTurnId=_optional_text(source_codex_turn_id),
+            sourceCodexItemId=_optional_text(source_codex_item_id),
             assetType=asset_type.strip(),
             title=title.strip(),
             label=label.strip(),
@@ -100,10 +153,10 @@ class AnalysisAssetStore:
             status=status.strip(),
             latestVersion=latest_version.strip(),
             fileId=file_id.strip() if file_id else None,
-            reopenContext=reopen_context,
+            reopenContext=normalized_reopen_context,
             createdAt=existing.createdAt if existing else now,
             updatedAt=now,
-            metadata=metadata or {},
+            metadata=record_metadata,
         )
         records = [item for item in self._read_all() if item.assetId != record.assetId]
         records.append(record)
@@ -157,6 +210,29 @@ class AnalysisAssetStore:
             "openedAt": datetime.now(UTC).isoformat(),
         }
 
+    def list_artifact_lineage(
+        self,
+        *,
+        artifact_id: str | None = None,
+        codex_thread_id: str | None = None,
+        codex_turn_id: str | None = None,
+        codex_item_id: str | None = None,
+        limit: int = 50,
+    ) -> list[ArtifactLineageRecord]:
+        lineage = [_artifact_lineage_from_asset(record) for record in self._read_all()]
+        lineage = [
+            record
+            for record in lineage
+            if (
+                (not artifact_id or record.artifactId == artifact_id)
+                and (not codex_thread_id or record.codexThreadId == codex_thread_id)
+                and (not codex_turn_id or record.codexTurnId == codex_turn_id)
+                and (not codex_item_id or record.codexItemId == codex_item_id)
+            )
+        ]
+        lineage.sort(key=lambda item: item.updatedAt, reverse=True)
+        return lineage[:limit]
+
     def delete_asset(self, asset_id: str) -> bool:
         records = self._read_all()
         remaining = [record for record in records if record.assetId != asset_id]
@@ -179,7 +255,12 @@ class AnalysisAssetStore:
             if not line.strip():
                 continue
             payload = json.loads(line)
-            payload["reopenContext"] = AnalysisAssetReopenContext(**payload.get("reopenContext", {}))
+            payload.setdefault("sourceExecutionAttemptId", payload.get("sourceRunId", ""))
+            payload.setdefault("sourceRunId", payload.get("sourceExecutionAttemptId", ""))
+            reopen_context_payload = payload.get("reopenContext", {})
+            reopen_context_payload.setdefault("sourceExecutionAttemptId", reopen_context_payload.get("sourceRunId", ""))
+            reopen_context_payload.setdefault("sourceRunId", reopen_context_payload.get("sourceExecutionAttemptId", ""))
+            payload["reopenContext"] = AnalysisAssetReopenContext(**reopen_context_payload)
             records.append(AnalysisAssetRecord(**payload))
         return records
 
@@ -201,8 +282,47 @@ def _require_text(field: str, value: str) -> None:
         raise ValueError(f"{field} is required.")
 
 
+def _optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _codex_lineage(
+    codex_thread_id: str | None,
+    codex_turn_id: str | None,
+    codex_item_id: str | None,
+) -> dict[str, str]:
+    lineage = {
+        "codexThreadId": _optional_text(codex_thread_id),
+        "codexTurnId": _optional_text(codex_turn_id),
+        "codexItemId": _optional_text(codex_item_id),
+    }
+    return {key: value for key, value in lineage.items() if value}
+
+
+def _artifact_lineage_from_asset(record: AnalysisAssetRecord) -> ArtifactLineageRecord:
+    return ArtifactLineageRecord(
+        artifactId=record.artifactVersionId,
+        artifactVersionId=record.artifactVersionId,
+        assetId=record.assetId,
+        assetType=record.assetType,
+        title=record.title,
+        sourceTaskId=record.sourceTaskId,
+        sourceConversationId=record.sourceConversationId,
+        sourceExecutionAttemptId=record.sourceExecutionAttemptId,
+        sourceRunId=record.sourceRunId,
+        codexThreadId=record.sourceCodexThreadId,
+        codexTurnId=record.sourceCodexTurnId,
+        codexItemId=record.sourceCodexItemId,
+        createdAt=record.createdAt,
+        updatedAt=record.updatedAt,
+    )
+
+
 def _validate_reopen_context(context: AnalysisAssetReopenContext) -> None:
     _require_text("reopen_context.sourceTaskId", context.sourceTaskId)
     _require_text("reopen_context.sourceConversationId", context.sourceConversationId)
-    _require_text("reopen_context.sourceRunId", context.sourceRunId)
+    _require_text("reopen_context.sourceExecutionAttemptId", context.sourceExecutionAttemptId or context.sourceRunId)
     _require_text("reopen_context.continuationPrompt", context.continuationPrompt)

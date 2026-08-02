@@ -37,7 +37,13 @@ export type InteractiveReport = {
   queries: Record<string, { datasetId: string; filterBindings: ReportFilterId[] }>;
   chartSpecs: Record<string, ReportChartSpec>;
   gridSpecs: Record<string, ReportGridSpec>;
-  source: { threadId: string; turnId: string; runId: string };
+  source: {
+    threadId: string;
+    turnId: string;
+    executionAttemptId: string;
+    /** Compatibility mirror for the old Run-based contract. */
+    runId: string;
+  };
 };
 
 export type ReportRuntimeFilters = Record<ReportFilterId, string>;

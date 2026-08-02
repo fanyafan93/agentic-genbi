@@ -13,8 +13,6 @@ import { AnalysisTaskThread } from "./AnalysisTaskThread";
 import { InteractiveReportPanel } from "./InteractiveReportPanel";
 import { MyAnalysisPage } from "./MyAnalysisPage";
 import { findAnalysisTaskByTitle } from "../agentClients/scripts/analysis-tasks";
-import type { AnalysisMode } from "../agentClients";
-import { shouldUseBackendAnalysisClient } from "../agentClients/backendClient";
 import { loadSavedInteractiveReports, saveInteractiveReport, type SavedInteractiveReport } from "../mocks/interactive-report-storage";
 import {
   getInteractiveReportFromBackend,
@@ -77,7 +75,6 @@ export function AnalysisWorkspace() {
   const { data: session } = useSession();
   const [activeTool, setActiveTool] = useState<ActiveTool>("analysis-workspace");
   const [collapsed, setCollapsed] = useState(false);
-  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("quick");
   const [selectedAnalysisTask, setSelectedAnalysisTask] = useState<string | null>("渠道销售占比分析");
   const initialScript = findAnalysisTaskByTitle("渠道销售占比分析");
   const initialMessages = initialScript?.messages ?? [];
@@ -88,7 +85,6 @@ export function AnalysisWorkspace() {
   const [structuredKnowledgeSource, setStructuredKnowledgeSource] = useState<StructuredKnowledgeSource>("finereport");
   const [savedReports, setSavedReports] = useState<SavedInteractiveReport[]>(loadSavedInteractiveReports);
   const [openedReportId, setOpenedReportId] = useState<string | null>(null);
-  const [dataEgressAuthorized, setDataEgressAuthorized] = useState(false);
   const reportOwnerId = session?.user?.id ?? "local-user";
   const analysisTaskScriptDef = selectedAnalysisTask ? findAnalysisTaskByTitle(selectedAnalysisTask) : undefined;
   const initialFlowMessages = useMemo(() => {
@@ -124,21 +120,18 @@ export function AnalysisWorkspace() {
   }
 
   function handleSendMessage(content: string) {
-    const authorized = dataEgressAuthorized;
     const interactiveReport = flow.draftReport ?? openedReport?.report ?? undefined;
     if (isNewAnalysisTask) {
-      flow.start(content, analysisMode, authorized);
+      flow.start(content);
       setSelectedAnalysisTask("未命名分析任务");
     } else {
-      flow.send(content, analysisMode, authorized, interactiveReport);
+      flow.send(content, interactiveReport);
     }
-    setDataEgressAuthorized(false);
   }
 
   function handleStartFromSuggestion(_id: string, title: string) {
-    flow.start(`${title}。请基于当前数据展开分析。`, analysisMode, dataEgressAuthorized);
+    flow.start(`${title}。请基于当前数据展开分析。`);
     setSelectedAnalysisTask("未命名分析任务");
-    setDataEgressAuthorized(false);
   }
 
   async function handleSaveReport(saved: SavedInteractiveReport): Promise<SavedInteractiveReport> {
@@ -371,14 +364,9 @@ export function AnalysisWorkspace() {
                   running={flow.running}
                   nodes={flow.nodes}
                   assetNotice=""
-                  analysisMode={analysisMode}
                   mobileHidden={mobilePane !== "analysisTask"}
                   taskKey={currentAnalysisTaskId}
-                  dataEgressAuthorized={dataEgressAuthorized}
-                  canAuthorizeDataEgress={shouldUseBackendAnalysisClient()}
-                  onModeChange={setAnalysisMode}
-                  onDataEgressAuthorizedChange={setDataEgressAuthorized}
-                  onReply={(optionId) => { flow.reply(optionId, analysisMode, dataEgressAuthorized, flow.draftReport ?? openedReport?.report ?? undefined); setDataEgressAuthorized(false); }}
+                  onReply={(optionId) => { flow.reply(optionId, flow.draftReport ?? openedReport?.report ?? undefined); }}
                   onStartFromSuggestion={handleStartFromSuggestion}
                   onSendMessage={handleSendMessage}
                 />

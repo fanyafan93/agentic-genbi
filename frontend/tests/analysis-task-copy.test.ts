@@ -79,11 +79,6 @@ const assetLibraryServiceSource = readFileSync(
   "utf8",
 );
 
-const modeToggleSource = readFileSync(
-  resolve(process.cwd(), "src/modules/analysis/components/AnalysisModeToggle.tsx"),
-  "utf8",
-);
-
 const interactiveReportSource = readFileSync(
   resolve(process.cwd(), "src/modules/analysis/components/InteractiveReportPanel.tsx"),
   "utf8",
@@ -176,19 +171,17 @@ describe("analysis task product language", () => {
     expect(agentTypesSource).not.toContain('"analysis-task-init"');
   });
 
-  test("supports quick and deep analysis modes as agent behavior inputs", () => {
-    expect(agentTypesSource).toContain('export type AnalysisMode = "quick" | "deep"');
-    expect(agentTypesSource).toContain("analysisMode?: AnalysisMode");
-    expect(agentTypesSource).toContain('{ kind: "reply"; optionId: string; analysisMode?: AnalysisMode; dataEgressAuthorized?: boolean; interactiveReport?: InteractiveReport }');
-    expect(modeToggleSource).toContain("快速分析");
-    expect(modeToggleSource).toContain("深度分析");
+  test("keeps analysis task inputs free of removed mode and data-egress controls", () => {
+    expect(agentTypesSource).not.toContain("AnalysisMode");
+    expect(agentTypesSource).not.toContain("analysisMode");
+    expect(agentTypesSource).not.toContain("dataEgressAuthorized");
     expect(workspaceSource).toContain("AnalysisTaskThread");
-    expect(analysisTaskThreadSource).toContain("AnalysisModeToggle");
-    expect(mockClientSource).toContain('this.state.analysisMode === "deep"');
-    expect(mockClientSource).toContain("quick_report.html");
+    expect(analysisTaskThreadSource).not.toContain("AnalysisModeToggle");
+    expect(analysisTaskThreadSource).not.toContain("data-egress-toggle");
+    expect(mockClientSource).not.toContain("analysisMode");
+    expect(mockClientSource).toContain("analysis_report.html");
     expect(mockClientSource).toContain("检索业务语义库");
     expect(mockClientSource).toContain("语义查证");
-    expect(mockClientSource).toContain("读取报表语义 / 字段 / 血缘 / SQL 示例");
   });
 
   test("can switch analysis tasks from mock client to the real backend run API", () => {
@@ -196,7 +189,8 @@ describe("analysis task product language", () => {
     expect(agentClientIndexSource).toContain("shouldUseBackendAnalysisClient");
     expect(backendClientSource).toContain("NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME");
     expect(backendClientSource).toContain("NEXT_PUBLIC_GENBI_API_BASE_URL");
-    expect(backendClientSource).toContain("/api/analysis/tasks/runs/stream");
+    expect(backendClientSource).toContain("/api/analysis/threads/turns/stream");
+    expect(backendClientSource).toContain("/turns/stream");
     expect(backendClientSource).toContain("analysis.problem.classified");
     expect(backendClientSource).toContain("analysis.retrieval.plan");
     expect(backendClientSource).toContain("artifact.created");
@@ -289,7 +283,7 @@ describe("analysis task product language", () => {
     expect(sharedAssetLibrarySource).toContain("最新版本");
     expect(sharedAssetLibrarySource).toContain("可见范围");
     expect(sharedAssetLibrarySource).toContain("资产 ID");
-    expect(sharedAssetLibrarySource).toContain("来源 Run");
+    expect(sharedAssetLibrarySource).toContain("来源执行");
     expect(sharedAssetLibrarySource).toContain("打开资产");
     expect(sharedAssetLibrarySource).toContain("回到分析工作台继续");
     expect(sharedAssetLibrarySource).toContain("保存资产或发布 Skill 后会出现在这里");
@@ -308,7 +302,7 @@ describe("analysis task product language", () => {
     expect(assetLibrarySource).toContain("SkillDraftPreview");
     expect(assetLibrarySource).toContain("Skill 草稿编辑预览");
     expect(assetLibrarySource).toContain("引用资产");
-    expect(assetLibrarySource).toContain("quick_candidate.sql");
+    expect(assetLibrarySource).toContain("candidate.sql");
     expect(assetLibrarySource).toContain("编辑草稿");
     expect(assetLibrarySource).toContain("保存草稿");
     expect(assetLibrarySource).toContain("草稿已保存，等待发布配置");
@@ -326,7 +320,7 @@ describe("analysis task product language", () => {
     expect(assetLibrarySource).toContain("method_channel_sales_skill");
     expect(assetLibrarySource).toContain("run_mock_skill_publish");
     expect(assetLibrarySource).toContain("来源分析任务");
-    expect(assetLibrarySource).toContain("来源 Run");
+    expect(assetLibrarySource).toContain("来源执行");
     expect(assetLibrarySource).toContain("等待审批 / mock");
     expect(assetLibrarySource).toContain("资产血缘");
     expect(assetLibrarySource).toContain("确认记录");

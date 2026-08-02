@@ -9,6 +9,7 @@ from typing import Any
 
 
 PART_PATTERN = re.compile(r"^(?P<name>.+)\.(?P<part>0[123])_[^.]+\.json$")
+MERGED_PATTERN = re.compile(r"^(?P<name>.+)\.原始解析\.json$")
 SENSITIVE_SEMANTIC_TOKEN_PATTERN = re.compile(
     r"(?:password|passwd|secret|token|credential|username|user_name|user_id|phone|mobile|email|id_card|"
     r"密码|密钥|令牌|凭证|用户|账号|手机号|电话|邮箱|身份证)",
@@ -22,12 +23,12 @@ class FineReportReportRepository:
         self.root = root or resource_root / "finereport" / "解析"
 
     def list_reports(self) -> list[dict[str, Any]]:
-        return [self._load_report(name, parts)["report"] for name, parts in self._group_files().items()]
+        return [self._load_report(name, source)["report"] for name, source in self._report_sources().items()]
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
-        for name, parts in self._group_files().items():
+        for name, source in self._report_sources().items():
             if _report_id(name) == report_id:
-                return self._load_report(name, parts)
+                return self._load_report(name, source)
         return None
 
     def build_agent_semantic_context(
@@ -47,10 +48,10 @@ class FineReportReportRepository:
         """
 
         reports: list[dict[str, Any]] = []
-        for name, parts in self._group_files().items():
+        for name, source in self._report_sources().items():
             if len(reports) >= max_reports:
                 break
-            loaded = self._load_report(name, parts)
+            loaded = self._load_report(name, source)
             report = loaded["report"]
             if report.get("status") != "complete":
                 continue
@@ -69,6 +70,25 @@ class FineReportReportRepository:
         encoded = json.dumps(context, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         return context if len(encoded) <= max_bytes else None
 
+    def _report_sources(self) -> dict[str, dict[str, Path]]:
+        sources = self._merged_files()
+        for name, parts in self._group_files().items():
+            sources.setdefault(name, parts)
+        return dict(sorted(sources.items()))
+
+    def _merged_files(self) -> dict[str, dict[str, Path]]:
+        groups: dict[str, dict[str, Path]] = {}
+        if not self.root.exists():
+            return groups
+        for path in sorted(self.root.rglob("*.json"), key=lambda item: str(item.relative_to(self.root))):
+            match = MERGED_PATTERN.match(path.name)
+            if not match:
+                continue
+            relative_stem = path.relative_to(self.root).with_suffix("")
+            name = str(relative_stem).removesuffix(".原始解析").replace("\\", "/")
+            groups[name] = {"merged": path}
+        return groups
+
     def _group_files(self) -> dict[str, dict[str, Path]]:
         groups: dict[str, dict[str, Path]] = {}
         if not self.root.exists():
@@ -81,6 +101,9 @@ class FineReportReportRepository:
         return dict(sorted(groups.items()))
 
     def _load_report(self, name: str, parts: dict[str, Path]) -> dict[str, Any]:
+        if "merged" in parts:
+            return self._load_merged_report(name, parts["merged"])
+
         parsed: dict[str, dict[str, Any]] = {}
         errors: list[str] = []
         for part, path in parts.items():
@@ -125,6 +148,59 @@ class FineReportReportRepository:
             "status": status,
             "availableParts": available_parts,
             "missingParts": missing_parts,
+            "errors": errors,
+            "counts": counts,
+        }
+        return {
+            "report": summary,
+            "datasets": datasets,
+            "parameters": parameters,
+            "parameterWidgets": parameter_widgets,
+            "conditionalRules": conditional_rules,
+            "sheets": sheets,
+        }
+
+    def _load_merged_report(self, name: str, path: Path) -> dict[str, Any]:
+        errors: list[str] = []
+        payload: dict[str, Any] = {}
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+            else:
+                errors.append(f"{path.name}: expected JSON object")
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"{path.name}: {exc}")
+
+        report_metadata = _first_mapping(payload.get("report"))
+        interactions = _first_mapping(payload.get("parameters_and_interactions"))
+        structure = _first_mapping(payload.get("report_structure"))
+        datasets = _list(payload.get("datasets"))
+        parameters = _list(interactions.get("parameters"))
+        parameter_widgets = _list(interactions.get("parameter_widgets"))
+        conditional_rules = _list(interactions.get("conditional_rules"))
+        sheets = [_normalize_sheet(sheet) for sheet in _list(structure.get("sheets"))]
+        status = "complete" if not errors else "incomplete"
+        sheet_names = report_metadata.get("sheet_names") or [sheet["name"] for sheet in sheets]
+        counts = {
+            "sheets": len(sheets),
+            "datasets": len(datasets),
+            "sqlDatasets": sum(1 for item in datasets if item.get("raw_sql")),
+            "parameters": len(parameters),
+            "parameterWidgets": len(parameter_widgets),
+            "conditionalRules": len(conditional_rules),
+            "cells": sum(len(sheet["cells"]) for sheet in sheets),
+            "formulas": sum(1 for sheet in sheets for cell in sheet["cells"] if cell.get("formula")),
+            "bindings": sum(1 for sheet in sheets for cell in sheet["cells"] if cell.get("binding")),
+        }
+        summary = {
+            "id": _report_id(name),
+            "name": report_metadata.get("name") or Path(name).name,
+            "sourceCptPath": report_metadata.get("source_cpt_path"),
+            "sheetNames": sheet_names,
+            "status": status,
+            "availableParts": ["merged"],
+            "missingParts": [],
             "errors": errors,
             "counts": counts,
         }

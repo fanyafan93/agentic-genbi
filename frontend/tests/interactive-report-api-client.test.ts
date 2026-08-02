@@ -20,6 +20,7 @@ describe("interactive report backend API client", () => {
         ownerId: "local-user",
         sourceThreadId: mockInteractiveReport.source.threadId,
         sourceTurnId: mockInteractiveReport.source.turnId,
+        sourceExecutionAttemptId: mockInteractiveReport.source.executionAttemptId,
         sourceRunId: mockInteractiveReport.source.runId,
         latestVersion: 1,
         createdAt: "2026-08-01T08:00:00.000Z",
@@ -30,6 +31,7 @@ describe("interactive report backend API client", () => {
         version: 1,
         sourceThreadId: mockInteractiveReport.source.threadId,
         sourceTurnId: mockInteractiveReport.source.turnId,
+        sourceExecutionAttemptId: mockInteractiveReport.source.executionAttemptId,
         sourceRunId: mockInteractiveReport.source.runId,
         document: mockInteractiveReport.document,
         filters: mockInteractiveReport.filters,
@@ -49,6 +51,7 @@ describe("interactive report backend API client", () => {
     expect(body.expectedVersion).toBeUndefined();
     expect(saved.version).toBe(1);
     expect(saved.report.source.threadId).toBe(mockInteractiveReport.source.threadId);
+    expect(saved.report.source.executionAttemptId).toBe(mockInteractiveReport.source.executionAttemptId);
   });
 
   test("opens a requested server report version", async () => {
@@ -63,6 +66,7 @@ describe("interactive report backend API client", () => {
         ownerId: "local-user",
         sourceThreadId: mockInteractiveReport.source.threadId,
         sourceTurnId: mockInteractiveReport.source.turnId,
+        sourceExecutionAttemptId: mockInteractiveReport.source.executionAttemptId,
         sourceRunId: mockInteractiveReport.source.runId,
         latestVersion: 2,
         createdAt: "2026-08-01T08:00:00.000Z",
@@ -73,6 +77,7 @@ describe("interactive report backend API client", () => {
         version: 1,
         sourceThreadId: mockInteractiveReport.source.threadId,
         sourceTurnId: mockInteractiveReport.source.turnId,
+        sourceExecutionAttemptId: mockInteractiveReport.source.executionAttemptId,
         sourceRunId: mockInteractiveReport.source.runId,
         document: mockInteractiveReport.document,
         filters: mockInteractiveReport.filters,
@@ -89,7 +94,47 @@ describe("interactive report backend API client", () => {
     expect(fetchMock.mock.calls[0][0]).toBe(`http://192.168.101.12:8000/api/analysis/reports/${mockInteractiveReport.id}/versions/1`);
     expect(opened.version).toBe(1);
     expect(opened.report.document).toEqual(mockInteractiveReport.document);
+    expect(opened.report.source.executionAttemptId).toBe(mockInteractiveReport.source.executionAttemptId);
     expect(opened.report.source.runId).toBe(mockInteractiveReport.source.runId);
+  });
+
+  test("opens reports when backend returns only execution attempt source", async () => {
+    vi.stubEnv("NEXT_PUBLIC_GENBI_API_BASE_URL", "http://192.168.101.12:8000");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      report: {
+        id: mockInteractiveReport.id,
+        title: mockInteractiveReport.title,
+        subtitle: mockInteractiveReport.subtitle,
+        artifactType: "interactive_report",
+        renderer: "puck",
+        ownerId: "local-user",
+        sourceThreadId: mockInteractiveReport.source.threadId,
+        sourceTurnId: mockInteractiveReport.source.turnId,
+        sourceExecutionAttemptId: "attempt_report_only",
+        latestVersion: 1,
+        createdAt: "2026-08-01T08:00:00.000Z",
+        updatedAt: "2026-08-01T08:00:00.000Z",
+      },
+      version: {
+        reportId: mockInteractiveReport.id,
+        version: 1,
+        sourceThreadId: mockInteractiveReport.source.threadId,
+        sourceTurnId: mockInteractiveReport.source.turnId,
+        sourceExecutionAttemptId: "attempt_report_only",
+        document: mockInteractiveReport.document,
+        filters: mockInteractiveReport.filters,
+        queries: mockInteractiveReport.queries,
+        chartSpecs: mockInteractiveReport.chartSpecs,
+        gridSpecs: mockInteractiveReport.gridSpecs,
+        createdAt: "2026-08-01T08:00:00.000Z",
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const opened = await getInteractiveReportFromBackend(mockInteractiveReport.id);
+
+    expect(opened.report.source.executionAttemptId).toBe("attempt_report_only");
+    expect(opened.report.source.runId).toBe("attempt_report_only");
   });
 
   test("lists server report version history", async () => {
