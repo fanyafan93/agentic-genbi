@@ -17,10 +17,6 @@ const agentTypesSource = readFileSync(
   "utf8",
 );
 
-const mockClientSource = readFileSync(
-  resolve(process.cwd(), "src/modules/analysis/agentClients/mockClient.ts"),
-  "utf8",
-);
 
 const backendClientSource = readFileSync(
   resolve(process.cwd(), "src/modules/analysis/agentClients/backendClient.ts"),
@@ -116,8 +112,9 @@ describe("analysis task product language", () => {
     expect(interactiveReportSource).toContain("@puckeditor/core");
     expect(interactiveReportSource).toContain("AgGridReact");
     expect(interactiveReportSource).toContain("EChartRenderer");
-    expect(workspaceSource).toContain("loadSavedInteractiveReports");
-    expect(workspaceSource).toContain("saveInteractiveReport");
+    expect(workspaceSource).not.toContain("loadSavedInteractiveReports");
+    expect(workspaceSource).not.toContain("saveInteractiveReport(");
+    expect(workspaceSource).toContain("saveInteractiveReportToBackend");
   });
 
   test("adds a business semantic library for structured knowledge and semantics", () => {
@@ -178,10 +175,7 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain("AnalysisTaskThread");
     expect(analysisTaskThreadSource).not.toContain("AnalysisModeToggle");
     expect(analysisTaskThreadSource).not.toContain("data-egress-toggle");
-    expect(mockClientSource).not.toContain("analysisMode");
-    expect(mockClientSource).toContain("analysis_report.html");
-    expect(mockClientSource).toContain("检索业务语义库");
-    expect(mockClientSource).toContain("语义查证");
+    expect(agentClientIndexSource).not.toContain("MockAgentClient");
   });
 
   test("can switch analysis tasks from mock client to the real backend turn API", () => {
@@ -236,18 +230,12 @@ describe("analysis task product language", () => {
     expect(assetsSource).toContain("业务规则");
     expect(assetsSource).toContain("分析路径");
     expect(assetsSource).toContain("Dashboard 片段");
-    expect(mockClientSource).toContain("skills/analysis_skill.md");
-    expect(mockClientSource).toContain("scripts/analysis_notebook.py");
-    expect(mockClientSource).toContain("definitions/channel_sales_metric.md");
-    expect(mockClientSource).toContain("rules/order_scope_rule.md");
-    expect(mockClientSource).toContain("paths/channel_analysis_path.md");
-    expect(mockClientSource).toContain("dashboards/channel_overview.dashboard.json");
   });
 
   test("lets saved interactive results reopen the analysis workspace", () => {
     expect(workspaceSource).toContain("handleOpenReport");
     expect(workspaceSource).toContain("openedReportId");
-    expect(workspaceSource).toContain("initialReport={flow.draftReport ?? openedReport?.report ?? undefined}");
+    expect(workspaceSource).toContain("initialReport={flow.reportArtifact ?? openedReport?.report ?? undefined}");
     expect(workspaceSource).toContain("initialVersion={openedReport?.version}");
     expect(interactiveReportSource).toContain("onSaveReport");
     expect(interactiveReportSource).toContain("已保存新的报告版本");
@@ -327,8 +315,5 @@ describe("analysis task product language", () => {
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 适用场景"');
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 需要确认"');
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 推荐步骤"');
-    expect(mockClientSource).toContain("整理适用场景");
-    expect(mockClientSource).toContain("提取需要确认的业务口径");
-    expect(mockClientSource).toContain("标注复用权限");
   });
 });

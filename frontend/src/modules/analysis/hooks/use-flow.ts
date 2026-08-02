@@ -34,7 +34,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
   const [conversationId, setConversationId] = useState<string | null>(conversationKey);
   const [nodes, setNodes] = useState<FlowNode[]>(initial);
   const [artifacts, setArtifacts] = useState<ArtifactFolder[]>([]);
-  const [draftReport, setDraftReport] = useState<InteractiveReport | null>(null);
+  const [reportArtifact, setReportArtifact] = useState<InteractiveReport | null>(null);
   const [codexLineage, setCodexLineage] = useState<FlowCodexLineage>({});
   const [running, setRunning] = useState(false);
 
@@ -44,7 +44,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
     setConversationId(conversationKey);
     setNodes([...initial]);
     setArtifacts([]);
-    setDraftReport(null);
+    setReportArtifact(null);
     setCodexLineage({});
     setRunning(false);
     return () => { cancelled = true; };
@@ -56,26 +56,31 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
     if (event.type === "conversation-init") {
       setTurnId(event.turnId);
       setConversationId(event.conversationId ?? event.threadId ?? event.turnId);
-      setNodes([]);
+      const next = currentNodes.some((node) => node.id === "user-pending" || node.id === "agent-pending") ? currentNodes : [];
+      setNodes(next);
       setArtifacts([]);
-      setDraftReport(null);
+      setReportArtifact(null);
       setCodexLineage(codexLineageFromEvent(event));
-      return [];
+      return next;
     }
 
     if (event.type === "user") {
-      const next = [...currentNodes, { id: event.nodeId, role: "user", content: event.content } as FlowNode];
+      const userNode: FlowNode = { id: event.nodeId, role: "user", content: event.content };
+      const pendingIndex = currentNodes.findIndex((node) => node.id === "user-pending");
+      const next = pendingIndex >= 0
+        ? currentNodes.map((node, index) => (index === pendingIndex ? userNode : node))
+        : [...currentNodes, userNode];
       setNodes(next);
       return next;
     }
 
     if (event.type === "agent") {
-      const next: FlowNode[] = currentNodes.map((node) => ({ ...node }) as FlowNode);
+      const next: FlowNode[] = currentNodes.filter((node) => node.id !== "agent-pending").map((node) => ({ ...node }) as FlowNode);
       const existing = next.findIndex((n) => n.id === event.nodeId && n.role === "agent");
       if (existing >= 0) {
         const target = next[existing];
         if (target.role === "agent") {
-          next[existing] = { ...target, content: event.content, mode: event.mode };
+          next[existing] = target.content === event.content ? { ...target, mode: event.mode } : { ...target, content: event.content, mode: event.mode };
         }
       } else {
         next.push({ id: event.nodeId, role: "agent", content: event.content, mode: event.mode, steps: [] });
@@ -85,6 +90,20 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
     }
 
     if (event.type === "tokens") {
+      const pendingIndex = currentNodes.findIndex((node) => node.id === "agent-pending");
+      if (pendingIndex >= 0) {
+        const streamedNode: FlowNode = {
+          id: event.nodeId,
+          role: "agent",
+          content: event.text,
+          mode: "delta",
+          steps: [],
+        };
+        const next = currentNodes.map((node, index) => (index === pendingIndex ? streamedNode : node));
+        setNodes(next);
+        return next;
+      }
+
       const next: FlowNode[] = currentNodes.map((node) => ({ ...node }) as FlowNode);
       const idx = next.findIndex((n) => n.id === event.nodeId && n.role === "agent");
       if (idx >= 0) {
@@ -149,16 +168,17 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
       return currentNodes;
     }
 
-    if (event.type === "report-draft") {
-      setDraftReport(event.report);
+    if (event.type === "report-artifact") {
+      setReportArtifact(event.report);
       return currentNodes;
     }
 
     if (event.type === "error") {
-      const next: FlowNode[] = [
-        ...currentNodes,
-        { id: `agent-error-${Date.now()}`, role: "agent", content: event.message, mode: "replace" },
-      ];
+      const errorNode: FlowNode = { id: `agent-error-${Date.now()}`, role: "agent", content: event.message, mode: "replace" };
+      const pendingIndex = currentNodes.findIndex((node) => node.id === "agent-pending");
+      const next = pendingIndex >= 0
+        ? currentNodes.map((node, index) => (index === pendingIndex ? errorNode : node))
+        : [...currentNodes, errorNode];
       setNodes(next);
       return next;
     }
@@ -169,7 +189,8 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
   const consume = useCallback(async (input: AgentInput) => {
     if (cancelled) return;
     setRunning(true);
-    let snapshot: FlowNode[] = nodes;
+    let snapshot: FlowNode[] = withOptimisticTurn(nodes, input);
+    if (snapshot !== nodes) setNodes(snapshot);
     try {
       for await (const event of agent.send(input)) {
         if (cancelled) break;
@@ -180,16 +201,16 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
     }
   }, [agent, applyEvent, nodes]);
 
-  const start = useCallback((question?: string, interactiveReport?: InteractiveReport) => consume({ kind: "start", question, interactiveReport }), [consume]);
-  const send = useCallback((content: string, interactiveReport?: InteractiveReport) => consume({ kind: "message", content, interactiveReport }), [consume]);
-  const reply = useCallback((optionId: string, interactiveReport?: InteractiveReport) => consume({ kind: "reply", optionId, interactiveReport }), [consume]);
+  const start = useCallback((question?: string) => consume({ kind: "start", question }), [consume]);
+  const send = useCallback((content: string) => consume({ kind: "message", content }), [consume]);
+  const reply = useCallback((optionId: string) => consume({ kind: "reply", optionId }), [consume]);
 
   return {
     turnId,
     conversationId,
     nodes,
     artifacts,
-    draftReport,
+    reportArtifact,
     codexLineage,
     running,
     start,
@@ -199,6 +220,16 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
 }
 
 let cancelled = false;
+
+function withOptimisticTurn(nodes: FlowNode[], input: AgentInput): FlowNode[] {
+  const content = input.kind === "start" ? input.question : input.kind === "message" ? input.content : "";
+  if (!content || nodes.some((node) => node.id === "user-pending" || node.id === "agent-pending")) return nodes;
+  return [
+    ...nodes,
+    { id: "user-pending", role: "user", content },
+    { id: "agent-pending", role: "agent", content: "正在思考...", mode: "replace", steps: [] },
+  ];
+}
 
 function updateCodexLineage(
   event: AgentEvent,

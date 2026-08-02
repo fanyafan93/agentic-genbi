@@ -58,7 +58,7 @@ MiniMax、OpenAI-compatible 或其他模型只是 Codex 的 model adapter，不�
 ## 当前实现快照
 
 - 前端：Next.js + TypeScript。分析工作台提供左侧分析线程和右侧交互式分析结果；结果以 Puck JSON 描述布局，ECharts / AG Grid 渲染图表与表格，并优先读写后端报告版本接口。
-- 后端：FastAPI。分析工作台主入口收敛到 Codex Thread / Turn / Item；资源库工具、数据库只读工具、知识记录、分析资产最小存储、Codex Item projection、交互式报告版本已经可用。
+- 后端：FastAPI。分析工作台主入口收敛到 Codex Thread / Turn / Item；知识记录、分析资产存储、Codex Item projection 和交互式报告版本已经可用。旧资源库、报告查询和数据库工具模块已删除；报告只接受真实 Codex Artifact 事件，不从回复文本或本地 mock 生成。
 - 登录：Auth.js + 飞书 OAuth + PostgreSQL session。
 - 运行：Docker Compose 启动 frontend、backend、postgres。
 - 待完成：Codex 工具/MCP/Skill 接入、完整业务语义库持久化、完整 Artifact 治理、团队权限/RLS、生产数据源治理。

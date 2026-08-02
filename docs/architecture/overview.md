@@ -76,16 +76,16 @@ Analysis Task 不是自研执行层；它只是业务归属和 Codex Thread 指�
 ```text
 turn/started
 turn/completed
-turn/failed
 item/started
 item/completed
-item/failed
 item/agentMessage/delta
 genbi/artifact/created
 genbi/artifact/updated
 genbi/dataAccess/denied
 genbi/approval/requested
 ```
+
+失败仍使用原生终态事件：turn/completed 携带 status: failed 和 error；Item 失败使用 item/completed 携带 status: failed。系统不创建额外的失败生命周期事件。
 
 每个事件必须包含 `eventSource`：
 
@@ -120,5 +120,5 @@ codexItemId
 
 1. 让分析服务主路径对齐 Codex Thread / Turn / Item。
 2. 让 Artifact source 和 lineage 只依赖 Codex lineage。
-3. 把资源库、数据库和业务语义库接成受控 Codex tools / MCP / Skill adapters。
+3. 未来的数据访问和业务语义能力只通过受控 Codex tools / MCP / Skill adapters 接入，不恢复旧资源库或报告查询执行层。
 4. 完成用户、租户、RLS、分享、发布、治理和审计。

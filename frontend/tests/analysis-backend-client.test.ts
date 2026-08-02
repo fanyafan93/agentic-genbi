@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { BackendAnalysisAgentClient, getBackendAnalysisRequestTimeoutMs, mapBackendEvents, parseAnalysisSse } from "../src/modules/analysis/agentClients/backendClient";
-import { mockInteractiveReport } from "../src/modules/analysis/mocks/interactive-report";
 
 async function collect<T>(items: AsyncIterable<T>): Promise<T[]> {
   const collected: T[] = [];
@@ -22,6 +21,22 @@ function sseEvent(event: { type: string; turn_id: string; created_at?: string; p
   };
   return `event: ${event.type}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
+
+test("maps a failed completed turn to one visible error and done event", () => {
+  const events = Array.from(mapBackendEvents([
+    {
+      type: "turn/completed",
+      turn_id: "turn_failed",
+      payload: { status: "failed", error: "analysis_agent_runner_failed" },
+      created_at: "2026-08-02T00:00:00Z",
+    },
+  ], "start"));
+
+  expect(events).toEqual([
+    expect.objectContaining({ type: "error", message: "analysis_agent_runner_failed" }),
+    expect.objectContaining({ type: "done" }),
+  ]);
+});
 
 describe("analysis backend client event mapping", () => {
   test("preserves backend thread id on new analysis turns", () => {
@@ -46,6 +61,12 @@ describe("analysis backend client event mapping", () => {
       type: "user",
       nodeId: "user-turn_analysis_123",
       content: "first purchase 30d repurchase definition",
+    });
+    expect(events[2]).toMatchObject({
+      type: "step",
+      nodeId: "agent-turn_analysis_123",
+      label: "模型响应",
+      state: "running",
     });
   });
 
@@ -88,7 +109,7 @@ describe("analysis backend client event mapping", () => {
     });
   });
 
-  test("maps streamed assistant deltas to token events on the final agent node", () => {
+  test("streams assistant deltas into one Codex turn message and replaces it with the final content", () => {
     const events = Array.from(mapBackendEvents([
       {
         type: "item/agentMessage/delta",
@@ -101,6 +122,19 @@ describe("analysis backend client event mapping", () => {
           codex_turn_id: "codex_turn_stream",
           codex_item_id: "codex_item_message",
           delta: "hello, ",
+        },
+      },
+      {
+        type: "item/agentMessage/delta",
+        turn_id: "turn_analysis_stream",
+        created_at: "2026-07-30T00:01:00Z",
+        payload: {
+          thread_id: "thread_analysis_stream",
+          turn_id: "turn_analysis_stream",
+          codex_thread_id: "codex_thread_stream",
+          codex_turn_id: "codex_turn_stream",
+          codex_item_id: "codex_item_message",
+          delta: "complete reply.",
         },
       },
       {
@@ -120,11 +154,10 @@ describe("analysis backend client event mapping", () => {
       },
     ], "message"));
 
-    expect(events).toMatchObject([
-      { type: "debug", nodeId: "agent-turn_analysis_stream", content: "hello, " },
-      { type: "tokens", nodeId: "agent-turn_analysis_stream", text: "hello, " },
-      { type: "debug", nodeId: "agent-turn_analysis_stream", content: "hello, complete reply." },
-      { type: "agent", nodeId: "agent-turn_analysis_stream", content: "hello, complete reply.", mode: "replace" },
+    expect(events).toEqual([
+      expect.objectContaining({ type: "tokens", nodeId: "agent-turn_analysis_stream", text: "hello, " }),
+      expect.objectContaining({ type: "tokens", nodeId: "agent-turn_analysis_stream", text: "complete reply." }),
+      expect.objectContaining({ type: "agent", nodeId: "agent-turn_analysis_stream", content: "hello, complete reply.", mode: "replace" }),
     ]);
     expect(events[0]).toMatchObject({
       turnId: "turn_analysis_stream",
@@ -133,6 +166,38 @@ describe("analysis backend client event mapping", () => {
       codexTurnId: "codex_turn_stream",
       codexItemId: "codex_item_message",
     });
+  });
+
+  test("keeps Codex agent messages in one assistant turn node", () => {
+    const events = Array.from(mapBackendEvents([
+      {
+        type: "item/completed",
+        turn_id: "turn_multi_message",
+        created_at: "2026-07-30T00:01:00Z",
+        payload: {
+          codex_method: "item/completed",
+          codex_item_type: "agentMessage",
+          codex_item_id: "codex_item_first",
+          content: "First message",
+        },
+      },
+      {
+        type: "item/completed",
+        turn_id: "turn_multi_message",
+        created_at: "2026-07-30T00:01:01Z",
+        payload: {
+          codex_method: "item/completed",
+          codex_item_type: "agentMessage",
+          codex_item_id: "codex_item_second",
+          content: "Second message",
+        },
+      },
+    ], "message"));
+
+    expect(events).toEqual([
+      expect.objectContaining({ type: "agent", nodeId: "agent-turn_multi_message", content: "First message" }),
+      expect.objectContaining({ type: "agent", nodeId: "agent-turn_multi_message", content: "Second message" }),
+    ]);
   });
 
   test("ignores local planning payloads", () => {
@@ -180,7 +245,7 @@ describe("analysis backend client event mapping", () => {
     ]);
   });
 
-  test("maps a validated interactive report draft as a dedicated result event", () => {
+  test("maps an interactive report artifact as a dedicated result event", () => {
     const events = Array.from(mapBackendEvents([
       {
         type: "genbi/artifact/updated",
@@ -189,7 +254,7 @@ describe("analysis backend client event mapping", () => {
         payload: {
           artifactType: "interactive_report",
           schemaVersion: "1.0",
-          id: "report_draft_turn_analysis_report",
+          id: "report_turn_analysis_report",
           title: "channel sales analysis",
           subtitle: "pending query validation",
           renderer: "puck",
@@ -207,8 +272,8 @@ describe("analysis backend client event mapping", () => {
     ], "start"));
 
     expect(events).toEqual([expect.objectContaining({
-      type: "report-draft",
-      report: expect.objectContaining({ id: "report_draft_turn_analysis_report", title: "channel sales analysis" }),
+      type: "report-artifact",
+      report: expect.objectContaining({ id: "report_turn_analysis_report", title: "channel sales analysis" }),
       turnId: "turn_analysis_report",
       threadId: "thread_analysis_report",
     })]);
@@ -246,7 +311,7 @@ describe("analysis backend client event mapping", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    await collect(client.send({ kind: "start", question: "start question", interactiveReport: mockInteractiveReport }));
+    await collect(client.send({ kind: "start", question: "start question" }));
     const messageEvents = await collect(client.send({ kind: "message", content: "continue question" }));
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -256,7 +321,7 @@ describe("analysis backend client event mapping", () => {
     expect(fetchMock.mock.calls[1][0]).toBe("http://backend.test/api/analysis/threads/thread_analysis_456/turns/stream");
     expect(startBody.conversation_id).toBeUndefined();
     expect(startBody.metadata).toMatchObject({ frontend_client: "analysis_task" });
-    expect(startBody.metadata.interactive_report_context).toEqual(mockInteractiveReport);
+    expect(startBody.metadata).toEqual({ frontend_client: "analysis_task" });
     expect(messageBody.conversation_id).toBeUndefined();
     expect(messageBody.turn_kind).toBe("message");
     expect(messageEvents[0]).toMatchObject({

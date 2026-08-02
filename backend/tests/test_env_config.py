@@ -11,44 +11,16 @@ from io import StringIO
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.config.env import check_runtime_env, load_project_env, main
-from backend.resource_library.database_tools import DatabaseConfig
 
 
 class EnvConfigTest(unittest.TestCase):
-    def test_load_project_env_reads_explicit_file_without_overriding_existing_env(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            env_path = Path(temp_dir) / ".env"
-            env_path.write_text(
-                "\n".join(
-                    [
-                        "GENBI_DB_HOST=10.0.0.9",
-                        "GENBI_DB_PORT=3310",
-                        "GENBI_DB_USER=readonly",
-                        "GENBI_DB_PASSWORD=secret",
-                        "GENBI_DB_DATABASE=dm",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-            with patch.dict(os.environ, {"GENBI_ENV_FILE": str(env_path), "GENBI_DB_HOST": "existing"}, clear=True):
-                loaded = load_project_env()
-                config = DatabaseConfig.from_env()
-
-            self.assertTrue(loaded)
-            self.assertEqual(config.host, "existing")
-            self.assertEqual(config.port, 3310)
-            self.assertEqual(config.user, "readonly")
-            self.assertEqual(config.password, "secret")
-            self.assertEqual(config.database, "dm")
-
     def test_check_runtime_env_reports_missing_required_runtime_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(
                 os.environ,
                 {
                     "GENBI_ENV_FILE": str(Path(temp_dir) / "missing.env"),
-                    "GENBI_RESOURCE_LIBRARY_ROOT": str(Path(temp_dir) / "missing"),
+                    "GENBI_FINEREPORT_ROOT": str(Path(temp_dir) / "missing"),
                 },
                 clear=True,
             ):
@@ -58,7 +30,7 @@ class EnvConfigTest(unittest.TestCase):
         self.assertFalse(payload["ready"])
         self.assertFalse(payload["env_loaded"])
         self.assertFalse(checks["mysql"]["ok"])
-        self.assertFalse(checks["resource_library"]["ok"])
+        self.assertFalse(checks["finereport_semantics"]["ok"])
         self.assertTrue(checks["llm"]["ok"])
 
     def test_check_runtime_env_accepts_complete_local_runtime_env(self) -> None:
@@ -69,7 +41,7 @@ class EnvConfigTest(unittest.TestCase):
             env_path.write_text(
                 "\n".join(
                     [
-                        f"GENBI_RESOURCE_LIBRARY_ROOT={resource_root}",
+                        f"GENBI_FINEREPORT_ROOT={resource_root}",
                         "GENBI_ANALYSIS_RUNTIME=local",
                         "GENBI_DB_HOST=127.0.0.1",
                         "GENBI_DB_PORT=3306",
@@ -90,7 +62,7 @@ class EnvConfigTest(unittest.TestCase):
         self.assertTrue(payload["ready"])
         self.assertTrue(payload["env_loaded"])
         self.assertTrue(checks["mysql"]["ok"])
-        self.assertTrue(checks["resource_library"]["ok"])
+        self.assertTrue(checks["finereport_semantics"]["ok"])
         self.assertTrue(checks["frontend_api_base"]["ok"])
         self.assertTrue(checks["cost_config"]["ok"])
 
@@ -102,7 +74,7 @@ class EnvConfigTest(unittest.TestCase):
                 os.environ,
                 {
                     "GENBI_ENV_FILE": str(Path(temp_dir) / "missing.env"),
-                    "GENBI_RESOURCE_LIBRARY_ROOT": str(resource_root),
+                    "GENBI_FINEREPORT_ROOT": str(resource_root),
                     "DATABASE_URL": "mysql+pymysql://readonly_user:liran%402026@8.134.63.30:3306/dm",
                 },
                 clear=True,
@@ -122,7 +94,7 @@ class EnvConfigTest(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "GENBI_RESOURCE_LIBRARY_ROOT": str(resource_root),
+                    "GENBI_FINEREPORT_ROOT": str(resource_root),
                     "GENBI_ANALYSIS_RUNTIME": "openai",
                     "GENBI_ENV_FILE": str(Path(temp_dir) / "missing.env"),
                     "OPENAI_API_KEY": "sk-test-1234567890",
@@ -146,7 +118,7 @@ class EnvConfigTest(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "GENBI_RESOURCE_LIBRARY_ROOT": str(resource_root),
+                    "GENBI_FINEREPORT_ROOT": str(resource_root),
                     "GENBI_ANALYSIS_RUNTIME": "llm",
                     "GENBI_LLM_PROVIDER": "minimax",
                     "GENBI_ANALYSIS_MODEL": "minimax-test-model",

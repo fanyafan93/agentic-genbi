@@ -1,36 +1,23 @@
 ﻿import json
 import os
 from dataclasses import asdict
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from backend.config import check_runtime_env, load_project_env
 from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
 from backend.analysis.interactive_report_store import InteractiveReportStore, InteractiveReportVersionConflict
-from backend.analysis.report_query_service import ReportQueryFilterError, ReportQueryNotFound, ReportQueryService, response_to_dict
 from backend.analysis.turn_service import AnalysisTurnRequest, AnalysisTurnService, AnalysisThreadService
 from backend.business_semantics.finereport_reports import FineReportReportRepository
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRunner
 from backend.harness.thread_store import ThreadStore
 from backend.persistence.postgres_stores import (
     build_postgres_analysis_asset_store,
-    build_postgres_report_query_audit_store,
     build_postgres_stores,
     build_postgres_thread_store,
     postgres_persistence_enabled,
 )
-from backend.resource_library.database_tools import DatabaseConfig, ReadonlyDatabaseTools
-from backend.resource_library.indexer import ResourceIndexer
-from backend.resource_library.inspector import inspect_index
-from backend.resource_library.knowledge_store import KnowledgeStore
-from backend.resource_library.tools import (
-    DEFAULT_EXCERPT_MAX_BYTES,
-    DEFAULT_EXCERPT_MAX_LINES,
-    DEFAULT_INDEX_PATH,
-    DEFAULT_SUMMARY_PATH,
-    ResourceLibrary,
-)
+from backend.business_semantics.knowledge_store import KnowledgeStore
 
 
 def create_app(
@@ -38,7 +25,6 @@ def create_app(
     analysis_service: AnalysisTurnService | None = None,
     analysis_asset_store: AnalysisAssetStore | None = None,
     interactive_report_store: Any | None = None,
-    report_query_service: ReportQueryService | None = None,
     thread_store: ThreadStore | None = None,
     finereport_repository: FineReportReportRepository | None = None,
 ) -> Any:
@@ -106,12 +92,6 @@ def create_app(
         source: InteractiveReportSourceBody
         ownerId: str = Field(min_length=1)
         expectedVersion: int | None = Field(default=None, ge=0)
-
-    class ReportQueryBody(BaseModel):
-        filters: dict[str, Any] = Field(default_factory=dict)
-
-    class ResourceReindexBody(BaseModel):
-        root: str | None = None
 
     class KnowledgeBody(BaseModel):
         title: str = Field(min_length=1)
@@ -189,12 +169,7 @@ def create_app(
         allow_headers=["*"],
     )
     configured_knowledge_store = knowledge_store or _build_default_knowledge_store()
-    configured_resource_library = _build_default_resource_library()
-    configured_report_query_service = report_query_service or ReportQueryService(
-        ReadonlyDatabaseTools(DatabaseConfig.from_env()),
-        audit_store=build_postgres_report_query_audit_store() if postgres_persistence_enabled() else None,
-    )
-    configured_analysis_service = analysis_service or build_default_analysis_service(report_query_service=configured_report_query_service)
+    configured_analysis_service = analysis_service or build_default_analysis_service()
     configured_analysis_asset_store = analysis_asset_store or _build_default_analysis_asset_store()
     configured_interactive_report_store = interactive_report_store or _build_default_interactive_report_store()
     configured_thread_store = thread_store or getattr(configured_analysis_service, "thread_store", None) or ThreadStore()
@@ -256,21 +231,6 @@ def create_app(
         if not turn:
             raise HTTPException(status_code=404, detail="analysis_turn_not_found")
         return turn
-
-    @app.post("/api/analysis/report-queries/{query_ref}")
-    def run_interactive_report_query(query_ref: str, body: ReportQueryBody = Body(...)) -> dict[str, Any]:
-        try:
-            return response_to_dict(
-                configured_report_query_service.run(
-                    query_ref,
-                    body.filters,
-                    audit_context={"source": "interactive_report"},
-                )
-            )
-        except ReportQueryNotFound as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ReportQueryFilterError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/analysis/assets")
     def list_analysis_assets(
@@ -407,94 +367,6 @@ def create_app(
             raise HTTPException(status_code=404, detail="interactive_report_version_not_found")
         report, version = result
         return {"report": asdict(report), "version": asdict(version)}
-
-    @app.get("/api/resources/search")
-    def search_resources(q: str = Query(min_length=1), resource_type: str | None = None, limit: int = 20) -> dict[str, Any]:
-        if not configured_resource_library:
-            return {"results": []}
-        results = configured_resource_library.search_resources(q, resource_type=resource_type, limit=limit)
-        return {"results": [asdict(item) for item in results]}
-
-    @app.get("/api/resources/status")
-    def resource_status() -> dict[str, Any]:
-        library = configured_resource_library
-        index_path = library.index_path if library else Path(DEFAULT_INDEX_PATH)
-        summary_path = library.summary_path if library else Path(DEFAULT_SUMMARY_PATH)
-        index_exists = index_path.exists()
-        summary_exists = summary_path.exists()
-        resource_count = 0
-        type_counts: dict[str, int] = {}
-        root = None
-        if library:
-            payload = library.index
-        elif index_exists:
-            payload = json.loads(index_path.read_text(encoding="utf-8"))
-        else:
-            payload = None
-        if payload:
-            root = payload.get("root")
-            resources = payload.get("resources", [])
-            resource_count = len(resources)
-            for resource in resources:
-                resource_type = str(resource.get("type", "unknown"))
-                type_counts[resource_type] = type_counts.get(resource_type, 0) + 1
-        return {
-            "indexed": bool(library and index_exists and summary_exists),
-            "root": root,
-            "index_path": str(index_path),
-            "summary_path": str(summary_path),
-            "resource_count": resource_count,
-            "type_counts": type_counts,
-            "index_modified_at": _modified_at(index_path) if index_exists else None,
-            "summary_modified_at": _modified_at(summary_path) if summary_exists else None,
-        }
-
-    @app.get("/api/resources/{resource_id}/excerpt")
-    def read_resource_excerpt(
-        resource_id: str,
-        section: str = Query(default="head", pattern="^(head|tail|match)$"),
-        q: str | None = None,
-        max_lines: int = Query(default=80, ge=1, le=DEFAULT_EXCERPT_MAX_LINES),
-        max_bytes: int = Query(default=DEFAULT_EXCERPT_MAX_BYTES, ge=1024, le=DEFAULT_EXCERPT_MAX_BYTES),
-    ) -> dict[str, Any]:
-        if not configured_resource_library:
-            raise HTTPException(status_code=404, detail="resource_library_not_indexed")
-        try:
-            excerpt = configured_resource_library.read_resource_excerpt(
-                resource_id,
-                section=section,
-                query=q,
-                max_lines=max_lines,
-                max_bytes=max_bytes,
-            )
-            return asdict(excerpt)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.get("/api/resources/{resource_id}")
-    def inspect_resource(resource_id: str) -> dict[str, Any]:
-        if not configured_resource_library:
-            raise HTTPException(status_code=404, detail="resource_library_not_indexed")
-        try:
-            return asdict(configured_resource_library.inspect_resource(resource_id))
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.post("/api/resources/reindex")
-    def reindex_resources(body: ResourceReindexBody = Body(default_factory=ResourceReindexBody)) -> dict[str, Any]:
-        root = Path(body.root or os.getenv("GENBI_RESOURCE_LIBRARY_ROOT", "资源库"))
-        if not root.exists():
-            raise HTTPException(status_code=400, detail=f"resource_root_not_found: {root}")
-        index = ResourceIndexer(root).write(DEFAULT_INDEX_PATH)
-        summary = inspect_index(DEFAULT_INDEX_PATH, DEFAULT_SUMMARY_PATH)
-        nonlocal configured_resource_library
-        configured_resource_library = ResourceLibrary(index_path=DEFAULT_INDEX_PATH, summary_path=DEFAULT_SUMMARY_PATH)
-        return {
-            "resource_count": len(index.resources),
-            "summary_count": len(summary["summaries"]),
-            "index_path": str(DEFAULT_INDEX_PATH),
-            "summary_path": str(DEFAULT_SUMMARY_PATH),
-        }
 
     @app.get("/api/knowledge")
     def list_knowledge(
@@ -670,15 +542,7 @@ def _conversation_metadata(metadata: dict[str, Any] | None, *, conversation_id: 
     return next_metadata
 
 
-def _modified_at(path: Path) -> str:
-    from datetime import UTC, datetime
-
-    return datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
-
-
-def build_default_analysis_service(
-    report_query_service: ReportQueryService | None = None,
-) -> AnalysisThreadService:
+def build_default_analysis_service() -> AnalysisThreadService:
     load_project_env()
     analysis_runner = None
     analysis_runtime = os.getenv("GENBI_ANALYSIS_RUNTIME", "codex").lower()
@@ -689,7 +553,6 @@ def build_default_analysis_service(
     return AnalysisThreadService(
         agent_runner=analysis_runner,
         thread_store=_build_default_thread_store(),
-        report_query_service=report_query_service,
     )
 
 
@@ -702,12 +565,6 @@ def _build_default_knowledge_store() -> KnowledgeStore:
             if os.getenv("GENBI_PERSISTENCE", "").strip():
                 raise
     return KnowledgeStore()
-
-
-def _build_default_resource_library() -> ResourceLibrary | None:
-    if Path(DEFAULT_INDEX_PATH).exists() and Path(DEFAULT_SUMMARY_PATH).exists():
-        return ResourceLibrary(index_path=DEFAULT_INDEX_PATH, summary_path=DEFAULT_SUMMARY_PATH)
-    return None
 
 
 def _build_default_thread_store() -> ThreadStore:

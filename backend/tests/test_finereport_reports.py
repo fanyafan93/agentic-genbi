@@ -93,7 +93,7 @@ class FineReportReportsApiTest(unittest.TestCase):
                 },
             )
 
-            with patch.dict("os.environ", {"GENBI_RESOURCE_LIBRARY_ROOT": str(resource_root)}, clear=False):
+            with patch.dict("os.environ", {"GENBI_FINEREPORT_ROOT": str(resource_root / "finereport" / "解析")}, clear=False):
                 client = TestClient(create_app())
                 listed = client.get("/api/business-semantics/finereport/reports")
 

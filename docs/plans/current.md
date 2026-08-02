@@ -1,52 +1,46 @@
 # Current Task
 
-Updated: 2026-08-02 Asia/Shanghai
+Updated: 2026-08-03 Asia/Shanghai
 
 This page records the current verifiable state only. Historical process belongs in Git.
 
 ## Current State
 
-- Branch: `Agentic-GenBI`.
+- Branch: `feature/codex-item-stream-rendering`.
 - Product mainline is a single Analysis Workspace.
-- The main model is Codex `Thread / Turn / Item`.
-- Analysis Task is a GenBI business record with `codexThreadId`; it is not an execution layer.
-- GenBI Artifact lineage uses `assetId` as `artifactId`, a separate `artifactVersionId`, and optional Codex Thread / Turn / Item ids.
+- Codex owns `Thread / Turn / Item`, context, tool scheduling, streaming, interruption, retries, sandbox, and approval.
+- GenBI owns users, tenants, data permissions, data sources, FineReport semantic cases, metrics and rules, Artifact versions, lineage, sharing, publishing, and governance.
+- Analysis replies are rendered from real Codex Item events. The report pane only renders a real interactive-report Artifact or an empty state.
 
 ## Completed In This Round
 
-- Added `backend/analysis/turn_service.py` with `AnalysisTurnService` / `AnalysisTurnRequest` as the analysis service entry.
-- Added `backend/harness/events.py` with `AgentEvent`.
-- Renamed the FastAPI entrypoint to `backend.api.analysis_api`.
-- Switched analysis turn creation and SSE streaming to Thread / Turn endpoints.
-- Updated `ThreadStore` file persistence to save threads, turns, items, and Codex item projections directly.
-- Removed the old investigation frontend module and its tests.
-- Removed the old execution backend module, legacy execution APIs, legacy stores, migration script, and static demo pages.
-- Removed the old local event compatibility names from backend services, SDK runner mapping, frontend event mapping, and tests.
-- Runtime events now use Codex `turn/*` and `item/*` plus GenBI `genbi/artifact/*`.
-- Removed source fields from analysis assets and interactive reports that are not part of Codex Thread / Turn / Item lineage.
-- Removed the knowledge-base source category that came from the deleted analysis path.
-- Updated product and architecture docs to describe the current boundary only.
+- Deleted `ReadonlyDatabaseTools`, `ReportQueryService`, and the `resource_library` module, including their APIs, dependencies, and tests; retained knowledge records under business semantics.
+- Deleted the `<interactive_report_draft>` prompt, parser, repair, context, and frontend event path.
+- Deleted frontend report-query and local mock report/storage fallbacks.
+- Removed synthetic report, SQL, chart, notebook, path, and skill Artifact events from the analysis service.
+- An unconfigured analysis runner now fails explicitly instead of returning fabricated content.
+- Preserved FineReport semantic cases, Artifact/version/lineage storage, Codex Thread/Turn/Item projection, and real Codex Artifact event mapping.
 
-## Verified
+## Verification In This Round
 
-- `python -m unittest discover backend\tests -v`: 91 tests passed.
-- `npm.cmd test` in `frontend`: 50 tests passed.
+- `python -m unittest discover backend\tests -v`: 60 tests passed.
+- `npm.cmd test` in `frontend`: 52 tests passed.
+- `npx.cmd tsc --noEmit --pretty false` in `frontend`: passed.
 - `npm.cmd run build` in `frontend`: passed.
-- `docker compose config`: passed.
-- `docker compose up -d --build`: rebuilt and restarted backend and frontend.
-- `GET http://127.0.0.1:8000/health`: 200 with `{"status":"ok"}`.
-- `GET http://127.0.0.1:3000/`: 200.
-- Legacy object/path scan across backend, frontend, tests, docs, compose, and `.env`: no matches for the removed domain terms.
-- Legacy event scan across backend and frontend: no matches for removed local compatibility event names.
+- Rebuilt and recreated backend/frontend containers; backend `/health` and frontend `/` returned HTTP 200.
+- Browser interaction and a final live SSE submission were blocked by the environment approval layer, so live response content remains unverified in this round.
 
-## Current Limitations
+## Workspace State
 
-- Codex tool / MCP / Skill integration is still incomplete.
-- Complete business semantic persistence is still incomplete.
-- Complete Artifact governance, sharing, publishing, team permissions, RLS, and production data source governance are still incomplete.
+- The worktree contains this deletion slice plus the earlier Codex Item streaming changes on the same feature branch.
+- No unrelated user changes were reverted.
+
+## Risks / Incomplete
+
+- No report-generation tool is added in this slice. The report pane remains empty until a real registered Codex tool emits an interactive-report Artifact.
+- Production data access, RLS, and complete Artifact governance remain incomplete.
 
 ## Next Steps
 
-1. Replace remaining mock-first semantic/tool behavior with real Codex tool items where the business tool contracts are ready.
-2. Complete business semantic persistence.
-3. Complete Artifact governance, sharing, publishing, team permissions, RLS, and production data source governance.
+1. Register future GenBI business tools through Codex only when their contracts are ready.
+2. Continue Artifact governance, sharing, publishing, permissions, and RLS.

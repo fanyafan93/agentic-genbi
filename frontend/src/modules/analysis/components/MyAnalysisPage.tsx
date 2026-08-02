@@ -1,6 +1,6 @@
 "use client";
 
-import type { SavedInteractiveReport } from "../mocks/interactive-report-storage";
+import type { SavedInteractiveReport } from "../api/interactive-report-service";
 
 type Props = {
   reports: SavedInteractiveReport[];

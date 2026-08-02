@@ -12,8 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 
 from backend.analysis.asset_store import AnalysisAssetStore
-from backend.analysis.runner_contracts import AnalysisAgentResult
-from backend.analysis.report_query_service import CHANNEL_SALES_QUERY_REF, ReportQueryResponse
 from backend.analysis.turn_service import AnalysisTurnRequest, AnalysisTurnService
 import backend.api.analysis_api as analysis_api
 from backend.api.analysis_api import create_app
@@ -21,69 +19,6 @@ from backend.harness.thread_store import ThreadStore
 
 
 class AnalysisApiTest(unittest.TestCase):
-    def test_report_query_api_only_accepts_server_owned_query_ref(self) -> None:
-        class QueryService:
-            def run(self, query_ref: str, filters: dict[str, object], *, audit_context: dict[str, object] | None = None) -> ReportQueryResponse:
-                if query_ref != CHANNEL_SALES_QUERY_REF:
-                    from backend.analysis.report_query_service import ReportQueryNotFound
-
-                    raise ReportQueryNotFound("report_query_not_found")
-                return ReportQueryResponse(
-                    queryRef=query_ref,
-                    filters={"month": str(filters["month"])},
-                    columns=["channel", "salesAmount", "salesShare"],
-                    rows=[{"channel": "绾夸笂鑷惀", "salesAmount": 100, "salesShare": 1}],
-                    rowCount=1,
-                    elapsedMs=12,
-                    truncated=False,
-                )
-
-        app = create_app(analysis_service=AnalysisTurnService(), report_query_service=QueryService())
-        client = TestClient(app)
-
-        response = client.post(
-            f"/api/analysis/report-queries/{CHANNEL_SALES_QUERY_REF}",
-            json={"filters": {"month": "2026-08", "brand": "all"}},
-        )
-        missing = client.post("/api/analysis/report-queries/browser-supplied-sql", json={"filters": {"month": "2026-08"}})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["rows"][0]["channel"], "绾夸笂鑷惀")
-        self.assertEqual(missing.status_code, 404)
-
-    def test_codex_report_draft_becomes_report_item_without_leaking_json_to_message(self) -> None:
-        class ReportDraftRunner:
-            runtime_name = "openai-codex"
-
-            def run(self, prompt: str) -> AnalysisAgentResult:
-                return AnalysisAgentResult(
-                    final_output=(
-                        "鎴戝凡鏁寸悊鍑轰竴浠藉緟楠岃瘉鐨勬姤鍛婄粨鏋勩€俓n"
-                        "<interactive_report_draft>\n"
-                        '{"title":"channel sales analysis","subtitle":"pending validation","document":{"root":{"props":{}},"content":[],"zones":{}},'
-                        '"filters":[],"queries":{},"chartSpecs":{},"gridSpecs":{}}\n'
-                        "</interactive_report_draft>"
-                    ),
-                    raw_result_type="test",
-                )
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
-            events = AnalysisTurnService(agent_runner=ReportDraftRunner(), thread_store=thread_store).run(
-                AnalysisTurnRequest(question="analyze channel sales")
-            )
-
-            draft = next(event for event in events if event.type == "genbi/artifact/updated" and event.payload.get("artifactType") == "interactive_report")
-            message = next(event for event in events if event.type == "item/completed" and event.payload.get("codex_item_type") == "agentMessage")
-            thread_id = draft.payload["source"]["threadId"]
-            saved = thread_store.get_thread(thread_id)
-
-            self.assertEqual(draft.payload["artifactType"], "interactive_report")
-            self.assertEqual(draft.payload["source"]["turnId"], draft.turn_id)
-            self.assertNotIn("interactive_report_draft", message.payload["content"])
-            self.assertTrue(saved)
-            self.assertIn("report", [item["kind"] for item in saved["items"]])
-
     def test_default_analysis_service_uses_postgres_thread_store_when_enabled(self) -> None:
         with patch.dict("os.environ", {"GENBI_PERSISTENCE": "postgres"}, clear=False):
             with patch.object(analysis_api, "build_postgres_thread_store") as build_thread_store:
@@ -127,10 +62,8 @@ class AnalysisApiTest(unittest.TestCase):
             self.assertEqual(payload["thread_id"], payload["conversation_id"])
             self.assertTrue(payload["turn_id"].startswith("analysis_turn_"))
             self.assertEqual(payload["events_url"], f"/api/analysis/threads/{payload['thread_id']}/turns/{payload['turn_id']}")
-            self.assertIn(
-                "reports/analysis_report.html",
-                [event["payload"]["path"] for event in payload["events"] if event["type"] == "genbi/artifact/created"],
-            )
+            self.assertFalse(any(event["type"].startswith("genbi/artifact/") for event in payload["events"]))
+            self.assertEqual(payload["events"][-1]["payload"]["error"], "analysis_agent_runner_not_configured")
 
             thread = client.get(f"/api/analysis/threads/{payload['conversation_id']}")
             threads = client.get("/api/analysis/threads")
@@ -138,7 +71,7 @@ class AnalysisApiTest(unittest.TestCase):
             self.assertEqual(thread.status_code, 200)
             self.assertEqual(thread.json()["thread"]["id"], payload["conversation_id"])
             self.assertEqual(thread.json()["turns"][0]["threadId"], payload["conversation_id"])
-            self.assertIn("sql", [item["kind"] for item in thread.json()["items"]])
+            self.assertNotIn("sql", [item["kind"] for item in thread.json()["items"]])
             self.assertEqual(threads.status_code, 200)
             self.assertEqual(threads.json()["threads"][0]["id"], payload["conversation_id"])
             self.assertEqual(turn_detail.status_code, 200)
@@ -191,8 +124,8 @@ class AnalysisApiTest(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn("event: turn/started", response.text)
-            self.assertIn("event: item/completed", response.text)
             self.assertIn("event: turn/completed", response.text)
+            self.assertIn("analysis_agent_runner_not_configured", response.text)
 
     def test_analysis_thread_turn_stream_api_preserves_thread(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -237,7 +170,7 @@ class AnalysisApiTest(unittest.TestCase):
             self.assertIn("codexItemProjections", second_turn.json())
 
 
-    def test_analysis_message_turn_preserves_conversation_and_updates_assets(self) -> None:
+    def test_analysis_message_turn_preserves_conversation_without_synthetic_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             thread_store = ThreadStore(root / "thread-store.jsonl")
@@ -263,18 +196,16 @@ class AnalysisApiTest(unittest.TestCase):
             )
             second_payload = second.json()
             event_types = [event["type"] for event in second_payload["events"]]
-            updated_paths = [event["payload"]["path"] for event in second_payload["events"] if event["type"] == "genbi/artifact/updated"]
             created = next(event for event in second_payload["events"] if event["type"] == "turn/started")
 
             self.assertEqual(second.status_code, 200)
             self.assertEqual(second_payload["conversation_id"], conversation_id)
             self.assertEqual(created["payload"]["conversation_id"], conversation_id)
             self.assertEqual(created["payload"]["turn_kind"], "message")
-            self.assertIn("item/completed", event_types)
-            self.assertIn("reports/updated_report.html", updated_paths)
-            self.assertIn("queries/revised_query.sql", updated_paths)
+            self.assertNotIn("item/completed", event_types)
+            self.assertFalse(any(event["type"].startswith("genbi/artifact/") for event in second_payload["events"]))
 
-    def test_analysis_reply_turn_preserves_conversation_and_updates_assets(self) -> None:
+    def test_analysis_reply_turn_preserves_conversation_without_synthetic_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
             app = create_app(
@@ -299,15 +230,13 @@ class AnalysisApiTest(unittest.TestCase):
             )
             payload = reply.json()
             created = next(event for event in payload["events"] if event["type"] == "turn/started")
-            updated_paths = [event["payload"]["path"] for event in payload["events"] if event["type"] == "genbi/artifact/updated"]
             ask_events = [event for event in payload["events"] if event["type"] == "item/completed" and event["payload"].get("codex_item_type") == "agentQuestion"]
 
             self.assertEqual(reply.status_code, 200)
             self.assertEqual(payload["conversation_id"], conversation_id)
             self.assertEqual(created["payload"]["conversation_id"], conversation_id)
             self.assertEqual(created["payload"]["turn_kind"], "reply")
-            self.assertIn("reports/updated_report.html", updated_paths)
-            self.assertIn("queries/revised_query.sql", updated_paths)
+            self.assertFalse(any(event["type"].startswith("genbi/artifact/") for event in payload["events"]))
             self.assertEqual(ask_events, [])
 
     def test_analysis_asset_api_saves_lists_and_reopens_assets(self) -> None:

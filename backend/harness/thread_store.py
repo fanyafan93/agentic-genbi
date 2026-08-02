@@ -374,8 +374,6 @@ def _codex_item_projections_from_events(
 
 
 def _turn_status(events: list["AgentEvent"]) -> str:
-    if any(event.type == "turn/failed" for event in events):
-        return "failed"
     if any(_is_agent_question_event(event) for event in events):
         return "needs_input"
     completed = next((event for event in reversed(events) if event.type == "turn/completed"), None)

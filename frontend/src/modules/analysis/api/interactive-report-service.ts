@@ -1,5 +1,10 @@
-import type { SavedInteractiveReport } from "../mocks/interactive-report-storage";
 import type { InteractiveReport } from "../types/interactive-report";
+
+export type SavedInteractiveReport = {
+  report: InteractiveReport;
+  version: number;
+  savedAt: string;
+};
 
 type BackendReportSummary = {
   id: string;
