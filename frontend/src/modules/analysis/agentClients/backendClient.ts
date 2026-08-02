@@ -1,10 +1,10 @@
-import type { ArtifactKind } from "@/modules/analysis/types/artifact";
+﻿import type { ArtifactKind } from "@/modules/analysis/types/artifact";
 import type { InteractiveReport } from "@/modules/analysis/types/interactive-report";
 import type { AgentClient, AgentEvent, AgentInput } from "./types";
 
-export type BackendRunEvent = {
+export type BackendTurnEvent = {
   type: string;
-  run_id: string;
+  turn_id: string;
   payload: Record<string, unknown>;
   created_at: string;
 };
@@ -22,7 +22,7 @@ export class BackendAnalysisAgentClient implements AgentClient {
     if (input.kind === "reset") {
       this.cancel();
       this.conversationId = null;
-      yield { type: "conversation-init", executionAttemptId: "analysis-reset", runId: "analysis-reset" };
+      yield { type: "conversation-init", turnId: "analysis-reset" };
       return;
     }
 
@@ -111,7 +111,7 @@ export function getBackendAnalysisRequestTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS;
 }
 
-export async function* readAnalysisSse(response: Response): AsyncIterable<BackendRunEvent> {
+export async function* readAnalysisSse(response: Response): AsyncIterable<BackendTurnEvent> {
   if (!response.body) {
     yield* parseAnalysisSse(await response.text());
     return;
@@ -133,13 +133,13 @@ export async function* readAnalysisSse(response: Response): AsyncIterable<Backen
   yield* parseAnalysisSse(buffer);
 }
 
-export function parseAnalysisSse(text: string): BackendRunEvent[] {
+export function parseAnalysisSse(text: string): BackendTurnEvent[] {
   return text
     .split(/\r?\n\r?\n/)
     .map((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data: ")))
     .filter((lines) => lines.length > 0)
     .map((lines) => lines.map((line) => line.slice(6)).join("\n"))
-    .map((data) => JSON.parse(data) as BackendRunEvent);
+    .map((data) => JSON.parse(data) as BackendTurnEvent);
 }
 
 function getInputQuestion(input: AgentInput): string {
@@ -149,26 +149,23 @@ function getInputQuestion(input: AgentInput): string {
   return "";
 }
 
-export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInput["kind"]): Iterable<AgentEvent> {
+export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentInput["kind"]): Iterable<AgentEvent> {
   let currentAgentNodeId: string | null = null;
-  const compatibilitySources = new Set(events.map((event) => asString(event.payload.compatibility_source_event)).filter(Boolean));
   for (const event of events) {
     const context = getSystemContext(event);
     const method = asString(event.payload.codex_method) || event.type;
     const codexItemType = asString(event.payload.codex_item_type);
     if (event.type === "turn/started" || method === "turn/started") {
-      const executionAttemptId = context.executionAttemptId || event.run_id;
+      const turnId = context.turnId || event.turn_id;
       const conversationId = asString(event.payload.conversation_id);
       const question = asString(event.payload.question);
       if (inputKind === "start") {
-        yield { ...context, type: "conversation-init", executionAttemptId, runId: context.runId, conversationId: conversationId || undefined };
-      } else {
-        yield { ...context, type: "run-init", executionAttemptId, runId: context.runId, conversationId: conversationId || undefined };
+        yield { ...context, type: "conversation-init", turnId, conversationId: conversationId || undefined };
       }
       if (question) {
         yield {
           type: "user",
-          nodeId: `user-${executionAttemptId}`,
+          nodeId: `user-${turnId}`,
           content: question,
           itemId: asString(event.payload.user_item_id) || asString(event.payload.item_id) || undefined,
           ...context,
@@ -177,95 +174,24 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
       continue;
     }
 
-    if (event.type === "analysis.problem.classified") {
-      currentAgentNodeId ||= `agent-${event.run_id}`;
-      yield {
-        type: "debug",
-        title: "本地问题分类",
-        content: JSON.stringify({
-          problem_type: event.payload.problem_type,
-          label: event.payload.label,
-          confidence: event.payload.confidence,
-        }, null, 2),
-        nodeId: currentAgentNodeId,
-        itemId: asString(event.payload.item_id) || undefined,
-        ...context,
-      };
-      continue;
-    }
-
-    if (event.type === "analysis.retrieval.plan") {
-      currentAgentNodeId ||= `agent-${event.run_id}`;
-      yield {
-        type: "debug",
-        title: "候选上下文计划（未执行工具）",
-        content: JSON.stringify(asRecordArray(event.payload.items), null, 2),
-        nodeId: currentAgentNodeId,
-        itemId: asString(event.payload.item_id) || undefined,
-        ...context,
-      };
-      continue;
-    }
-
-    if (event.type === "agent.prompt.created") {
-      currentAgentNodeId ||= `agent-${event.run_id}`;
-      yield {
-        type: "debug",
-        title: "发送给模型的 prompt",
-        content: asString(event.payload.prompt),
-        nodeId: currentAgentNodeId,
-        itemId: asString(event.payload.item_id) || undefined,
-        ...context,
-      };
-      continue;
-    }
-
-    if (event.type === "agent.runner.started" || event.type === "agent.runner.completed") {
-      currentAgentNodeId ||= `agent-${event.run_id}`;
-      yield {
-        type: "step",
-        label: `模型调用：${asString(event.payload.runtime) || "agent runner"}`,
-        state: event.type === "agent.runner.started" ? "running" : "done",
-        nodeId: currentAgentNodeId,
-        itemId: asString(event.payload.item_id) || undefined,
-        ...context,
-      };
-      continue;
-    }
-
-    if (event.type === "agent.runner.raw") {
-      currentAgentNodeId ||= `agent-${event.run_id}`;
-      yield {
-        type: "debug",
-        title: `模型运行事件：${asString(event.payload.phase) || "raw"}`,
-        content: JSON.stringify(event.payload, null, 2),
-        nodeId: currentAgentNodeId,
-        itemId: asString(event.payload.item_id) || undefined,
-        ...context,
-      };
-      continue;
-    }
-
     const isToolItemEvent = (
       (event.type === "item/started" || event.type === "item/completed" || method === "item/started" || method === "item/completed")
       && ["toolCall", "toolResult"].includes(codexItemType)
     );
-    if (isToolItemEvent || event.type === "tool.call.started" || event.type === "tool.call.completed" || event.type === "tool.call.failed") {
-      if (!event.type.startsWith("item/") && compatibilitySources.has(event.type)) continue;
-      currentAgentNodeId ||= `agent-${event.run_id}`;
+    if (isToolItemEvent) {
+      currentAgentNodeId ||= `agent-${event.turn_id}`;
       const toolName = asString(event.payload.tool) || asString(event.payload.name) || "tool";
-      const sourceEventType = asString(event.payload.compatibility_source_event) || event.type;
       yield {
         type: "step",
         label: `工具调用：${toolName}`,
-        state: sourceEventType === "tool.call.started" || event.type === "item/started" ? "running" : "done",
+        state: event.type === "item/started" ? "running" : "done",
         nodeId: currentAgentNodeId,
         itemId: asString(event.payload.item_id) || undefined,
         ...context,
       };
       yield {
         type: "debug",
-        title: `工具事件：${sourceEventType}`,
+        title: `工具事件：${event.type}`,
         content: JSON.stringify(event.payload, null, 2),
         nodeId: currentAgentNodeId,
         itemId: asString(event.payload.item_id) || undefined,
@@ -274,9 +200,8 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
       continue;
     }
 
-    if ((event.type === "item/completed" && method === "item/completed" && codexItemType === "agentMessage") || event.type === "agent.message.created") {
-      if (event.type === "agent.message.created" && compatibilitySources.has(event.type)) continue;
-      currentAgentNodeId ||= `agent-${event.run_id}`;
+    if (event.type === "item/completed" && method === "item/completed" && codexItemType === "agentMessage") {
+      currentAgentNodeId ||= `agent-${event.turn_id}`;
       const content = asString(event.payload.content);
       if (content) {
         yield {
@@ -299,9 +224,8 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
       continue;
     }
 
-    if (event.type === "item/agentMessage/delta" || method === "item/agentMessage/delta" || event.type === "agent.message.delta") {
-      if (event.type === "agent.message.delta" && compatibilitySources.has(event.type)) continue;
-      currentAgentNodeId ||= `agent-${event.run_id}`;
+    if (event.type === "item/agentMessage/delta" || method === "item/agentMessage/delta") {
+      currentAgentNodeId ||= `agent-${event.turn_id}`;
       yield {
         type: "debug",
         title: "模型流式片段",
@@ -320,11 +244,10 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
       continue;
     }
 
-    if ((event.type === "item/completed" && codexItemType === "agentQuestion") || event.type === "agent.question.requested") {
-      if (event.type === "agent.question.requested" && compatibilitySources.has(event.type)) continue;
+    if (event.type === "item/completed" && codexItemType === "agentQuestion") {
       yield {
         type: "ask",
-        nodeId: `ask-${event.run_id}`,
+        nodeId: `ask-${event.turn_id}`,
         question: asString(event.payload.question),
         options: asRecordArray(event.payload.options).map((item) => ({
           id: asString(item.id) || asString(item.label),
@@ -336,8 +259,7 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
       continue;
     }
 
-    if ((event.type === "genbi/artifact/updated" && asString(event.payload.artifactType) === "interactive_report") || event.type === "interactive_report.draft") {
-      if (event.type === "interactive_report.draft" && compatibilitySources.has(event.type)) continue;
+    if (event.type === "genbi/artifact/updated" && asString(event.payload.artifactType) === "interactive_report") {
       const report = asInteractiveReport(event.payload);
       if (report) {
         yield {
@@ -346,14 +268,12 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
           ...context,
           threadId: report.source.threadId,
           turnId: report.source.turnId,
-          runId: report.source.executionAttemptId,
         };
       }
       continue;
     }
 
-    if (event.type === "genbi/artifact/created" || event.type === "genbi/artifact/updated" || event.type === "artifact.created" || event.type === "artifact.updated") {
-      if ((event.type === "artifact.created" || event.type === "artifact.updated") && compatibilitySources.has(event.type)) continue;
+    if (event.type === "genbi/artifact/created" || event.type === "genbi/artifact/updated") {
       const kind = asString(event.payload.kind);
       const path = asString(event.payload.path);
       if (isArtifactKind(kind) && path) {
@@ -368,7 +288,7 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
       continue;
     }
 
-    if (event.type === "run.failed") {
+    if (event.type === "turn/failed") {
       yield { type: "error", message: asString(event.payload.detail) || asString(event.payload.error), ...context };
       yield { type: "done", ...context };
       continue;
@@ -381,18 +301,15 @@ export function* mapBackendEvents(events: BackendRunEvent[], inputKind: AgentInp
   }
 }
 
-function getSystemContext(event: BackendRunEvent) {
-  const runId = asString(event.payload.run_id) || event.run_id;
+function getSystemContext(event: BackendTurnEvent) {
+  const turnId = asString(event.payload.turn_id) || event.turn_id;
   const threadId = asString(event.payload.thread_id) || asString(event.payload.conversation_id);
-  const turnId = asString(event.payload.turn_id) || runId;
   const codexThreadId = asString(event.payload.codex_thread_id);
   const codexTurnId = asString(event.payload.codex_turn_id);
   const codexItemId = asString(event.payload.codex_item_id);
   return {
-    executionAttemptId: runId,
-    runId,
+    turnId,
     threadId: threadId || undefined,
-    turnId: turnId || undefined,
     codexThreadId: codexThreadId || undefined,
     codexTurnId: codexTurnId || undefined,
     codexItemId: codexItemId || undefined,
@@ -433,15 +350,12 @@ function asInteractiveReport(payload: Record<string, unknown>): InteractiveRepor
     || !source
     || typeof source.threadId !== "string"
     || typeof source.turnId !== "string"
-    || (typeof source.executionAttemptId !== "string" && typeof source.runId !== "string")
   ) return null;
-  const executionAttemptId = asString(source.executionAttemptId) || asString(source.runId);
   return {
     ...payload,
     source: {
       ...source,
-      executionAttemptId,
-      runId: asString(source.runId) || executionAttemptId,
+      turnId: asString(source.turnId),
     },
   } as unknown as InteractiveReport;
 }

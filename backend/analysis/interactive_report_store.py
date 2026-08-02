@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,8 +24,6 @@ class InteractiveReportRecord:
     ownerId: str
     sourceThreadId: str
     sourceTurnId: str
-    sourceExecutionAttemptId: str
-    sourceRunId: str
     latestVersion: int
     createdAt: str
     updatedAt: str
@@ -37,8 +35,6 @@ class InteractiveReportVersionRecord:
     version: int
     sourceThreadId: str
     sourceTurnId: str
-    sourceExecutionAttemptId: str
-    sourceRunId: str
     document: dict[str, Any]
     filters: list[dict[str, Any]]
     queries: dict[str, Any]
@@ -67,9 +63,6 @@ class InteractiveReportStore:
 
         now = _now()
         version_number = current_version + 1
-        source = payload["source"]
-        execution_attempt_id = str(source.get("executionAttemptId") or source.get("runId")).strip()
-        compatibility_run_id = str(source.get("runId") or execution_attempt_id).strip()
         report = {
             "id": report_id,
             "title": str(payload["title"]).strip(),
@@ -79,8 +72,6 @@ class InteractiveReportStore:
             "ownerId": str(payload["ownerId"]).strip(),
             "sourceThreadId": str(payload["source"]["threadId"]).strip(),
             "sourceTurnId": str(payload["source"]["turnId"]).strip(),
-            "sourceExecutionAttemptId": execution_attempt_id,
-            "sourceRunId": compatibility_run_id,
             "latestVersion": version_number,
             "createdAt": existing["createdAt"] if existing else now,
             "updatedAt": now,
@@ -90,8 +81,6 @@ class InteractiveReportStore:
             "version": version_number,
             "sourceThreadId": str(payload["source"]["threadId"]).strip(),
             "sourceTurnId": str(payload["source"]["turnId"]).strip(),
-            "sourceExecutionAttemptId": execution_attempt_id,
-            "sourceRunId": compatibility_run_id,
             "document": payload["document"],
             "filters": payload["filters"],
             "queries": payload["queries"],
@@ -136,8 +125,6 @@ class InteractiveReportStore:
             str(report.get("id")): {
                 "sourceThreadId": report.get("sourceThreadId", ""),
                 "sourceTurnId": report.get("sourceTurnId", ""),
-                "sourceExecutionAttemptId": report.get("sourceExecutionAttemptId") or report.get("sourceRunId", ""),
-                "sourceRunId": report.get("sourceRunId", ""),
             }
             for report in reports
         }
@@ -164,8 +151,6 @@ def _validate_payload(payload: dict[str, Any]) -> None:
     for name in ("threadId", "turnId"):
         if not str(source.get(name) or "").strip():
             raise ValueError(f"source.{name} is required.")
-    if not str(source.get("executionAttemptId") or source.get("runId") or "").strip():
-        raise ValueError("source.executionAttemptId is required.")
     if not isinstance(payload.get("document"), dict):
         raise ValueError("document must be an object.")
     for name, expected in (("filters", list), ("queries", dict), ("chartSpecs", dict), ("gridSpecs", dict)):
@@ -174,16 +159,17 @@ def _validate_payload(payload: dict[str, Any]) -> None:
 
 
 def _report_from_dict(payload: dict[str, Any]) -> InteractiveReportRecord:
-    payload.setdefault("sourceExecutionAttemptId", payload.get("sourceRunId", ""))
-    payload.setdefault("sourceRunId", payload.get("sourceExecutionAttemptId", ""))
-    return InteractiveReportRecord(**payload)
+    return InteractiveReportRecord(**_filter_dataclass_payload(payload, InteractiveReportRecord))
 
 
 def _version_from_dict(payload: dict[str, Any]) -> InteractiveReportVersionRecord:
-    payload.setdefault("sourceExecutionAttemptId", payload.get("sourceRunId", ""))
-    payload.setdefault("sourceRunId", payload.get("sourceExecutionAttemptId", ""))
-    return InteractiveReportVersionRecord(**payload)
+    return InteractiveReportVersionRecord(**_filter_dataclass_payload(payload, InteractiveReportVersionRecord))
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _filter_dataclass_payload(payload: dict[str, Any], target: type[Any]) -> dict[str, Any]:
+    allowed = {item.name for item in fields(target)}
+    return {key: value for key, value in payload.items() if key in allowed}

@@ -1,4 +1,4 @@
-export type KnowledgeBaseTab = "all" | "semantic" | "exploration" | "certification" | "tags";
+export type KnowledgeBaseTab = "all" | "semantic" | "certification" | "tags";
 
 export type KnowledgeItemType =
   | "metric_definition"
@@ -11,7 +11,7 @@ export type KnowledgeItemType =
   | "report_logic"
   | "verified_conclusion";
 
-export type KnowledgeSource = "manual" | "exploration" | "import";
+export type KnowledgeSource = "manual" | "import";
 export type KnowledgeStatus = "draft" | "pending" | "approved" | "conflicted" | "expired";
 export type KnowledgeVisibility = "personal" | "team" | "company";
 export type ApprovalRole = "BI 工程师" | "财务" | "运营" | "数据负责人" | "管理层";
@@ -53,7 +53,6 @@ export type KnowledgeBaseItem = {
   relatedResources: string[];
   evidenceRefs: string[];
   sourceQuestion?: string;
-  sourceExplorationId?: string | null;
   createdBy: string;
   owner: string;
   visibility: KnowledgeVisibility;

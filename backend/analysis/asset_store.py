@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,9 +15,7 @@ class AnalysisAssetReopenContext:
     sourceTaskId: str
     sourceConversationId: str
     continuationPrompt: str
-    sourceRunId: str = ""
     targetFileId: str | None = None
-    sourceExecutionAttemptId: str = ""
     sourceCodexThreadId: str | None = None
     sourceCodexTurnId: str | None = None
     sourceCodexItemId: str | None = None
@@ -30,7 +28,6 @@ class AnalysisAssetRecord:
     sourceTaskId: str
     sourceTaskTitle: str
     sourceConversationId: str
-    sourceRunId: str
     assetType: str
     title: str
     label: str
@@ -45,7 +42,6 @@ class AnalysisAssetRecord:
     sourceCodexThreadId: str | None = None
     sourceCodexTurnId: str | None = None
     sourceCodexItemId: str | None = None
-    sourceExecutionAttemptId: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -58,13 +54,11 @@ class ArtifactLineageRecord:
     title: str
     sourceTaskId: str
     sourceConversationId: str
-    sourceRunId: str
     codexThreadId: str | None
     codexTurnId: str | None
     codexItemId: str | None
     createdAt: str
     updatedAt: str
-    sourceExecutionAttemptId: str = ""
 
 
 class AnalysisAssetStore:
@@ -79,8 +73,6 @@ class AnalysisAssetStore:
         source_task_id: str,
         source_task_title: str,
         source_conversation_id: str,
-        source_run_id: str | None = None,
-        source_execution_attempt_id: str | None = None,
         source_codex_thread_id: str | None = None,
         source_codex_turn_id: str | None = None,
         source_codex_item_id: str | None = None,
@@ -95,16 +87,12 @@ class AnalysisAssetStore:
         file_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AnalysisAssetRecord:
-        execution_attempt_id = (source_execution_attempt_id or source_run_id or "").strip()
-        compatibility_run_id = (source_run_id or execution_attempt_id).strip()
         for field_name, value in {
             "asset_id": asset_id,
             "artifact_version_id": artifact_version_id,
             "source_task_id": source_task_id,
             "source_task_title": source_task_title,
             "source_conversation_id": source_conversation_id,
-            "source_execution_attempt_id": execution_attempt_id,
-            "source_run_id": compatibility_run_id,
             "asset_type": asset_type,
             "title": title,
             "label": label,
@@ -118,8 +106,6 @@ class AnalysisAssetStore:
         normalized_reopen_context = AnalysisAssetReopenContext(
             sourceTaskId=reopen_context.sourceTaskId,
             sourceConversationId=reopen_context.sourceConversationId,
-            sourceExecutionAttemptId=(reopen_context.sourceExecutionAttemptId or reopen_context.sourceRunId or execution_attempt_id).strip(),
-            sourceRunId=(reopen_context.sourceRunId or reopen_context.sourceExecutionAttemptId or execution_attempt_id).strip(),
             continuationPrompt=reopen_context.continuationPrompt,
             targetFileId=reopen_context.targetFileId,
             sourceCodexThreadId=reopen_context.sourceCodexThreadId,
@@ -131,7 +117,6 @@ class AnalysisAssetStore:
         existing = self.get_asset(asset_id)
         codex_lineage = _codex_lineage(source_codex_thread_id, source_codex_turn_id, source_codex_item_id)
         record_metadata = dict(metadata or {})
-        record_metadata.setdefault("source_execution_attempt_id", execution_attempt_id)
         if codex_lineage:
             record_metadata["codex_lineage"] = codex_lineage
         record = AnalysisAssetRecord(
@@ -140,8 +125,6 @@ class AnalysisAssetStore:
             sourceTaskId=source_task_id.strip(),
             sourceTaskTitle=source_task_title.strip(),
             sourceConversationId=source_conversation_id.strip(),
-            sourceExecutionAttemptId=execution_attempt_id,
-            sourceRunId=compatibility_run_id,
             sourceCodexThreadId=_optional_text(source_codex_thread_id),
             sourceCodexTurnId=_optional_text(source_codex_turn_id),
             sourceCodexItemId=_optional_text(source_codex_item_id),
@@ -255,11 +238,9 @@ class AnalysisAssetStore:
             if not line.strip():
                 continue
             payload = json.loads(line)
-            payload.setdefault("sourceExecutionAttemptId", payload.get("sourceRunId", ""))
-            payload.setdefault("sourceRunId", payload.get("sourceExecutionAttemptId", ""))
+            payload = _filter_dataclass_payload(payload, AnalysisAssetRecord)
             reopen_context_payload = payload.get("reopenContext", {})
-            reopen_context_payload.setdefault("sourceExecutionAttemptId", reopen_context_payload.get("sourceRunId", ""))
-            reopen_context_payload.setdefault("sourceRunId", reopen_context_payload.get("sourceExecutionAttemptId", ""))
+            reopen_context_payload = _filter_dataclass_payload(reopen_context_payload, AnalysisAssetReopenContext)
             payload["reopenContext"] = AnalysisAssetReopenContext(**reopen_context_payload)
             records.append(AnalysisAssetRecord(**payload))
         return records
@@ -304,15 +285,13 @@ def _codex_lineage(
 
 def _artifact_lineage_from_asset(record: AnalysisAssetRecord) -> ArtifactLineageRecord:
     return ArtifactLineageRecord(
-        artifactId=record.artifactVersionId,
+        artifactId=record.assetId,
         artifactVersionId=record.artifactVersionId,
         assetId=record.assetId,
         assetType=record.assetType,
         title=record.title,
         sourceTaskId=record.sourceTaskId,
         sourceConversationId=record.sourceConversationId,
-        sourceExecutionAttemptId=record.sourceExecutionAttemptId,
-        sourceRunId=record.sourceRunId,
         codexThreadId=record.sourceCodexThreadId,
         codexTurnId=record.sourceCodexTurnId,
         codexItemId=record.sourceCodexItemId,
@@ -324,5 +303,9 @@ def _artifact_lineage_from_asset(record: AnalysisAssetRecord) -> ArtifactLineage
 def _validate_reopen_context(context: AnalysisAssetReopenContext) -> None:
     _require_text("reopen_context.sourceTaskId", context.sourceTaskId)
     _require_text("reopen_context.sourceConversationId", context.sourceConversationId)
-    _require_text("reopen_context.sourceExecutionAttemptId", context.sourceExecutionAttemptId or context.sourceRunId)
     _require_text("reopen_context.continuationPrompt", context.continuationPrompt)
+
+
+def _filter_dataclass_payload(payload: dict[str, Any], target: type[Any]) -> dict[str, Any]:
+    allowed = {item.name for item in fields(target)}
+    return {key: value for key, value in payload.items() if key in allowed}

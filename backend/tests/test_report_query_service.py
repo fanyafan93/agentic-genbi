@@ -104,12 +104,12 @@ class ReportQueryServiceTest(unittest.TestCase):
         service.run(
             CHANNEL_SALES_QUERY_REF,
             {"month": "2026-08"},
-            audit_context={"source": "codex_authorized_snapshot", "run_id": "run_1", "data_egress_authorized": True},
+            audit_context={"source": "codex_authorized_snapshot", "turn_id": "turn_1", "data_egress_authorized": True},
         )
 
         self.assertIsNotNone(audit_store.record)
         self.assertEqual(audit_store.record["query_ref"], CHANNEL_SALES_QUERY_REF)
-        self.assertEqual(audit_store.record["context"], {"source": "codex_authorized_snapshot", "run_id": "run_1", "data_egress_authorized": True})
+        self.assertEqual(audit_store.record["context"], {"source": "codex_authorized_snapshot", "turn_id": "turn_1", "data_egress_authorized": True})
         self.assertNotIn("rows", audit_store.record)
 
 

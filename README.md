@@ -2,45 +2,66 @@
 
 ## 一句话
 
-用户在分析工作台提出业务问题；openai-codex SDK / Codex 编排业务语义库、数据层和受控工具，产出可验证、可复用的分析资产。
+用户在分析工作台提出业务问题；Codex 负责通用 Agent 工程底座，GenBI 负责业务语义、数据权限、受控 SQL 工具、Artifact 版本和治理。
 
 ## 当前方向
 
 ```text
-分析工作台：左侧提出问题、回答追问、查看过程；右侧持续生成和修改当前分析结果。
-业务语义库：让 Agent 看懂数据和业务，包含语义模型和业务知识。
-我的分析：查看自己保存的分析结果和分析模板。
-系统：数据源、权限、安全、模型、工具、审计和成本。
+分析工作台：提出问题、追问、查看过程、生成和修改当前分析结果。
+业务语义库：维护 FineReport 语义案例、指标、字段、关联规则和业务知识。
+我的分析：查看已保存的分析结果、历史版本和分析模板。
+系统：管理数据源、权限、安全、模型、工具、审计和成本。
 ```
 
-不再把“分析”和“知识探索”做成两个并列入口；语义查证是编排层后台能力。
+单一主入口是分析工作台。
+
+## 最终边界
+
+Codex 负责：
+
+- Agent Loop
+- Thread
+- Turn
+- Item
+- 上下文与上下文压缩
+- 工具调度
+- 流式执行事件
+- 中断和追加指令
+- Sandbox / Approval
+- 失败、重试和内部请求尝试
+
+GenBI 负责：
+
+- 用户和租户
+- 数据权限
+- 数据源
+- FineReport 语义案例
+- 指标与关联规则
+- 受控 SQL 工具
+- Artifact
+- Artifact 版本和血缘
+- 分享、发布和治理
 
 ## 目标架构
 
 ```text
-交互层：统一分析工作台。
-编排层：openai-codex Python SDK / Codex，负责规划、执行、反思、工具调度和事件流。
-语义层：业务语义库，包含语义模型和业务知识。
-数据层：只读、安全、可审计地访问 MySQL、Doris、报表、ETL、金蝶等数据源。
-Artifact 层：版本化保存报告、图表、SQL、代码、数据集快照、过程和 SKILL.md。
-治理层：RBAC/RLS、敏感字段、审批、发布、审计、成本和运行安全边界。
+交互层：统一分析工作台
+Codex：Agent Loop / Thread / Turn / Item / 上下文 / 工具调度 / 事件流
+语义层：业务语义库，包含 FineReport 语义案例、指标和业务知识
+数据层：只读、安全、可审计地访问 MySQL、Doris、报表、ETL、金蝶等数据源
+Artifact 层：版本化保存报告、图表、SQL、数据快照、分析路径和 SKILL.md
+治理层：RBAC / RLS、敏感字段、审批、发布、审计、成本和运行安全边界
 ```
 
-MiniMax、OpenAI-compatible 或其他模型只是 Codex 的 model adapter，不是系统架构本身。能用 Codex 的，绝不自研；本项目只做业务语义、数据安全、分析资产治理、前端体验和 Codex 适配。
-
-## 最终边界
-
-Codex 负责 Agent Loop、Thread、Turn、Item、上下文、上下文压缩、工具调度、流式执行事件、中断和追加指令、Sandbox / Approval 基础能力。
-
-GenBI 负责用户和租户、数据权限、数据源、FineReport 语义案例、指标与关联规则、受控 SQL 工具、Artifact、Artifact 版本和血缘、分享、发布和治理。
+MiniMax、OpenAI-compatible 或其他模型只是 Codex 的 model adapter，不是系统架构本身。能用 Codex 的能力，就不在 GenBI 里重复实现。
 
 ## 当前实现快照
 
-- 前端：Next.js + TypeScript。分析工作台提供左侧对话、右侧交互式分析结果；结果以 Puck JSON 描述布局，ECharts / AG Grid 分别渲染图表与表格，并优先读写后端报告版本接口。
-- 后端：FastAPI，分析工作台主入口已收敛到 Thread/Turn API / SSE；资源库工具、数据库只读工具、知识记录、分析资产最小存储已可用；GenBI Thread 映射、Codex Item projection 和交互式报告/版本已写入 Postgres；分析 runner 已有 openai-codex Python SDK 最小适配。
+- 前端：Next.js + TypeScript。分析工作台提供左侧分析线程和右侧交互式分析结果；结果以 Puck JSON 描述布局，ECharts / AG Grid 渲染图表与表格，并优先读写后端报告版本接口。
+- 后端：FastAPI。分析工作台主入口收敛到 Codex Thread / Turn / Item；资源库工具、数据库只读工具、知识记录、分析资产最小存储、Codex Item projection、交互式报告版本已经可用。
 - 登录：Auth.js + 飞书 OAuth + PostgreSQL session。
 - 运行：Docker Compose 启动 frontend、backend、postgres。
-- 仍未完成：Codex 工具/MCP/Skill 接入、完整业务语义库持久化、完整 Artifact 治理、团队权限/RLS、生产数据源治理。
+- 待完成：Codex 工具/MCP/Skill 接入、完整业务语义库持久化、完整 Artifact 治理、团队权限/RLS、生产数据源治理。
 
 详细状态看 `docs/plans/current.md`，不要从历史段落推断当前完成度。
 
@@ -76,14 +97,12 @@ NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME=backend
 GENBI_PUBLIC_API_BASE_URL=http://192.168.101.12:8000
 
 GENBI_ANALYSIS_RUNTIME=codex
-GENBI_EXPLORATION_RUNTIME=local
 GENBI_LLM_PROVIDER=minimax
 GENBI_ANALYSIS_MODEL=MiniMax-M3
-GENBI_EXPLORATION_MODEL=MiniMax-M3
 MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 MINIMAX_API_KEY=...
-GENBI_CODEX_PROVIDER=minimax # 可省略；GENBI_LLM_PROVIDER=minimax 时自动映射
-GENBI_CODEX_API_KEY=...      # OpenAI/Codex 时使用；MiniMax 默认复用 MINIMAX_API_KEY
+GENBI_CODEX_PROVIDER=minimax
+GENBI_CODEX_API_KEY=...
 ```
 
 修改 `.env` 后，`docker compose restart` 不一定重新注入变量；需要：
@@ -96,10 +115,10 @@ docker compose up -d --force-recreate --no-deps backend
 
 ```bash
 cd frontend
-cmd /c npm run test
-cmd /c npm run build
+npm.cmd test
+npm.cmd run build
 
-python -m unittest discover -s backend\tests -v
+python -m unittest discover backend\tests -v
 docker compose config
 ```
 
@@ -110,4 +129,4 @@ docker compose config
 - `docs/architecture/overview.md`：架构边界。
 - `docs/plans/current.md`：当前分支状态。
 
-文档只保留能帮助人继续做事的信息；历史过程交给 Git。
+文档只保留能帮助继续做事的信息；历史过程交给 Git。

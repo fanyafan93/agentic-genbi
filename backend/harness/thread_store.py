@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from backend.exploration.run_service import ExplorationRunEvent
+    from backend.harness.events import AgentEvent
 
 
 DEFAULT_THREAD_STORE_PATH = Path(".resource-index/thread-store.jsonl")
 
-ThreadProductKind = Literal["analysis_task", "knowledge_exploration", "asset_continuation"]
+ThreadProductKind = Literal["analysis_task", "asset_continuation"]
 TurnInputKind = Literal["start", "message", "reply"]
 
 
@@ -37,7 +37,6 @@ class TurnRecord:
     inputKind: TurnInputKind
     question: str
     status: str
-    runIds: list[str]
     createdAt: str
     updatedAt: str
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -46,25 +45,10 @@ class TurnRecord:
 
 
 @dataclass(frozen=True)
-class RunRecord:
-    id: str
-    threadId: str
-    turnId: str
-    status: str
-    startedAt: str | None
-    completedAt: str | None
-    eventCount: int
-    itemCount: int
-    error: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class ItemRecord:
     id: str
     threadId: str
     turnId: str
-    runId: str
     kind: str
     eventType: str
     payload: dict[str, Any]
@@ -83,40 +67,35 @@ class CodexItemProjectionRecord:
     completedAt: str | None = None
     genbiThreadId: str | None = None
     genbiTurnId: str | None = None
-    genbiRunId: str | None = None
 
 
 class ThreadStore:
     def __init__(self, path: Path = DEFAULT_THREAD_STORE_PATH) -> None:
         self.path = path
 
-    def save_run(
+    def save_turn(
         self,
         *,
         thread_id: str,
         turn_id: str,
-        run_id: str,
         question: str,
         input_kind: TurnInputKind,
         product_kind: ThreadProductKind,
         user_id: str | None,
-        events: list["ExplorationRunEvent"],
+        events: list["AgentEvent"],
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not thread_id.strip():
             raise ValueError("thread_id is required.")
         if not turn_id.strip():
             raise ValueError("turn_id is required.")
-        if not run_id.strip():
-            raise ValueError("run_id is required.")
-
         state = self._read_state()
         existing_thread = state["threads"].get(thread_id)
         existing_turn = state["turns"].get(turn_id)
         started_at = events[0].created_at if events else None
         completed_at = events[-1].created_at if events else started_at
-        status = _run_status(events)
-        thread_status = "needs_input" if any(event.type == "agent.question.requested" for event in events) else status
+        status = _turn_status(events)
+        thread_status = "needs_input" if any(_is_agent_question_event(event) for event in events) else status
         merged_metadata = {**(existing_thread.metadata if existing_thread else {}), **(metadata or {})}
         codex_thread_id = _thread_codex_thread_id(
             merged_metadata,
@@ -127,15 +106,14 @@ class ThreadStore:
             merged_metadata["codex_thread_id"] = codex_thread_id
         if codex_turn_id:
             merged_metadata["codex_turn_id"] = codex_turn_id
-        item_records = _items_from_events(events, thread_id=thread_id, turn_id=turn_id, run_id=run_id)
+        item_records = _items_from_events(events, thread_id=thread_id, turn_id=turn_id)
         codex_item_projections = _codex_item_projections_from_events(
             events,
             thread_id=thread_id,
             turn_id=turn_id,
-            run_id=run_id,
             default_codex_thread_id=codex_thread_id,
         )
-        title = _first_payload_value(events, "agent.title.generated", "title") or (existing_thread.title if existing_thread else None)
+        title = _first_payload_value(events, "turn/started", "title") or (existing_thread.title if existing_thread else None)
         now = completed_at or started_at or ""
 
         thread = ThreadRecord(
@@ -151,49 +129,30 @@ class ThreadStore:
             workspaceId=_thread_scope_value(merged_metadata, "workspace_id", "workspaceId", existing_value=existing_thread.workspaceId if existing_thread else None),
             codexThreadId=codex_thread_id,
         )
-        run_ids = [*(existing_turn.runIds if existing_turn else [])]
-        if run_id not in run_ids:
-            run_ids.append(run_id)
         turn = TurnRecord(
             id=turn_id,
             threadId=thread_id,
             inputKind=input_kind,
             question=question,
             status=thread_status,
-            runIds=run_ids,
             createdAt=existing_turn.createdAt if existing_turn else (started_at or now),
             updatedAt=now,
             metadata={**(existing_turn.metadata if existing_turn else {}), **merged_metadata},
             codexThreadId=codex_thread_id or (existing_turn.codexThreadId if existing_turn else None),
             codexTurnId=codex_turn_id or (existing_turn.codexTurnId if existing_turn else None),
         )
-        run = RunRecord(
-            id=run_id,
-            threadId=thread_id,
-            turnId=turn_id,
-            status=status,
-            startedAt=started_at,
-            completedAt=completed_at,
-            eventCount=len(events),
-            itemCount=len(item_records),
-            error=_run_error(events),
-            metadata=metadata or {},
-        )
-
         state["threads"][thread_id] = thread
         state["turns"][turn_id] = turn
-        state["runs"][run_id] = run
-        state["items"] = [item for item in state["items"] if item.runId != run_id]
+        state["items"] = [item for item in state["items"] if not (item.threadId == thread_id and item.turnId == turn_id)]
         state["items"].extend(item_records)
         state["codex_item_projections"] = [
-            item for item in state["codex_item_projections"] if item.genbiRunId != run_id
+            item for item in state["codex_item_projections"] if not (item.genbiThreadId == thread_id and item.genbiTurnId == turn_id)
         ]
         state["codex_item_projections"].extend(codex_item_projections)
         self._write_state(state)
         return {
             "thread": asdict(thread),
             "turn": asdict(turn),
-            "run": asdict(run),
             "items": [asdict(item) for item in item_records],
             "codexItemProjections": [asdict(item) for item in codex_item_projections],
         }
@@ -205,8 +164,6 @@ class ThreadStore:
             return None
         turns = [turn for turn in state["turns"].values() if turn.threadId == thread_id]
         turns.sort(key=lambda item: item.createdAt)
-        runs = [run for run in state["runs"].values() if run.threadId == thread_id]
-        runs.sort(key=lambda item: item.startedAt or "")
         items = [item for item in state["items"] if item.threadId == thread_id]
         items.sort(key=lambda item: item.createdAt)
         codex_item_projections = [item for item in state["codex_item_projections"] if item.genbiThreadId == thread_id]
@@ -214,7 +171,6 @@ class ThreadStore:
         return {
             "thread": asdict(thread),
             "turns": [asdict(item) for item in turns],
-            "runs": [asdict(item) for item in runs],
             "items": [asdict(item) for item in items],
             "codexItemProjections": [asdict(item) for item in codex_item_projections],
         }
@@ -225,8 +181,6 @@ class ThreadStore:
         turn = state["turns"].get(turn_id)
         if not thread or not turn or turn.threadId != thread_id:
             return None
-        execution_attempts = [run for run in state["runs"].values() if run.turnId == turn_id and run.threadId == thread_id]
-        execution_attempts.sort(key=lambda item: item.startedAt or "")
         items = [item for item in state["items"] if item.turnId == turn_id and item.threadId == thread_id]
         items.sort(key=lambda item: item.createdAt)
         codex_item_projections = [
@@ -238,7 +192,6 @@ class ThreadStore:
         return {
             "thread": asdict(thread),
             "turn": asdict(turn),
-            "executionAttempts": [asdict(item) for item in execution_attempts],
             "items": [asdict(item) for item in items],
             "codexItemProjections": [asdict(item) for item in codex_item_projections],
         }
@@ -287,33 +240,18 @@ class ThreadStore:
             "updatedAt": thread.updatedAt,
         }
 
-    def get_run(self, run_id: str) -> dict[str, Any] | None:
+    def get_turn_events(self, turn_id: str) -> list[dict[str, Any]]:
         state = self._read_state()
-        run = state["runs"].get(run_id)
-        if not run:
-            return None
-        items = [item for item in state["items"] if item.runId == run_id]
+        items = [item for item in state["items"] if item.turnId == turn_id]
         items.sort(key=lambda item: item.createdAt)
-        codex_item_projections = [item for item in state["codex_item_projections"] if item.genbiRunId == run_id]
-        codex_item_projections.sort(key=lambda item: item.createdAt)
-        return {
-            "run": asdict(run),
-            "items": [asdict(item) for item in items],
-            "codexItemProjections": [asdict(item) for item in codex_item_projections],
-        }
-
-    def get_run_events(self, run_id: str) -> list[dict[str, Any]]:
-        run = self.get_run(run_id)
-        if not run:
-            return []
         return [
             {
                 "type": item["eventType"],
-                "run_id": item["runId"],
+                "turn_id": item["turnId"],
                 "payload": item["payload"],
                 "created_at": item["createdAt"],
             }
-            for item in run["items"]
+            for item in [asdict(item) for item in items]
         ]
 
     def list_threads(self, *, limit: int = 50, product_kind: ThreadProductKind | None = None) -> list[dict[str, Any]]:
@@ -330,7 +268,7 @@ class ThreadStore:
         return count
 
     def _read_state(self) -> dict[str, Any]:
-        state = {"threads": {}, "turns": {}, "runs": {}, "items": [], "codex_item_projections": []}
+        state = {"threads": {}, "turns": {}, "items": [], "codex_item_projections": []}
         for record in self._read_raw():
             record_type = record.get("record_type")
             payload = dict(record.get("payload") or {})
@@ -342,9 +280,6 @@ class ThreadStore:
                 payload = _normalize_turn_payload(payload)
                 item = TurnRecord(**payload)
                 state["turns"][item.id] = item
-            elif record_type == "run":
-                item = RunRecord(**payload)
-                state["runs"][item.id] = item
             elif record_type == "item":
                 state["items"].append(ItemRecord(**payload))
             elif record_type == "codex_item_projection":
@@ -367,8 +302,6 @@ class ThreadStore:
                 _write_record(file, "thread", asdict(item))
             for item in sorted(state["turns"].values(), key=lambda value: value.createdAt):
                 _write_record(file, "turn", asdict(item))
-            for item in sorted(state["runs"].values(), key=lambda value: value.startedAt or ""):
-                _write_record(file, "run", asdict(item))
             for item in sorted(state["items"], key=lambda value: value.createdAt):
                 _write_record(file, "item", asdict(item))
             for item in sorted(state["codex_item_projections"], key=lambda value: value.createdAt):
@@ -381,11 +314,10 @@ def _write_record(file: Any, record_type: str, payload: dict[str, Any]) -> None:
 
 
 def _items_from_events(
-    events: list["ExplorationRunEvent"],
+    events: list["AgentEvent"],
     *,
     thread_id: str,
     turn_id: str,
-    run_id: str,
 ) -> list[ItemRecord]:
     items = []
     for event in events:
@@ -398,7 +330,6 @@ def _items_from_events(
                 id=str(item_id),
                 threadId=str(event.payload.get("thread_id") or thread_id),
                 turnId=str(event.payload.get("turn_id") or turn_id),
-                runId=str(event.payload.get("run_id") or run_id),
                 kind=str(item_kind),
                 eventType=event.type,
                 payload=dict(event.payload),
@@ -409,11 +340,10 @@ def _items_from_events(
 
 
 def _codex_item_projections_from_events(
-    events: list["ExplorationRunEvent"],
+    events: list["AgentEvent"],
     *,
     thread_id: str,
     turn_id: str,
-    run_id: str,
     default_codex_thread_id: str | None,
 ) -> list[CodexItemProjectionRecord]:
     projections: dict[str, CodexItemProjectionRecord] = {}
@@ -439,37 +369,33 @@ def _codex_item_projections_from_events(
             completedAt=event.created_at if completed else (existing.completedAt if existing else None),
             genbiThreadId=thread_id,
             genbiTurnId=turn_id,
-            genbiRunId=run_id,
         )
     return list(projections.values())
 
 
-def _run_status(events: list["ExplorationRunEvent"]) -> str:
-    if any(event.type == "run.failed" for event in events):
+def _turn_status(events: list["AgentEvent"]) -> str:
+    if any(event.type == "turn/failed" for event in events):
         return "failed"
-    if any(event.type == "agent.question.requested" for event in events):
+    if any(_is_agent_question_event(event) for event in events):
         return "needs_input"
-    completed = next((event for event in reversed(events) if event.type == "run.completed"), None)
+    completed = next((event for event in reversed(events) if event.type == "turn/completed"), None)
     if completed:
         return str(completed.payload.get("status") or "complete")
     return "running"
 
 
-def _run_error(events: list["ExplorationRunEvent"]) -> str | None:
-    failed = next((event for event in reversed(events) if event.type in {"run.failed", "agent.runner.failed"}), None)
-    if not failed:
-        return None
-    return str(failed.payload.get("detail") or failed.payload.get("error") or "unknown_error")
+def _is_agent_question_event(event: "AgentEvent") -> bool:
+    return event.type == "item/completed" and event.payload.get("codex_item_type") == "agentQuestion"
 
 
-def _first_payload_value(events: list["ExplorationRunEvent"], event_type: str, key: str) -> Any:
+def _first_payload_value(events: list["AgentEvent"], event_type: str, key: str) -> Any:
     for event in events:
         if event.type == event_type and key in event.payload:
             return event.payload[key]
     return None
 
 
-def _latest_payload_value(events: list["ExplorationRunEvent"], key: str) -> Any:
+def _latest_payload_value(events: list["AgentEvent"], key: str) -> Any:
     for event in reversed(events):
         if key in event.payload:
             return event.payload[key]

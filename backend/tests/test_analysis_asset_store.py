@@ -17,7 +17,6 @@ class AnalysisAssetStoreTest(unittest.TestCase):
             context = AnalysisAssetReopenContext(
                 sourceTaskId="analysis_task_run_123",
                 sourceConversationId="conv_analysis_123",
-                sourceRunId="run_analysis_123",
                 continuationPrompt="continue from report",
                 targetFileId="reports-quick-report-html",
                 sourceCodexThreadId="codex_thread_123",
@@ -31,7 +30,6 @@ class AnalysisAssetStoreTest(unittest.TestCase):
                 source_task_id="analysis_task_run_123",
                 source_task_title="first purchase repurchase",
                 source_conversation_id="conv_analysis_123",
-                source_run_id="run_analysis_123",
                 source_codex_thread_id="codex_thread_123",
                 source_codex_turn_id="codex_turn_123",
                 source_codex_item_id="codex_item_report",
@@ -66,7 +64,8 @@ class AnalysisAssetStoreTest(unittest.TestCase):
             lineage = store.list_artifact_lineage(codex_item_id="codex_item_report")
             self.assertEqual(len(lineage), 1)
             self.assertEqual(lineage[0].assetId, "asset_report")
-            self.assertEqual(lineage[0].artifactId, "artifact_version_report_v1")
+            self.assertEqual(lineage[0].artifactId, "asset_report")
+            self.assertEqual(lineage[0].artifactVersionId, "artifact_version_report_v1")
             self.assertEqual(lineage[0].codexThreadId, "codex_thread_123")
             self.assertEqual(lineage[0].codexTurnId, "codex_turn_123")
             self.assertEqual(lineage[0].codexItemId, "codex_item_report")
@@ -77,7 +76,6 @@ class AnalysisAssetStoreTest(unittest.TestCase):
             context = AnalysisAssetReopenContext(
                 sourceTaskId="analysis_task_1",
                 sourceConversationId="conv_analysis_1",
-                sourceRunId="run_analysis_1",
                 continuationPrompt="continue",
             )
 
@@ -87,7 +85,6 @@ class AnalysisAssetStoreTest(unittest.TestCase):
                 source_task_id="analysis_task_1",
                 source_task_title="task",
                 source_conversation_id="conv_analysis_1",
-                source_run_id="run_analysis_1",
                 asset_type="sql",
                 title="candidate.sql",
                 label="sql",
@@ -103,7 +100,6 @@ class AnalysisAssetStoreTest(unittest.TestCase):
                 source_task_id="analysis_task_1",
                 source_task_title="task",
                 source_conversation_id="conv_analysis_1",
-                source_run_id="run_analysis_2",
                 asset_type="sql",
                 title="candidate.sql",
                 label="sql",
@@ -114,7 +110,6 @@ class AnalysisAssetStoreTest(unittest.TestCase):
                 reopen_context=AnalysisAssetReopenContext(
                     sourceTaskId="analysis_task_1",
                     sourceConversationId="conv_analysis_1",
-                    sourceRunId="run_analysis_2",
                     continuationPrompt="continue from revised query",
                 ),
             )
@@ -123,16 +118,17 @@ class AnalysisAssetStoreTest(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(updated.artifactVersionId, "artifact_version_sql_v2")
             self.assertEqual(records[0].status, "reusable")
-            self.assertEqual(records[0].sourceRunId, "run_analysis_2")
 
-    def test_save_asset_accepts_execution_attempt_without_run_mirror(self) -> None:
+    def test_save_asset_uses_codex_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = AnalysisAssetStore(Path(temp_dir) / "assets.jsonl")
             context = AnalysisAssetReopenContext(
                 sourceTaskId="analysis_task_1",
                 sourceConversationId="conv_analysis_1",
-                sourceExecutionAttemptId="attempt_analysis_1",
                 continuationPrompt="continue",
+                sourceCodexThreadId="codex_thread_1",
+                sourceCodexTurnId="codex_turn_1",
+                sourceCodexItemId="codex_item_1",
             )
 
             record = store.save_asset(
@@ -141,7 +137,9 @@ class AnalysisAssetStoreTest(unittest.TestCase):
                 source_task_id="analysis_task_1",
                 source_task_title="task",
                 source_conversation_id="conv_analysis_1",
-                source_execution_attempt_id="attempt_analysis_1",
+                source_codex_thread_id="codex_thread_1",
+                source_codex_turn_id="codex_turn_1",
+                source_codex_item_id="codex_item_1",
                 asset_type="report",
                 title="analysis_report.html",
                 label="report",
@@ -152,10 +150,9 @@ class AnalysisAssetStoreTest(unittest.TestCase):
                 reopen_context=context,
             )
 
-            self.assertEqual(record.sourceExecutionAttemptId, "attempt_analysis_1")
-            self.assertEqual(record.sourceRunId, "attempt_analysis_1")
-            self.assertEqual(record.reopenContext.sourceExecutionAttemptId, "attempt_analysis_1")
-            self.assertEqual(record.reopenContext.sourceRunId, "attempt_analysis_1")
+            self.assertEqual(record.sourceCodexThreadId, "codex_thread_1")
+            self.assertEqual(record.sourceCodexTurnId, "codex_turn_1")
+            self.assertEqual(record.sourceCodexItemId, "codex_item_1")
 
 
 if __name__ == "__main__":

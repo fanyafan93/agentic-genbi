@@ -1,11 +1,8 @@
-import type { InteractiveReport } from "../types/interactive-report";
+﻿import type { InteractiveReport } from "../types/interactive-report";
 
 export type AgentEventSystemContext = {
   threadId?: string;
   turnId?: string;
-  executionAttemptId?: string;
-  /** Compatibility mirror for the old Run-based contract. */
-  runId?: string;
   itemId?: string;
   codexThreadId?: string;
   codexTurnId?: string;
@@ -13,8 +10,7 @@ export type AgentEventSystemContext = {
 };
 
 export type AgentEvent =
-  | ({ type: "conversation-init"; executionAttemptId: string; runId?: string; conversationId?: string; question?: string } & AgentEventSystemContext)
-  | ({ type: "run-init"; executionAttemptId: string; runId?: string; conversationId?: string } & AgentEventSystemContext)
+  | ({ type: "conversation-init"; turnId: string; conversationId?: string; question?: string } & AgentEventSystemContext)
   | ({ type: "user"; nodeId: string; content: string } & AgentEventSystemContext)
   | ({ type: "agent"; nodeId: string; content: string; mode?: "delta" | "replace" } & AgentEventSystemContext)
   | ({ type: "debug"; nodeId: string; title: string; content: string } & AgentEventSystemContext)

@@ -10,8 +10,6 @@ type BackendReportSummary = {
   ownerId: string;
   sourceThreadId: string;
   sourceTurnId: string;
-  sourceExecutionAttemptId?: string;
-  sourceRunId?: string;
   latestVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -22,8 +20,6 @@ type BackendReportVersion = {
   version: number;
   sourceThreadId: string;
   sourceTurnId: string;
-  sourceExecutionAttemptId?: string;
-  sourceRunId?: string;
   document: InteractiveReport["document"];
   filters: InteractiveReport["filters"];
   queries: InteractiveReport["queries"];
@@ -37,8 +33,6 @@ export type InteractiveReportVersionSummary = {
   version: number;
   sourceThreadId: string;
   sourceTurnId: string;
-  sourceExecutionAttemptId?: string;
-  sourceRunId?: string;
   createdAt: string;
 };
 
@@ -105,7 +99,6 @@ async function readJson<T>(response: Response): Promise<T> {
 
 function toSavedInteractiveReport(payload: BackendReportDetailResponse): SavedInteractiveReport {
   const { report, version } = payload;
-  const executionAttemptId = version.sourceExecutionAttemptId ?? version.sourceRunId ?? "";
   return {
     report: {
       id: report.id,
@@ -122,8 +115,6 @@ function toSavedInteractiveReport(payload: BackendReportDetailResponse): SavedIn
       source: {
         threadId: version.sourceThreadId,
         turnId: version.sourceTurnId,
-        executionAttemptId,
-        runId: version.sourceRunId ?? executionAttemptId,
       },
     },
     version: version.version,

@@ -6,9 +6,6 @@ export type AnalysisAssetVisibility = "private" | "team" | "org";
 export type AnalysisAssetReopenContext = {
   sourceTaskId: string;
   sourceConversationId: string;
-  sourceExecutionAttemptId: string;
-  /** Compatibility mirror for the old Run-based contract. */
-  sourceRunId?: string;
   continuationPrompt: string;
   targetFileId?: string;
   sourceCodexThreadId?: string;
@@ -22,9 +19,6 @@ export type AnalysisAssetLibraryEntry = {
   sourceTaskId: string;
   sourceTaskTitle: string;
   sourceConversationId: string;
-  sourceExecutionAttemptId: string;
-  /** Compatibility mirror for the old Run-based contract. */
-  sourceRunId: string;
   sourceCodexThreadId?: string;
   sourceCodexTurnId?: string;
   sourceCodexItemId?: string;
@@ -45,9 +39,6 @@ export type AnalysisAssetSaveRequest = {
   sourceTaskId: string;
   sourceTaskTitle: string;
   sourceConversationId: string;
-  sourceExecutionAttemptId: string;
-  /** Compatibility mirror for the old Run-based contract. */
-  sourceRunId?: string;
   sourceCodexThreadId?: string;
   sourceCodexTurnId?: string;
   sourceCodexItemId?: string;
@@ -67,9 +58,6 @@ export type AnalysisAssetSaveResult = {
 export type AnalysisAssetSourceContext = {
   sourceTaskId: string;
   sourceConversationId: string;
-  sourceExecutionAttemptId?: string;
-  /** Compatibility mirror for the old Run-based contract. */
-  sourceRunId?: string;
   sourceCodexThreadId?: string;
   sourceCodexTurnId?: string;
   sourceCodexItemId?: string;
@@ -107,12 +95,6 @@ function buildEntry(
   sourceContext: AnalysisAssetSourceContext,
   savedAssetIds: string[],
 ): AnalysisAssetLibraryEntry {
-  const baseExecutionAttemptId = sourceContext.sourceExecutionAttemptId ?? sourceContext.sourceRunId;
-  if (!baseExecutionAttemptId) {
-    throw new Error("sourceExecutionAttemptId is required.");
-  }
-  const sourceExecutionAttemptId = asset.intent === "edit-skill" ? `${baseExecutionAttemptId}_skill` : baseExecutionAttemptId;
-  const sourceRunId = sourceExecutionAttemptId;
   const latestVersion = getLatestVersion(asset);
   return {
     assetId: `asset_mock_${asset.id}`,
@@ -120,8 +102,6 @@ function buildEntry(
     sourceTaskId: sourceContext.sourceTaskId,
     sourceTaskTitle: taskTitle,
     sourceConversationId: sourceContext.sourceConversationId,
-    sourceExecutionAttemptId,
-    sourceRunId,
     sourceCodexThreadId: sourceContext.sourceCodexThreadId,
     sourceCodexTurnId: sourceContext.sourceCodexTurnId,
     sourceCodexItemId: sourceContext.sourceCodexItemId,
@@ -136,8 +116,6 @@ function buildEntry(
     reopenContext: {
       sourceTaskId: sourceContext.sourceTaskId,
       sourceConversationId: sourceContext.sourceConversationId,
-      sourceExecutionAttemptId,
-      sourceRunId,
       continuationPrompt: getContinuationPrompt(asset),
       targetFileId: asset.fileId,
       sourceCodexThreadId: sourceContext.sourceCodexThreadId,
@@ -171,8 +149,6 @@ export function saveAnalysisAssetMock(
     sourceTaskId: entry.sourceTaskId,
     sourceTaskTitle: entry.sourceTaskTitle,
     sourceConversationId: entry.sourceConversationId,
-    sourceExecutionAttemptId: entry.sourceExecutionAttemptId,
-    sourceRunId: entry.sourceRunId,
     sourceCodexThreadId: entry.sourceCodexThreadId,
     sourceCodexTurnId: entry.sourceCodexTurnId,
     sourceCodexItemId: entry.sourceCodexItemId,

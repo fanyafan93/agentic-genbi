@@ -62,25 +62,25 @@ def check_runtime_env(env_file: str | None = None) -> dict[str, Any]:
 
 
 def _check_llm() -> EnvCheck:
-    runtime = os.getenv("GENBI_EXPLORATION_RUNTIME", "local").lower()
+    runtime = os.getenv("GENBI_ANALYSIS_RUNTIME", "local").lower()
     provider = os.getenv("GENBI_LLM_PROVIDER", "openai").strip().lower() or "openai"
     api_key = _llm_api_key(provider)
-    model = os.getenv("GENBI_EXPLORATION_MODEL", "gpt-4.1-mini" if provider == "openai" else "").strip()
+    model = os.getenv("GENBI_ANALYSIS_MODEL", "gpt-4.1-mini" if provider == "openai" else "").strip()
     base_url = _llm_base_url(provider)
-    if runtime not in {"openai", "llm"}:
-        return EnvCheck("llm", True, "LLM Runner 未启用，当前使用本地探索事件服务。", f"GENBI_EXPLORATION_RUNTIME={runtime}; provider={provider}")
+    if runtime not in {"codex", "openai", "llm"}:
+        return EnvCheck("llm", True, "LLM runtime is not enabled; analysis uses the local fallback.", f"GENBI_ANALYSIS_RUNTIME={runtime}; provider={provider}")
     if provider not in {"openai", "minimax"}:
-        return EnvCheck("llm", False, "LLM provider 暂不支持。", f"provider={provider}; supported=openai,minimax")
+        return EnvCheck("llm", False, "LLM provider is not supported.", f"provider={provider}; supported=openai,minimax")
     if not api_key:
-        return EnvCheck("llm", False, f"已启用 LLM Runner，但缺少 {_llm_api_key_name(provider)}。", f"provider={provider}")
+        return EnvCheck("llm", False, f"LLM runtime is enabled, but {_llm_api_key_name(provider)} is missing.", f"provider={provider}")
     if not model:
-        return EnvCheck("llm", False, "已启用 LLM Runner，但缺少 GENBI_EXPLORATION_MODEL。", f"provider={provider}")
+        return EnvCheck("llm", False, "LLM runtime is enabled, but GENBI_ANALYSIS_MODEL is missing.", f"provider={provider}")
     if provider == "minimax" and not base_url:
-        return EnvCheck("llm", False, "已启用 MiniMax provider，但缺少 MINIMAX_BASE_URL 或 GENBI_LLM_BASE_URL。", f"model={model}; key={_mask_secret(api_key)}")
+        return EnvCheck("llm", False, "MiniMax provider is enabled, but MINIMAX_BASE_URL or GENBI_LLM_BASE_URL is missing.", f"model={model}; key={_mask_secret(api_key)}")
     detail = f"provider={provider}; model={model}; key={_mask_secret(api_key)}"
     if base_url:
         detail += f"; base_url={base_url}"
-    return EnvCheck("llm", True, "LLM Runner 配置存在。", detail)
+    return EnvCheck("llm", True, "LLM runtime configuration exists.", detail)
 
 
 def _check_mysql() -> EnvCheck:
@@ -110,8 +110,8 @@ def _check_resource_library() -> EnvCheck:
 def _check_frontend_api_base() -> EnvCheck:
     value = os.getenv("NEXT_PUBLIC_GENBI_API_BASE_URL")
     if value:
-        return EnvCheck("frontend_api_base", True, "前端探索 API 地址已配置。", value)
-    return EnvCheck("frontend_api_base", False, "缺少 NEXT_PUBLIC_GENBI_API_BASE_URL，知识探索前端不会使用本地模拟降级。")
+        return EnvCheck("frontend_api_base", True, "Frontend analysis API base URL is configured.", value)
+    return EnvCheck("frontend_api_base", False, "缺少 NEXT_PUBLIC_GENBI_API_BASE_URL，分析工作台前端不会使用本地模拟降级。")
 
 
 def _check_cost_config() -> EnvCheck:
@@ -119,7 +119,7 @@ def _check_cost_config() -> EnvCheck:
     output_rate = os.getenv("GENBI_MODEL_OUTPUT_USD_PER_1M")
     if input_rate and output_rate:
         return EnvCheck("cost_config", True, "模型成本估算配置存在。", f"input={input_rate}; output={output_rate}")
-    return EnvCheck("cost_config", False, "缺少模型成本估算价格；Run trace 会保留 token，但成本为空。")
+    return EnvCheck("cost_config", False, "缺少模型成本估算价格；事件审计会保留 token，但成本为空。")
 
 
 def _mask_secret(value: str) -> str:

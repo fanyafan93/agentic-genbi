@@ -16,7 +16,6 @@ import type { ApprovalRole, KnowledgeApproval, KnowledgeBaseItem, KnowledgeBaseT
 const tabs: Array<{ id: KnowledgeBaseTab; label: string; hint: string }> = [
   { id: "all", label: "全部知识", hint: "统一检索指标、字段、表、报表和口径" },
   { id: "semantic", label: "语义层", hint: "业务语言到数据实现的映射" },
-  { id: "exploration", label: "探索沉淀", hint: "从探索会话保存的验证结论" },
   { id: "certification", label: "认证中心", hint: "处理待确认、冲突和过期知识" },
   { id: "tags", label: "标签体系", hint: "维护业务域、场景和治理标签" },
 ];
@@ -134,7 +133,7 @@ export function KnowledgeBase() {
     <article className="knowledge-base-workspace" aria-label="知识库">
       <header className="knowledge-base-topbar">
         <div>
-          <span className="exploration-kicker">KNOWLEDGE BASE</span>
+          <span className="knowledge-kicker">KNOWLEDGE BASE</span>
           <h2>知识库</h2>
           <p>管理可复用、可治理、可被 Agent 调用的业务语义与验证结论。</p>
         </div>
@@ -319,7 +318,6 @@ function KnowledgeDetail({ item, onEdit, onToggleApproval }: { item: KnowledgeBa
         <ChipGroup label="关联字段" values={item.relatedFields} />
         <ChipGroup label="关联资源" values={[...item.relatedResources, ...item.evidenceRefs]} />
         {item.sourceQuestion && <Definition label="来源问题" value={item.sourceQuestion} />}
-        {item.sourceExplorationId && <Definition label="来源探索" value={item.sourceExplorationId} />}
       </DetailSection>
 
       <DetailSection title="认证记录">
@@ -364,7 +362,7 @@ function KnowledgeEditor({ draft, mode, saving, onChange, onCancel, onSave }: {
     <div className="knowledge-editor">
       <header>
         <div>
-          <span className="exploration-kicker">{mode === "create" ? "CREATE KNOWLEDGE" : "EDIT KNOWLEDGE"}</span>
+          <span className="knowledge-kicker">{mode === "create" ? "CREATE KNOWLEDGE" : "EDIT KNOWLEDGE"}</span>
           <h3>{mode === "create" ? "新建知识" : "编辑知识"}</h3>
         </div>
         <div>

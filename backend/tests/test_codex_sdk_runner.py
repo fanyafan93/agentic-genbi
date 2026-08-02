@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import sys
@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.analysis.runner_contracts import AnalysisAgentRunResult
+from backend.analysis.runner_contracts import AnalysisAgentResult
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRunner
 
 
@@ -87,21 +87,21 @@ class CodexSdkAnalysisRunnerTest(unittest.TestCase):
         items = list(
             runner.stream(
                 "分析 GMV 下滑原因",
-                context={"genbi_thread_id": "thread_1", "genbi_turn_id": "turn_1", "genbi_run_id": "run_1"},
+                context={"genbi_thread_id": "thread_1", "genbi_turn_id": "turn_1"},
             )
         )
 
-        event_types = [item.type for item in items if not isinstance(item, AnalysisAgentRunResult)]
-        result = next(item for item in items if isinstance(item, AnalysisAgentRunResult))
-        raw_events = [item for item in items if not isinstance(item, AnalysisAgentRunResult) and item.type == "agent.runner.raw"]
-        delta_events = [item for item in items if not isinstance(item, AnalysisAgentRunResult) and item.type == "agent.message.delta"]
+        event_types = [item.type for item in items if not isinstance(item, AnalysisAgentResult)]
+        result = next(item for item in items if isinstance(item, AnalysisAgentResult))
+        item_events = [item for item in items if not isinstance(item, AnalysisAgentResult) and item.type == "item/completed"]
+        delta_events = [item for item in items if not isinstance(item, AnalysisAgentResult) and item.type == "item/agentMessage/delta"]
 
-        self.assertIn("agent.runner.raw", event_types)
-        self.assertIn("agent.message.delta", event_types)
-        self.assertNotIn("agent.message.created", event_types)
-        self.assertTrue(any(item.payload.get("phase") == "agent_message.completed" for item in raw_events))
-        self.assertTrue(any(item.payload.get("codex_method") == "turn/started" for item in raw_events))
-        self.assertTrue(any(item.payload.get("codex_item_id") == "codex_item_msg" for item in raw_events))
+        self.assertIn("turn/started", event_types)
+        self.assertIn("item/agentMessage/delta", event_types)
+        self.assertIn("item/completed", event_types)
+        self.assertIn("turn/completed", event_types)
+        self.assertTrue(any(item.payload.get("codex_method") == "item/completed" for item in item_events))
+        self.assertTrue(any(item.payload.get("codex_item_id") == "codex_item_msg" for item in item_events))
         self.assertTrue(all(item.payload.get("codex_turn_id") == "codex_turn_1" for item in delta_events))
         self.assertTrue(all(item.payload.get("codex_item_id") == "codex_item_msg" for item in delta_events))
         self.assertEqual(result.final_output, "完整 Codex 输出")
@@ -120,7 +120,7 @@ class CodexSdkAnalysisRunnerTest(unittest.TestCase):
         items = asyncio.run(collect())
 
         self.assertEqual(fake_codex.resumed[0], "codex_existing")
-        self.assertTrue(any(isinstance(item, AnalysisAgentRunResult) for item in items))
+        self.assertTrue(any(isinstance(item, AnalysisAgentResult) for item in items))
 
     def test_runner_logs_in_with_configured_api_key(self) -> None:
         fake_codex = _FakeAsyncCodex()

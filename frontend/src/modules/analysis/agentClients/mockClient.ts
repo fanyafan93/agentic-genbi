@@ -1,4 +1,4 @@
-import type { AgentClient, AgentEvent, AgentInput } from "./types";
+﻿import type { AgentClient, AgentEvent, AgentInput } from "./types";
 import { channelScript } from "./scripts/channel";
 
 function delay(ms: number) {
@@ -34,25 +34,25 @@ function newId(prefix: string) {
 }
 
 type RuntimeState = {
-  executionAttemptId: string;
+  turnId: string;
   askCount: number;
   lastUser: string;
   askQueue: { question: string; options: { id: string; label: string }[] }[];
 };
 
 export class MockAgentClient implements AgentClient {
-  private state: RuntimeState = { executionAttemptId: "demo", askCount: 0, lastUser: "", askQueue: [] };
+  private state: RuntimeState = { turnId: "demo", askCount: 0, lastUser: "", askQueue: [] };
 
   async *send(input: AgentInput): AsyncIterable<AgentEvent> {
     if (input.kind === "reset") {
-      this.state = { executionAttemptId: newId("attempt"), askCount: 0, lastUser: "", askQueue: [] };
-      yield { type: "conversation-init", executionAttemptId: this.state.executionAttemptId, runId: this.state.executionAttemptId };
+      this.state = { turnId: newId("turn"), askCount: 0, lastUser: "", askQueue: [] };
+      yield { type: "conversation-init", turnId: this.state.turnId };
       return;
     }
 
     if (input.kind === "start") {
-      this.state = { executionAttemptId: newId("attempt"), askCount: 0, lastUser: input.question ?? channelScript.startQuestion, askQueue: [] };
-      yield { type: "conversation-init", executionAttemptId: this.state.executionAttemptId, runId: this.state.executionAttemptId };
+      this.state = { turnId: newId("turn"), askCount: 0, lastUser: input.question ?? channelScript.startQuestion, askQueue: [] };
+      yield { type: "conversation-init", turnId: this.state.turnId };
       yield { type: "user", nodeId: newId("user"), content: this.state.lastUser };
 
       yield* streamAnalysis("我会基于业务语义库和已登记的数据契约推进分析，先生成可用结论，再把需要确认的口径标注清楚。", ["理解业务问题", "检索业务语义库", "语义查证", "生成候选 SQL", "生成图表和报告", "标注假设与风险"]);
@@ -96,7 +96,7 @@ export class MockAgentClient implements AgentClient {
       yield { type: "user", nodeId: newId("user"), content: current?.options.find((o) => o.id === input.optionId)?.label ?? input.optionId };
 
       if (!current) {
-        yield* streamText("继续探索吧，有什么想细看的内容可以告诉我。", 22);
+        yield* streamText("继续分析吧，有什么想细看的内容可以告诉我。", 22);
         yield { type: "done" };
         return;
       }

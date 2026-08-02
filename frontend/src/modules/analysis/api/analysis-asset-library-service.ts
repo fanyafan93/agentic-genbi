@@ -43,8 +43,6 @@ export type AnalysisArtifactLineageRecord = {
   title: string;
   sourceTaskId: string;
   sourceConversationId: string;
-  sourceExecutionAttemptId?: string;
-  sourceRunId?: string;
   codexThreadId?: string | null;
   codexTurnId?: string | null;
   codexItemId?: string | null;

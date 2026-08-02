@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { getAgentClient } from "@/modules/analysis/agentClients";
@@ -30,7 +30,7 @@ export const STEP_INITIAL = ["识别业务口径", "查询可用数据表", "生
 
 export function useFlow(conversationKey: string | null, initial: FlowNode[] = []) {
   const agent = useMemo(() => getAgentClient(), []);
-  const [executionAttemptId, setExecutionAttemptId] = useState<string | null>(conversationKey);
+  const [turnId, setTurnId] = useState<string | null>(conversationKey);
   const [conversationId, setConversationId] = useState<string | null>(conversationKey);
   const [nodes, setNodes] = useState<FlowNode[]>(initial);
   const [artifacts, setArtifacts] = useState<ArtifactFolder[]>([]);
@@ -40,7 +40,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
 
   useEffect(() => {
     cancelled = false;
-    setExecutionAttemptId(conversationKey);
+    setTurnId(conversationKey);
     setConversationId(conversationKey);
     setNodes([...initial]);
     setArtifacts([]);
@@ -54,19 +54,13 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
     updateCodexLineage(event, setCodexLineage);
 
     if (event.type === "conversation-init") {
-      setExecutionAttemptId(event.executionAttemptId);
-      setConversationId(event.conversationId ?? event.threadId ?? event.executionAttemptId);
+      setTurnId(event.turnId);
+      setConversationId(event.conversationId ?? event.threadId ?? event.turnId);
       setNodes([]);
       setArtifacts([]);
       setDraftReport(null);
       setCodexLineage(codexLineageFromEvent(event));
       return [];
-    }
-
-    if (event.type === "run-init") {
-      setExecutionAttemptId(event.executionAttemptId);
-      if (event.conversationId) setConversationId(event.conversationId);
-      return currentNodes;
     }
 
     if (event.type === "user") {
@@ -191,9 +185,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
   const reply = useCallback((optionId: string, interactiveReport?: InteractiveReport) => consume({ kind: "reply", optionId, interactiveReport }), [consume]);
 
   return {
-    executionAttemptId,
-    // Compatibility mirror for components that have not moved off the old name.
-    runId: executionAttemptId,
+    turnId,
     conversationId,
     nodes,
     artifacts,

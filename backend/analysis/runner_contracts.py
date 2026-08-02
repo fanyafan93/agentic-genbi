@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterable, Protocol
 
 from backend.analysis.report_query_service import build_report_query_prompt_context, is_registered_report_query_ref
-from backend.exploration.agent_runner import ExplorationAgentRunnerEvent
-
 
 INTERACTIVE_REPORT_DRAFT_TAG = "interactive_report_draft"
 _INTERACTIVE_REPORT_DRAFT_RE = re.compile(
@@ -17,18 +15,24 @@ _INTERACTIVE_REPORT_DRAFT_RE = re.compile(
 
 
 @dataclass(frozen=True)
-class AnalysisAgentRunResult:
+class AnalysisAgentRunnerEvent:
+    type: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AnalysisAgentResult:
     final_output: str
     raw_result_type: str
-    events: list[ExplorationAgentRunnerEvent] = field(default_factory=list)
+    events: list[AnalysisAgentRunnerEvent] = field(default_factory=list)
 
 
 class AnalysisAgentRunner(Protocol):
-    def run(self, prompt: str) -> AnalysisAgentRunResult: ...
+    def run(self, prompt: str) -> AnalysisAgentResult: ...
 
-    def stream(self, prompt: str) -> Iterable[ExplorationAgentRunnerEvent | AnalysisAgentRunResult]: ...
+    def stream(self, prompt: str) -> Iterable[AnalysisAgentRunnerEvent | AnalysisAgentResult]: ...
 
-    def async_stream(self, prompt: str) -> AsyncIterator[ExplorationAgentRunnerEvent | AnalysisAgentRunResult]: ...
+    def async_stream(self, prompt: str) -> AsyncIterator[AnalysisAgentRunnerEvent | AnalysisAgentResult]: ...
 
 
 def build_analysis_runner_prompt(
@@ -252,3 +256,22 @@ def _is_interactive_report_draft(payload: Any) -> bool:
     )):
         return False
     return all(is_registered_report_query_ref(str(query_ref)) for query_ref in payload["queries"])
+
+
+def final_output_to_text(value: Any) -> str:
+    if isinstance(value, str):
+        return strip_reasoning_tags(value)
+    if hasattr(value, "model_dump_json"):
+        return strip_reasoning_tags(value.model_dump_json())
+    return strip_reasoning_tags(str(value))
+
+
+def bounded_value(value: Any, *, max_chars: int = 2000) -> str:
+    text = final_output_to_text(value)
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}... [truncated]"
+
+
+def strip_reasoning_tags(text: str) -> str:
+    return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL | re.IGNORECASE).strip()

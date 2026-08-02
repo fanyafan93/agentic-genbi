@@ -70,7 +70,7 @@ class EnvConfigTest(unittest.TestCase):
                 "\n".join(
                     [
                         f"GENBI_RESOURCE_LIBRARY_ROOT={resource_root}",
-                        "GENBI_EXPLORATION_RUNTIME=local",
+                        "GENBI_ANALYSIS_RUNTIME=local",
                         "GENBI_DB_HOST=127.0.0.1",
                         "GENBI_DB_PORT=3306",
                         "GENBI_DB_USER=readonly",
@@ -123,7 +123,7 @@ class EnvConfigTest(unittest.TestCase):
                 os.environ,
                 {
                     "GENBI_RESOURCE_LIBRARY_ROOT": str(resource_root),
-                    "GENBI_EXPLORATION_RUNTIME": "openai",
+                    "GENBI_ANALYSIS_RUNTIME": "openai",
                     "GENBI_ENV_FILE": str(Path(temp_dir) / "missing.env"),
                     "OPENAI_API_KEY": "sk-test-1234567890",
                     "GENBI_DB_HOST": "127.0.0.1",
@@ -147,9 +147,9 @@ class EnvConfigTest(unittest.TestCase):
                 os.environ,
                 {
                     "GENBI_RESOURCE_LIBRARY_ROOT": str(resource_root),
-                    "GENBI_EXPLORATION_RUNTIME": "llm",
+                    "GENBI_ANALYSIS_RUNTIME": "llm",
                     "GENBI_LLM_PROVIDER": "minimax",
-                    "GENBI_EXPLORATION_MODEL": "minimax-test-model",
+                    "GENBI_ANALYSIS_MODEL": "minimax-test-model",
                     "GENBI_ENV_FILE": str(Path(temp_dir) / "missing.env"),
                     "MINIMAX_API_KEY": "mini-test-1234567890",
                     "MINIMAX_BASE_URL": "https://api.minimax.example/v1",

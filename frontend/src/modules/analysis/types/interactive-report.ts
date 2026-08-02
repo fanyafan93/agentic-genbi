@@ -40,9 +40,6 @@ export type InteractiveReport = {
   source: {
     threadId: string;
     turnId: string;
-    executionAttemptId: string;
-    /** Compatibility mirror for the old Run-based contract. */
-    runId: string;
   };
 };
 

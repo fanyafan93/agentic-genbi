@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -9,11 +9,8 @@ from backend.config import check_runtime_env, load_project_env
 from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
 from backend.analysis.interactive_report_store import InteractiveReportStore, InteractiveReportVersionConflict
 from backend.analysis.report_query_service import ReportQueryFilterError, ReportQueryNotFound, ReportQueryService, response_to_dict
-from backend.analysis.run_service import AnalysisRunRequest, AnalysisRunService, AnalysisThreadService
+from backend.analysis.turn_service import AnalysisTurnRequest, AnalysisTurnService, AnalysisThreadService
 from backend.business_semantics.finereport_reports import FineReportReportRepository
-from backend.exploration.run_event_store import RunEventStore
-from backend.exploration.run_service import ExplorationRunEvent, ExplorationRunRequest, ExplorationRunService
-from backend.exploration.run_trace_store import RunTraceStore
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRunner
 from backend.harness.thread_store import ThreadStore
 from backend.persistence.postgres_stores import (
@@ -37,9 +34,8 @@ from backend.resource_library.tools import (
 
 
 def create_app(
-    service: ExplorationRunService | None = None,
     knowledge_store: KnowledgeStore | None = None,
-    analysis_service: AnalysisRunService | None = None,
+    analysis_service: AnalysisTurnService | None = None,
     analysis_asset_store: AnalysisAssetStore | None = None,
     interactive_report_store: Any | None = None,
     report_query_service: ReportQueryService | None = None,
@@ -55,12 +51,6 @@ def create_app(
     except ImportError as exc:
         raise RuntimeError("Install FastAPI dependencies from backend/requirements.txt to start the API.") from exc
 
-    class ExplorationRunBody(BaseModel):
-        question: str = Field(min_length=1)
-        conversation_id: str | None = None
-        user_id: str | None = None
-        metadata: dict[str, Any] = Field(default_factory=dict)
-
     class AnalysisTurnBody(BaseModel):
         question: str = Field(min_length=1)
         conversation_id: str | None = None
@@ -71,8 +61,6 @@ def create_app(
     class AnalysisAssetReopenContextBody(BaseModel):
         sourceTaskId: str = Field(min_length=1)
         sourceConversationId: str = Field(min_length=1)
-        sourceExecutionAttemptId: str | None = None
-        sourceRunId: str | None = None
         continuationPrompt: str = Field(min_length=1)
         targetFileId: str | None = None
         sourceCodexThreadId: str | None = None
@@ -85,8 +73,6 @@ def create_app(
         sourceTaskId: str = Field(min_length=1)
         sourceTaskTitle: str = Field(min_length=1)
         sourceConversationId: str = Field(min_length=1)
-        sourceExecutionAttemptId: str | None = None
-        sourceRunId: str | None = None
         sourceCodexThreadId: str | None = None
         sourceCodexTurnId: str | None = None
         sourceCodexItemId: str | None = None
@@ -105,8 +91,6 @@ def create_app(
     class InteractiveReportSourceBody(BaseModel):
         threadId: str = Field(min_length=1)
         turnId: str = Field(min_length=1)
-        executionAttemptId: str | None = None
-        runId: str | None = None
 
     class InteractiveReportBody(BaseModel):
         id: str = Field(min_length=1)
@@ -136,7 +120,7 @@ def create_app(
         scope: str = Field(min_length=1)
         verification: str = Field(min_length=1)
         evidence_refs: list[str] = Field(min_length=1)
-        run_id: str | None = None
+        turn_id: str | None = None
         metadata: dict[str, Any] = Field(default_factory=dict)
         type: str | None = None
         business_definition: str | None = None
@@ -163,7 +147,7 @@ def create_app(
         scope: str | None = None
         verification: str | None = None
         evidence_refs: list[str] | None = None
-        run_id: str | None = None
+        turn_id: str | None = None
         metadata: dict[str, Any] = Field(default_factory=dict)
         type: str | None = None
         business_definition: str | None = None
@@ -204,19 +188,13 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    if service:
-        run_service = service
-        configured_knowledge_store = knowledge_store or KnowledgeStore()
-    else:
-        run_service, configured_knowledge_store = build_default_service_with_stores()
+    configured_knowledge_store = knowledge_store or _build_default_knowledge_store()
+    configured_resource_library = _build_default_resource_library()
     configured_report_query_service = report_query_service or ReportQueryService(
         ReadonlyDatabaseTools(DatabaseConfig.from_env()),
         audit_store=build_postgres_report_query_audit_store() if postgres_persistence_enabled() else None,
     )
-    configured_analysis_service = analysis_service or build_default_analysis_service(
-        run_service,
-        report_query_service=configured_report_query_service,
-    )
+    configured_analysis_service = analysis_service or build_default_analysis_service(report_query_service=configured_report_query_service)
     configured_analysis_asset_store = analysis_asset_store or _build_default_analysis_asset_store()
     configured_interactive_report_store = interactive_report_store or _build_default_interactive_report_store()
     configured_thread_store = thread_store or getattr(configured_analysis_service, "thread_store", None) or ThreadStore()
@@ -313,17 +291,9 @@ def create_app(
 
     @app.post("/api/analysis/assets")
     def save_analysis_asset(body: AnalysisAssetBody = Body(...)) -> dict[str, Any]:
-        source_execution_attempt_id = body.sourceExecutionAttemptId or body.sourceRunId
-        source_run_id = body.sourceRunId or source_execution_attempt_id
-        reopen_execution_attempt_id = body.reopenContext.sourceExecutionAttemptId or body.reopenContext.sourceRunId
-        reopen_run_id = body.reopenContext.sourceRunId or reopen_execution_attempt_id
-        if not source_execution_attempt_id or not source_run_id or not reopen_execution_attempt_id or not reopen_run_id:
-            raise HTTPException(status_code=400, detail="sourceExecutionAttemptId is required")
         context = AnalysisAssetReopenContext(
             sourceTaskId=body.reopenContext.sourceTaskId,
             sourceConversationId=body.reopenContext.sourceConversationId,
-            sourceExecutionAttemptId=reopen_execution_attempt_id,
-            sourceRunId=reopen_run_id,
             continuationPrompt=body.reopenContext.continuationPrompt,
             targetFileId=body.reopenContext.targetFileId,
             sourceCodexThreadId=body.reopenContext.sourceCodexThreadId,
@@ -337,8 +307,6 @@ def create_app(
                 source_task_id=body.sourceTaskId,
                 source_task_title=body.sourceTaskTitle,
                 source_conversation_id=body.sourceConversationId,
-                source_execution_attempt_id=source_execution_attempt_id,
-                source_run_id=source_run_id,
                 source_codex_thread_id=body.sourceCodexThreadId,
                 source_codex_turn_id=body.sourceCodexTurnId,
                 source_codex_item_id=body.sourceCodexItemId,
@@ -390,7 +358,7 @@ def create_app(
         record = configured_analysis_asset_store.get_asset(asset_id)
         if not record:
             raise HTTPException(status_code=404, detail="analysis_asset_not_found")
-        lineage = configured_analysis_asset_store.list_artifact_lineage(artifact_id=record.artifactVersionId, limit=1)
+        lineage = configured_analysis_asset_store.list_artifact_lineage(artifact_id=record.assetId, limit=1)
         return {"lineage": asdict(lineage[0]) if lineage else None}
 
     @app.post("/api/analysis/assets/{asset_id}/reopen")
@@ -440,152 +408,16 @@ def create_app(
         report, version = result
         return {"report": asdict(report), "version": asdict(version)}
 
-    @app.post("/api/explorations/conversations")
-    def create_exploration_conversation_turn(body: ExplorationRunBody = Body(...)) -> dict[str, Any]:
-        conversation_id = body.conversation_id or _new_conversation_id()
-        result = _create_exploration_run_payload(run_service, body, conversation_id=conversation_id)
-        return {
-            "conversation_id": conversation_id,
-            "latest_run_id": result["run_id"],
-            "events_url": result["events_url"],
-            "events": result["events"],
-        }
-
-    @app.get("/api/explorations/conversations")
-    def list_exploration_conversations(limit: int = 50, user_id: str | None = None) -> dict[str, Any]:
-        return {"conversations": _list_root_run_traces(run_service, limit=limit, user_id=user_id)}
-
-    @app.get("/api/explorations/conversations/{conversation_id}")
-    def get_exploration_conversation(conversation_id: str) -> dict[str, Any]:
-        run_ids = _conversation_run_ids(run_service, conversation_id)
-        if not run_ids:
-            raise HTTPException(status_code=404, detail="exploration_conversation_not_found")
-        events = _conversation_events(run_service, run_ids)
-        trace = run_service.trace_store.get_trace(run_ids[0]) if run_service.trace_store else None
-        return {
-            "conversation_id": conversation_id,
-            "latest_run_id": run_ids[-1],
-            "run": asdict(trace) if trace else None,
-            "events": [asdict(event) for event in events],
-        }
-
-    @app.delete("/api/explorations/conversations/{conversation_id}")
-    def delete_exploration_conversation(conversation_id: str) -> dict[str, Any]:
-        run_ids = _conversation_run_ids(run_service, conversation_id)
-        if not run_ids:
-            raise HTTPException(status_code=404, detail="exploration_conversation_not_found")
-        trace_deleted = 0
-        events_deleted = 0
-        for run_id in run_ids:
-            trace_deleted += run_service.trace_store.delete_trace(run_id) if run_service.trace_store else 0
-            events_deleted += run_service.event_store.delete_events(run_id) if run_service.event_store else 0
-        return {
-            "conversation_id": conversation_id,
-            "deleted": True,
-            "run_ids": run_ids,
-            "trace_deleted": trace_deleted,
-            "events_deleted": events_deleted,
-        }
-
-    @app.post("/api/explorations/conversations/stream")
-    def stream_exploration_conversation_turn(body: ExplorationRunBody = Body(...)) -> StreamingResponse:
-        conversation_id = body.conversation_id or _new_conversation_id()
-        request = ExplorationRunRequest(
-            question=body.question,
-            conversation_id=conversation_id,
-            user_id=body.user_id,
-            metadata=_conversation_metadata(body.metadata, conversation_id=conversation_id, is_root=not body.conversation_id),
-        )
-
-        async def event_stream() -> Any:
-            async for event in run_service.astream_events(request):
-                yield event.to_sse()
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-    @app.post("/api/explorations/runs")
-    def create_exploration_run(body: ExplorationRunBody = Body(...)) -> dict[str, Any]:
-        return _create_exploration_run_payload(run_service, body)
-
-    @app.get("/api/explorations/runs")
-    def list_exploration_runs(limit: int = 50, include_continuations: bool = False, user_id: str | None = None) -> dict[str, Any]:
-        if include_continuations:
-            if not run_service.trace_store:
-                return {"runs": []}
-            runs = run_service.trace_store.list_traces(limit=limit)
-            if user_id:
-                runs = [item for item in runs if item.user_id == user_id]
-            return {"runs": [asdict(item) for item in runs[:limit]]}
-        return {"runs": _list_root_run_traces(run_service, limit=limit, user_id=user_id)}
-
-    @app.get("/api/explorations/runs/{run_id}")
-    def get_exploration_run(run_id: str) -> dict[str, Any]:
-        trace = run_service.trace_store.get_trace(run_id) if run_service.trace_store else None
-        events = run_service.event_store.list_events(run_id) if run_service.event_store else []
-        if not trace and not events:
-            raise HTTPException(status_code=404, detail="exploration_run_not_found")
-        return {
-            "run": asdict(trace) if trace else None,
-            "events_url": f"/api/explorations/runs/{run_id}/events",
-            "events": [asdict(event) for event in events],
-        }
-
-    @app.delete("/api/explorations/runs/{run_id}")
-    def delete_exploration_run(run_id: str) -> dict[str, Any]:
-        trace_deleted = run_service.trace_store.delete_trace(run_id) if run_service.trace_store else 0
-        events_deleted = run_service.event_store.delete_events(run_id) if run_service.event_store else 0
-        if trace_deleted == 0 and events_deleted == 0:
-            raise HTTPException(status_code=404, detail="exploration_run_not_found")
-        return {"run_id": run_id, "deleted": True, "trace_deleted": trace_deleted, "events_deleted": events_deleted}
-
-    @app.get("/api/explorations/runs/{run_id}/events")
-    def get_exploration_run_events(run_id: str) -> StreamingResponse:
-        async def event_stream() -> Any:
-            async for event in run_service.astream_run_events(run_id):
-                yield event.to_sse()
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-    @app.post("/api/explorations/runs/stream")
-    def stream_exploration_run(body: ExplorationRunBody = Body(...)) -> StreamingResponse:
-        request = ExplorationRunRequest(
-            question=body.question,
-            conversation_id=body.conversation_id,
-            user_id=body.user_id,
-            metadata=body.metadata,
-        )
-
-        async def event_stream() -> Any:
-            async for event in run_service.astream_events(request):
-                yield event.to_sse()
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-    @app.get("/api/explorations/run-traces")
-    def list_run_traces(limit: int = 50) -> dict[str, Any]:
-        if not run_service.trace_store:
-            return {"traces": []}
-        return {"traces": [asdict(item) for item in run_service.trace_store.list_traces(limit=limit)]}
-
-    @app.get("/api/explorations/run-traces/{run_id}")
-    def get_run_trace(run_id: str) -> dict[str, Any]:
-        if not run_service.trace_store:
-            raise HTTPException(status_code=404, detail="run_trace_store_not_configured")
-        trace = run_service.trace_store.get_trace(run_id)
-        if not trace:
-            raise HTTPException(status_code=404, detail="run_trace_not_found")
-        return asdict(trace)
-
     @app.get("/api/resources/search")
     def search_resources(q: str = Query(min_length=1), resource_type: str | None = None, limit: int = 20) -> dict[str, Any]:
-        if not run_service.resource_library:
+        if not configured_resource_library:
             return {"results": []}
-        results = run_service.resource_library.search_resources(q, resource_type=resource_type, limit=limit)
+        results = configured_resource_library.search_resources(q, resource_type=resource_type, limit=limit)
         return {"results": [asdict(item) for item in results]}
 
     @app.get("/api/resources/status")
     def resource_status() -> dict[str, Any]:
-        library = run_service.resource_library
+        library = configured_resource_library
         index_path = library.index_path if library else Path(DEFAULT_INDEX_PATH)
         summary_path = library.summary_path if library else Path(DEFAULT_SUMMARY_PATH)
         index_exists = index_path.exists()
@@ -625,10 +457,10 @@ def create_app(
         max_lines: int = Query(default=80, ge=1, le=DEFAULT_EXCERPT_MAX_LINES),
         max_bytes: int = Query(default=DEFAULT_EXCERPT_MAX_BYTES, ge=1024, le=DEFAULT_EXCERPT_MAX_BYTES),
     ) -> dict[str, Any]:
-        if not run_service.resource_library:
+        if not configured_resource_library:
             raise HTTPException(status_code=404, detail="resource_library_not_indexed")
         try:
-            excerpt = run_service.resource_library.read_resource_excerpt(
+            excerpt = configured_resource_library.read_resource_excerpt(
                 resource_id,
                 section=section,
                 query=q,
@@ -641,10 +473,10 @@ def create_app(
 
     @app.get("/api/resources/{resource_id}")
     def inspect_resource(resource_id: str) -> dict[str, Any]:
-        if not run_service.resource_library:
+        if not configured_resource_library:
             raise HTTPException(status_code=404, detail="resource_library_not_indexed")
         try:
-            return asdict(run_service.resource_library.inspect_resource(resource_id))
+            return asdict(configured_resource_library.inspect_resource(resource_id))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -655,7 +487,8 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"resource_root_not_found: {root}")
         index = ResourceIndexer(root).write(DEFAULT_INDEX_PATH)
         summary = inspect_index(DEFAULT_INDEX_PATH, DEFAULT_SUMMARY_PATH)
-        run_service.resource_library = ResourceLibrary(index_path=DEFAULT_INDEX_PATH, summary_path=DEFAULT_SUMMARY_PATH)
+        nonlocal configured_resource_library
+        configured_resource_library = ResourceLibrary(index_path=DEFAULT_INDEX_PATH, summary_path=DEFAULT_SUMMARY_PATH)
         return {
             "resource_count": len(index.resources),
             "summary_count": len(summary["summaries"]),
@@ -699,7 +532,7 @@ def create_app(
             scope=body.scope,
             verification=body.verification,
             evidence_refs=body.evidence_refs,
-            run_id=body.run_id,
+            turn_id=body.turn_id,
             metadata=_knowledge_metadata_from_body(body),
         )
         return asdict(record)
@@ -714,7 +547,7 @@ def create_app(
             scope=body.scope,
             verification=body.verification,
             evidence_refs=body.evidence_refs,
-            run_id=body.run_id,
+            turn_id=body.turn_id,
             metadata=_knowledge_metadata_from_body(body, partial=True),
         )
         if not record:
@@ -768,53 +601,20 @@ def _knowledge_metadata_from_body(body: Any, *, partial: bool = False) -> dict[s
     return metadata
 
 
-def _is_continuation_trace(trace: Any) -> bool:
-    metadata = getattr(trace, "metadata", {}) or {}
-    question = str(getattr(trace, "question", "") or "")
-    conversation_id = str(getattr(trace, "conversation_id", "") or "")
-    if metadata.get("conversation_root"):
-        return False
-    return bool(
-        conversation_id
-        or metadata.get("continuation_of")
-        or question.startswith("这是同一个知识探索会话中的继续追问或补充")
-    )
-
-
-def _create_exploration_run_payload(run_service: ExplorationRunService, body: Any, *, conversation_id: str | None = None) -> dict[str, Any]:
-    resolved_conversation_id = conversation_id if conversation_id is not None else body.conversation_id
-    request = ExplorationRunRequest(
-        question=body.question,
-        conversation_id=resolved_conversation_id,
-        user_id=body.user_id,
-        metadata=_conversation_metadata(body.metadata, conversation_id=resolved_conversation_id, is_root=conversation_id is not None and not body.conversation_id),
-    )
-    run_id = run_service.create_run(request)
-    events = list(run_service.stream_run_events(run_id))
-    return {
-        "run_id": run_id,
-        "events_url": f"/api/explorations/runs/{run_id}/events",
-        "events": [asdict(event) for event in events],
-    }
-
-
 def _create_analysis_turn_payload(
-    analysis_service: AnalysisRunService,
+    analysis_service: AnalysisTurnService,
     body: Any,
     *,
     conversation_id: str,
 ) -> dict[str, Any]:
     request = _analysis_request_from_body(body, conversation_id=conversation_id)
     submission = analysis_service.submit_turn(request)
-    execution_attempt_id = submission.execution_attempt_id
-    events = list(analysis_service.stream_turn_events(execution_attempt_id))
+    events = list(analysis_service.stream_turn_events(submission.turn_id))
     turn_id = _first_event_payload_value(events, "turn_id") or submission.turn_id
     return {
         "thread_id": conversation_id,
         "conversation_id": conversation_id,
         "turn_id": turn_id,
-        "latest_execution_attempt_id": execution_attempt_id,
-        "execution_attempt_id": execution_attempt_id,
         "events_url": f"/api/analysis/threads/{conversation_id}/turns/{turn_id}",
         "events": [asdict(event) for event in events],
     }
@@ -828,20 +628,20 @@ def _first_event_payload_value(events: list[Any], key: str) -> str | None:
     return None
 
 
-def _stream_analysis_turn_response(analysis_service: AnalysisRunService, body: Any, *, thread_id: str) -> Any:
+def _stream_analysis_turn_response(analysis_service: AnalysisTurnService, body: Any, *, thread_id: str) -> Any:
     from fastapi.responses import StreamingResponse
 
     request = _analysis_request_from_body(body, conversation_id=thread_id)
     submission = analysis_service.submit_turn(request)
 
     async def event_stream() -> Any:
-        async for event in analysis_service.astream_turn_events(submission.execution_attempt_id):
+        async for event in analysis_service.astream_turn_events(submission.turn_id):
             yield event.to_sse()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-def _analysis_request_from_body(body: Any, *, conversation_id: str) -> AnalysisRunRequest:
+def _analysis_request_from_body(body: Any, *, conversation_id: str) -> AnalysisTurnRequest:
     turn_kind = str(getattr(body, "turn_kind", "start") or "start").strip().lower()
     if turn_kind not in {"start", "message", "reply"}:
         turn_kind = "message"
@@ -850,45 +650,13 @@ def _analysis_request_from_body(body: Any, *, conversation_id: str) -> AnalysisR
     metadata.pop("semantic_context_egress_authorized", None)
     metadata.setdefault("domain", "analysis_task")
     metadata.setdefault("conversation_root", not bool(getattr(body, "conversation_id", None)))
-    return AnalysisRunRequest(
+    return AnalysisTurnRequest(
         question=body.question,
         conversation_id=conversation_id,
         user_id=getattr(body, "user_id", None),
         turn_kind=turn_kind,  # type: ignore[arg-type]
         metadata=metadata,
     )
-
-
-def _list_root_run_traces(run_service: ExplorationRunService, *, limit: int, user_id: str | None = None) -> list[dict[str, Any]]:
-    if not run_service.trace_store:
-        return []
-    runs = run_service.trace_store.list_traces(limit=max(limit * 5, limit))
-    if user_id:
-        runs = [item for item in runs if item.user_id == user_id]
-    roots = [item for item in runs if not _is_continuation_trace(item)]
-    return [asdict(item) for item in roots[:limit]]
-
-
-def _conversation_run_ids(run_service: ExplorationRunService, conversation_id: str) -> list[str]:
-    if not run_service.trace_store:
-        return []
-    run_ids = run_service.trace_store.list_conversation_run_ids(conversation_id, limit=50)
-    if not run_ids and run_service.trace_store.get_trace(conversation_id):
-        return [conversation_id]
-    return run_ids
-
-
-def _conversation_events(run_service: ExplorationRunService, run_ids: list[str]) -> list[Any]:
-    if not run_service.event_store:
-        return []
-    events = []
-    for run_id in run_ids:
-        events.extend(run_service.event_store.list_events(run_id))
-    return events
-
-
-def _new_conversation_id() -> str:
-    return f"conv_{uuid4().hex[:12]}"
 
 
 def _new_analysis_conversation_id() -> str:
@@ -908,14 +676,7 @@ def _modified_at(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
 
 
-def build_default_service() -> ExplorationRunService:
-    service, _knowledge_store = build_default_service_with_stores()
-    return service
-
-
 def build_default_analysis_service(
-    run_service: ExplorationRunService,
-    *,
     report_query_service: ReportQueryService | None = None,
 ) -> AnalysisThreadService:
     load_project_env()
@@ -932,31 +693,21 @@ def build_default_analysis_service(
     )
 
 
-def build_default_service_with_stores() -> tuple[ExplorationRunService, KnowledgeStore]:
+def _build_default_knowledge_store() -> KnowledgeStore:
     load_project_env()
-    trace_store, event_store, knowledge_store = _build_default_persistence_stores()
-    library = None
-    if Path(DEFAULT_INDEX_PATH).exists() and Path(DEFAULT_SUMMARY_PATH).exists():
-        library = ResourceLibrary(index_path=DEFAULT_INDEX_PATH, summary_path=DEFAULT_SUMMARY_PATH)
-    db_tools = ReadonlyDatabaseTools(DatabaseConfig.from_env())
-    service = ExplorationRunService(
-        resource_library=library,
-        db_tools=db_tools,
-        agent_runner=None,
-        trace_store=trace_store,
-        event_store=event_store,
-    )
-    return service, knowledge_store
-
-
-def _build_default_persistence_stores() -> tuple[RunTraceStore, RunEventStore, KnowledgeStore]:
     if postgres_persistence_enabled():
         try:
             return build_postgres_stores()
         except Exception:
             if os.getenv("GENBI_PERSISTENCE", "").strip():
                 raise
-    return RunTraceStore(), RunEventStore(), KnowledgeStore()
+    return KnowledgeStore()
+
+
+def _build_default_resource_library() -> ResourceLibrary | None:
+    if Path(DEFAULT_INDEX_PATH).exists() and Path(DEFAULT_SUMMARY_PATH).exists():
+        return ResourceLibrary(index_path=DEFAULT_INDEX_PATH, summary_path=DEFAULT_SUMMARY_PATH)
+    return None
 
 
 def _build_default_thread_store() -> ThreadStore:

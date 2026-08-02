@@ -47,7 +47,6 @@ describe("knowledge base backend mapping", () => {
       scope: "经营分析",
       verification: "资源库与字段核验",
       evidence_refs: ["复购分析.cpt"],
-      run_id: "conv_1",
       created_at: "2026-07-28T10:00:00Z",
       metadata: {
         type: "metric_definition",
@@ -63,7 +62,6 @@ describe("knowledge base backend mapping", () => {
     expect(item.status).toBe("approved");
     expect(item.owner).toBe("经营 BI 组");
     expect(item.relatedTables).toEqual(["dm.dm_consr_rebuy_analysis"]);
-    expect(item.sourceExplorationId).toBe("conv_1");
   });
 
   it("builds a backend payload with semantic and governance metadata", () => {

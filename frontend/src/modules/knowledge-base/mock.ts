@@ -1,4 +1,4 @@
-import type { KnowledgeBaseItem, KnowledgeTag } from "./types";
+﻿import type { KnowledgeBaseItem, KnowledgeTag } from "./types";
 
 export const knowledgeTypeLabels = {
   metric_definition: "指标定义",
@@ -9,7 +9,7 @@ export const knowledgeTypeLabels = {
   business_rule: "业务规则",
   lineage_note: "数据链路",
   report_logic: "报表逻辑",
-  verified_conclusion: "探索结论",
+  verified_conclusion: "验证结论",
 } as const;
 
 export const knowledgeStatusLabels = {
@@ -22,7 +22,7 @@ export const knowledgeStatusLabels = {
 
 export const knowledgeSourceLabels = {
   manual: "手动创建",
-  exploration: "探索沉淀",
+  
   import: "导入",
 } as const;
 
@@ -83,7 +83,7 @@ export const demoKnowledgeItems: KnowledgeBaseItem[] = [
     conflicts: ["经营毛利率"],
     agentVisible: true,
     usageRecords: [
-      { agent: "知识探索 Agent", usedAt: "2026-07-28 18:21", context: "回答“毛利率怎么算”时引用" },
+      { agent: "知识库 Agent", usedAt: "2026-07-28 18:21", context: "回答“毛利率怎么算”时引用" },
       { agent: "BI 分析 Agent", usedAt: "2026-07-28 19:04", context: "生成经营复盘报告前检索" },
     ],
     versionHistory: [
@@ -96,7 +96,7 @@ export const demoKnowledgeItems: KnowledgeBaseItem[] = [
     title: "收入净额字段映射",
     type: "field_mapping",
     status: "approved",
-    source: "exploration",
+    source: "manual",
     content: "公司财务利润表里的收入净额字段已经存在，不应再用 GMV 退货金额临时拼公式。",
     businessDefinition: "收入净额代表扣除退货、退款等影响后的财务确认收入。",
     technicalDefinition: "dm.dm_fina_sales_profit_sum.nnet_inc 是当前优先字段；旧表停更时必须寻找 Doris 侧新链路。",
@@ -106,9 +106,8 @@ export const demoKnowledgeItems: KnowledgeBaseItem[] = [
     relatedTables: ["dm.dm_fina_sales_profit_sum"],
     relatedFields: ["nnet_inc"],
     relatedResources: ["推广总览明细表.cpt", "利润表 ETL"],
-    evidenceRefs: ["run_cba3c4e40356", "dm.dm_fina_sales_profit_sum"],
+    evidenceRefs: ["evidence_cba3c4e40356", "dm.dm_fina_sales_profit_sum"],
     sourceQuestion: "dm_fina_sales_profit_sum 这个表不是有收入净额吗？",
-    sourceExplorationId: "conv_income_net",
     createdBy: "范佳录",
     owner: "财务 BI 组",
     visibility: "company",
@@ -116,20 +115,20 @@ export const demoKnowledgeItems: KnowledgeBaseItem[] = [
       { role: "BI 工程师", approver: "Jason", status: "approved", approvedAt: "2026-07-28" },
       { role: "财务", approver: "财务负责人", status: "pending" },
     ],
-    tags: ["财务指标", "字段映射", "探索沉淀", "Agent 可用"],
+    tags: ["财务指标", "字段映射", "Agent 可用"],
     version: "v1.0",
     updatedAt: "2026-07-28",
     conflicts: [],
     agentVisible: true,
-    usageRecords: [{ agent: "知识探索 Agent", usedAt: "2026-07-28 20:10", context: "追问收入净额时复用" }],
-    versionHistory: [{ version: "v1.0", author: "范佳录", changedAt: "2026-07-28", note: "从探索会话保存" }],
+    usageRecords: [{ agent: "知识库 Agent", usedAt: "2026-07-28 20:10", context: "追问收入净额时复用" }],
+    versionHistory: [{ version: "v1.0", author: "范佳录", changedAt: "2026-07-28", note: "从验证记录保存" }],
   },
   {
     id: "kn_report_inventory",
     title: "分销客户分仓库存取数",
     type: "report_logic",
     status: "pending",
-    source: "exploration",
+    source: "manual",
     content: "分销客户分仓统计报表的库存来自底层 DW 库存表，并通过金蝶库存链路补足。",
     businessDefinition: "按仓库与物料汇总可用库存，用于分销客户分仓看板。",
     technicalDefinition: "主链路为 dbo.T_STK_INVENTORY 到 dw.dw_f_kd_scm_inventory，再被 CPT 引用。",
@@ -141,7 +140,6 @@ export const demoKnowledgeItems: KnowledgeBaseItem[] = [
     relatedResources: ["分销客户分仓数据统计报表.cpt", "dw_f_kd_scm_inventory.hpl"],
     evidenceRefs: ["res_16f7a758d1489e75", "res_61f77fed36ffa740"],
     sourceQuestion: "库存是怎么取数的？",
-    sourceExplorationId: "conv_inventory",
     createdBy: "范佳录",
     owner: "供应链 BI 组",
     visibility: "team",
@@ -190,7 +188,7 @@ export const demoKnowledgeItems: KnowledgeBaseItem[] = [
     title: "推广费用口径",
     type: "formula_definition",
     status: "conflicted",
-    source: "exploration",
+    source: "manual",
     content: "推广费用存在财务、抖音人工和商品分摊三套并行口径，需要按使用场景选择。",
     businessDefinition: "推广花费可以按财务系统、平台人工填报或商品分摊观察。",
     technicalDefinition: "dm_fina_vpromotion_channel_type、fill_dy_gmv_expenses_sum、dw_f_cmmg_promoexpen_split_list 均可命中。",
@@ -200,9 +198,8 @@ export const demoKnowledgeItems: KnowledgeBaseItem[] = [
     relatedTables: ["dm.dm_fina_vpromotion_channel_type", "dm.fill_dy_gmv_expenses_sum", "dw.dw_f_cmmg_promoexpen_split_list"],
     relatedFields: ["nexpenditure", "nexpen"],
     relatedResources: ["推广总览明细表.cpt"],
-    evidenceRefs: ["run_a822b28a2c9a"],
+    evidenceRefs: ["evidence_a822b28a2c9a"],
     sourceQuestion: "推广费用",
-    sourceExplorationId: "conv_promo",
     createdBy: "范佳录",
     owner: "投放分析组",
     visibility: "team",
@@ -216,7 +213,7 @@ export const demoKnowledgeItems: KnowledgeBaseItem[] = [
     updatedAt: "2026-07-28",
     conflicts: ["推广花费", "投放费用"],
     agentVisible: false,
-    usageRecords: [{ agent: "知识探索 Agent", usedAt: "2026-07-28 21:05", context: "提示用户选择三套口径" }],
+    usageRecords: [{ agent: "知识库 Agent", usedAt: "2026-07-28 21:05", context: "提示用户选择三套口径" }],
     versionHistory: [{ version: "v0.8", author: "范佳录", changedAt: "2026-07-28", note: "标记为冲突态，等待财务和运营确认" }],
   },
 ];

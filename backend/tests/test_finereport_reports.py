@@ -11,9 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
 
-from backend.api.exploration_api import create_app
+from backend.api.analysis_api import create_app
 from backend.business_semantics.finereport_reports import FineReportReportRepository
-from backend.exploration.run_service import ExplorationRunService
 
 
 class FineReportReportsApiTest(unittest.TestCase):
@@ -95,7 +94,7 @@ class FineReportReportsApiTest(unittest.TestCase):
             )
 
             with patch.dict("os.environ", {"GENBI_RESOURCE_LIBRARY_ROOT": str(resource_root)}, clear=False):
-                client = TestClient(create_app(ExplorationRunService()))
+                client = TestClient(create_app())
                 listed = client.get("/api/business-semantics/finereport/reports")
 
                 self.assertEqual(listed.status_code, 200)

@@ -24,7 +24,7 @@ export function FlowComposer({ disabled, placeholder, onSubmit }: Props) {
       <textarea
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        placeholder={placeholder ?? "有什么问题，或想继续探索什么？"}
+        placeholder={placeholder ?? "有什么问题，或想继续分析什么？"}
         rows={3}
         disabled={disabled}
       />

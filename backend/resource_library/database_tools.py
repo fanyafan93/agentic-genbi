@@ -382,7 +382,7 @@ def _to_json(value: Any) -> str:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Readonly database exploration tools.")
+    parser = argparse.ArgumentParser(description="Readonly database tools for controlled analysis.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate = subparsers.add_parser("validate", help="Validate and normalize readonly SQL.")
@@ -401,7 +401,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     profile.add_argument("schema")
     profile.add_argument("table")
 
-    query = subparsers.add_parser("query", help="Run a bounded readonly query.")
+    query = subparsers.add_parser("query", help="Execute a bounded readonly query.")
     query.add_argument("sql")
     query.add_argument("--reason", required=True)
     return parser

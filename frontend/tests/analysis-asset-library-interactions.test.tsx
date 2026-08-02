@@ -28,9 +28,10 @@ const folders: ArtifactFolder[] = [
 ];
 
 const sourceContext: AnalysisAssetSourceContext = {
-  sourceTaskId: "analysis_task_run_analysis_interaction",
-  sourceConversationId: "conv_analysis_interaction",
-  sourceRunId: "run_analysis_interaction",
+  sourceTaskId: "analysis_task_turn_analysis_interaction",
+  sourceConversationId: "thread_analysis_interaction",
+  sourceCodexThreadId: "codex_thread_interaction",
+  sourceCodexTurnId: "codex_turn_interaction",
 };
 
 function renderLibrary(options: {
@@ -108,7 +109,7 @@ describe("AnalysisAssetLibrary interactions", () => {
 
     expect(view.container.textContent).toContain("MOCK SAVE PAYLOAD");
     expect(view.container.textContent).toContain("asset_mock_report");
-    expect(view.container.textContent).toContain("conv_analysis_interaction");
+    expect(view.container.textContent).toContain("thread_analysis_interaction");
     expect(view.container.textContent).toContain("当前任务资产");
     expect(view.container.textContent).not.toContain("共享资产库");
     expect(view.container.querySelector(".asset-library-view-switch")).toBeNull();

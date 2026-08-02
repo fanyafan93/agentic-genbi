@@ -26,7 +26,7 @@ services:
       postgres:
         condition: service_healthy
     working_dir: /app
-    command: ["python", "-m", "uvicorn", "backend.api.exploration_api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["python", "-m", "uvicorn", "backend.api.analysis_api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
       - .env
     environment:

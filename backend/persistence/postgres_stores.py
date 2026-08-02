@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from dataclasses import asdict
@@ -7,9 +7,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-from backend.exploration.run_event_store import RunEventStore
-from backend.exploration.run_trace_store import RunCost, RunTrace, RunTraceStore, TokenUsage, build_run_trace
-from backend.harness.thread_store import CodexItemProjectionRecord, ItemRecord, RunRecord, ThreadRecord, ThreadStore, TurnRecord
+from backend.harness.thread_store import CodexItemProjectionRecord, ItemRecord, ThreadRecord, ThreadStore, TurnRecord
 from backend.analysis.asset_store import (
     AnalysisAssetRecord,
     AnalysisAssetReopenContext,
@@ -28,12 +26,9 @@ from backend.analysis.interactive_report_store import (
 from backend.resource_library.knowledge_store import KnowledgeRecord, KnowledgeStore
 
 
-POSTGRES_TRACE_TABLE = "exploration_run_traces"
-POSTGRES_EVENT_TABLE = "exploration_run_events"
 POSTGRES_KNOWLEDGE_TABLE = "verified_knowledge"
 POSTGRES_THREAD_TABLE = "analysis_threads"
 POSTGRES_TURN_TABLE = "analysis_turns"
-POSTGRES_RUN_TABLE = "analysis_runs"
 POSTGRES_ITEM_TABLE = "analysis_items"
 POSTGRES_CODEX_ITEM_PROJECTION_TABLE = "analysis_codex_item_projections"
 POSTGRES_ANALYSIS_ASSET_TABLE = "analysis_assets"
@@ -57,16 +52,11 @@ def get_postgres_database_url() -> str | None:
     return _normalize_postgres_url(raw.strip())
 
 
-def build_postgres_stores() -> tuple["PostgresRunTraceStore", "PostgresRunEventStore", "PostgresKnowledgeStore"]:
+def build_postgres_stores() -> "PostgresKnowledgeStore":
     database_url = get_postgres_database_url()
     if not database_url:
         raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres persistence.")
-    return (
-        PostgresRunTraceStore(database_url),
-        PostgresRunEventStore(database_url),
-        PostgresKnowledgeStore(database_url),
-    )
-
+    return PostgresKnowledgeStore(database_url)
 
 def build_postgres_thread_store() -> "PostgresThreadStore":
     database_url = get_postgres_database_url()
@@ -94,230 +84,6 @@ def build_postgres_report_query_audit_store() -> "PostgresReportQueryAuditStore"
     if not database_url:
         raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres query auditing.")
     return PostgresReportQueryAuditStore(database_url)
-
-
-class PostgresRunTraceStore(RunTraceStore):
-    def __init__(self, database_url: str) -> None:
-        self.database_url = _normalize_postgres_url(database_url)
-        self.ensure_schema()
-
-    def ensure_schema(self) -> None:
-        with _connect(self.database_url) as conn:
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {POSTGRES_TRACE_TABLE} (
-                    run_id TEXT PRIMARY KEY,
-                    title TEXT,
-                    status TEXT NOT NULL,
-                    question TEXT NOT NULL,
-                    conversation_id TEXT,
-                    user_id TEXT,
-                    started_at TIMESTAMPTZ,
-                    completed_at TIMESTAMPTZ,
-                    duration_ms INTEGER,
-                    event_count INTEGER NOT NULL DEFAULT 0,
-                    tool_call_count INTEGER NOT NULL DEFAULT 0,
-                    failed_tool_call_count INTEGER NOT NULL DEFAULT 0,
-                    agent_message_count INTEGER NOT NULL DEFAULT 0,
-                    token_usage JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    cost JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    error TEXT,
-                    metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                )
-                """
-            )
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TRACE_TABLE}_completed ON {POSTGRES_TRACE_TABLE} (completed_at DESC NULLS LAST)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TRACE_TABLE}_user ON {POSTGRES_TRACE_TABLE} (user_id)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TRACE_TABLE}_conversation ON {POSTGRES_TRACE_TABLE} (conversation_id)")
-
-    def save_trace(self, *, run_id: str, request: Any, events: list[Any], metadata: dict[str, Any] | None = None) -> RunTrace:
-        trace = build_run_trace(run_id=run_id, request=request, events=events, metadata=metadata or {})
-        self.upsert_trace(trace)
-        return trace
-
-    def upsert_trace(self, trace: RunTrace) -> None:
-        with _connect(self.database_url) as conn:
-            conn.execute(
-                f"""
-                INSERT INTO {POSTGRES_TRACE_TABLE} (
-                    run_id, title, status, question, conversation_id, user_id, started_at, completed_at,
-                    duration_ms, event_count, tool_call_count, failed_tool_call_count, agent_message_count,
-                    token_usage, cost, error, metadata
-                )
-                VALUES (
-                    %(run_id)s, %(title)s, %(status)s, %(question)s, %(conversation_id)s, %(user_id)s,
-                    %(started_at)s, %(completed_at)s, %(duration_ms)s, %(event_count)s,
-                    %(tool_call_count)s, %(failed_tool_call_count)s, %(agent_message_count)s,
-                    %(token_usage)s, %(cost)s, %(error)s, %(metadata)s
-                )
-                ON CONFLICT (run_id) DO UPDATE SET
-                    title = EXCLUDED.title,
-                    status = EXCLUDED.status,
-                    question = EXCLUDED.question,
-                    conversation_id = EXCLUDED.conversation_id,
-                    user_id = EXCLUDED.user_id,
-                    started_at = EXCLUDED.started_at,
-                    completed_at = EXCLUDED.completed_at,
-                    duration_ms = EXCLUDED.duration_ms,
-                    event_count = EXCLUDED.event_count,
-                    tool_call_count = EXCLUDED.tool_call_count,
-                    failed_tool_call_count = EXCLUDED.failed_tool_call_count,
-                    agent_message_count = EXCLUDED.agent_message_count,
-                    token_usage = EXCLUDED.token_usage,
-                    cost = EXCLUDED.cost,
-                    error = EXCLUDED.error,
-                    metadata = EXCLUDED.metadata,
-                    updated_at = now()
-                """,
-                _trace_params(trace),
-            )
-
-    def list_traces(self, *, limit: int = 50) -> list[RunTrace]:
-        with _connect(self.database_url) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM {POSTGRES_TRACE_TABLE}
-                ORDER BY COALESCE(completed_at, started_at, created_at) DESC
-                LIMIT %(limit)s
-                """,
-                {"limit": limit},
-            ).fetchall()
-        return [_trace_from_row(row) for row in rows]
-
-    def get_trace(self, run_id: str) -> RunTrace | None:
-        with _connect(self.database_url) as conn:
-            row = conn.execute(f"SELECT * FROM {POSTGRES_TRACE_TABLE} WHERE run_id = %(run_id)s", {"run_id": run_id}).fetchone()
-        return _trace_from_row(row) if row else None
-
-    def list_conversation_run_ids(self, conversation_id: str, *, limit: int = 8) -> list[str]:
-        with _connect(self.database_url) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT run_id
-                FROM (
-                    SELECT run_id, COALESCE(started_at, completed_at, created_at) AS sort_at
-                    FROM {POSTGRES_TRACE_TABLE}
-                    WHERE run_id = %(conversation_id)s
-                       OR conversation_id = %(conversation_id)s
-                       OR metadata ->> 'continuation_of' = %(conversation_id)s
-                    ORDER BY sort_at DESC
-                    LIMIT %(limit)s
-                ) recent_runs
-                ORDER BY sort_at ASC
-                """,
-                {"conversation_id": conversation_id, "limit": limit},
-            ).fetchall()
-        run_ids = []
-        seen = set()
-        for row in rows:
-            run_id = str(row["run_id"])
-            if run_id in seen:
-                continue
-            seen.add(run_id)
-            run_ids.append(run_id)
-        return run_ids
-
-    def delete_trace(self, run_id: str) -> int:
-        with _connect(self.database_url) as conn:
-            cursor = conn.execute(f"DELETE FROM {POSTGRES_TRACE_TABLE} WHERE run_id = %(run_id)s", {"run_id": run_id})
-            return cursor.rowcount or 0
-
-    def clear_traces(self) -> int:
-        with _connect(self.database_url) as conn:
-            cursor = conn.execute(f"DELETE FROM {POSTGRES_TRACE_TABLE}")
-            return cursor.rowcount or 0
-
-
-class PostgresRunEventStore(RunEventStore):
-    def __init__(self, database_url: str) -> None:
-        self.database_url = _normalize_postgres_url(database_url)
-        self.ensure_schema()
-
-    def ensure_schema(self) -> None:
-        with _connect(self.database_url) as conn:
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {POSTGRES_EVENT_TABLE} (
-                    id BIGSERIAL PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    event_index INTEGER NOT NULL,
-                    event_type TEXT NOT NULL,
-                    payload JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    event JSONB NOT NULL,
-                    UNIQUE (run_id, event_index)
-                )
-                """
-            )
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_EVENT_TABLE}_run ON {POSTGRES_EVENT_TABLE} (run_id, event_index)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_EVENT_TABLE}_type ON {POSTGRES_EVENT_TABLE} (event_type)")
-
-    def save_events(self, *, run_id: str, events: list[Any]) -> int:
-        with _connect(self.database_url) as conn:
-            conn.execute(f"DELETE FROM {POSTGRES_EVENT_TABLE} WHERE run_id = %(run_id)s", {"run_id": run_id})
-            for index, event in enumerate(events):
-                self._insert_event(conn, run_id=run_id, event_index=index, event=event)
-        return len(events)
-
-    def upsert_events(self, *, run_id: str, events: list[Any]) -> int:
-        return self.save_events(run_id=run_id, events=events)
-
-    def list_events(self, run_id: str) -> list[Any]:
-        from backend.exploration.run_service import ExplorationRunEvent
-
-        with _connect(self.database_url) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT event
-                FROM {POSTGRES_EVENT_TABLE}
-                WHERE run_id = %(run_id)s
-                ORDER BY event_index ASC
-                """,
-                {"run_id": run_id},
-            ).fetchall()
-        return [
-            ExplorationRunEvent(
-                type=str(row["event"]["type"]),
-                run_id=str(row["event"]["run_id"]),
-                payload=dict(row["event"].get("payload") or {}),
-                created_at=_iso(row["event"]["created_at"]),
-            )
-            for row in rows
-        ]
-
-    def delete_events(self, run_id: str) -> int:
-        with _connect(self.database_url) as conn:
-            cursor = conn.execute(f"DELETE FROM {POSTGRES_EVENT_TABLE} WHERE run_id = %(run_id)s", {"run_id": run_id})
-            return cursor.rowcount or 0
-
-    def clear_events(self) -> int:
-        with _connect(self.database_url) as conn:
-            cursor = conn.execute(f"DELETE FROM {POSTGRES_EVENT_TABLE}")
-            return cursor.rowcount or 0
-
-    def _insert_event(self, conn: Any, *, run_id: str, event_index: int, event: Any) -> None:
-        payload = asdict(event) if hasattr(event, "__dataclass_fields__") else dict(event)
-        conn.execute(
-            f"""
-            INSERT INTO {POSTGRES_EVENT_TABLE} (run_id, event_index, event_type, payload, created_at, event)
-            VALUES (%(run_id)s, %(event_index)s, %(event_type)s, %(payload)s, %(created_at)s, %(event)s)
-            ON CONFLICT (run_id, event_index) DO UPDATE SET
-                event_type = EXCLUDED.event_type,
-                payload = EXCLUDED.payload,
-                created_at = EXCLUDED.created_at,
-                event = EXCLUDED.event
-            """,
-            {
-                "run_id": run_id,
-                "event_index": event_index,
-                "event_type": payload["type"],
-                "payload": _jsonb(payload.get("payload") or {}),
-                "created_at": payload["created_at"],
-                "event": _jsonb(payload),
-            },
-        )
 
 
 class PostgresThreadStore(ThreadStore):
@@ -355,7 +121,6 @@ class PostgresThreadStore(ThreadStore):
                     input_kind TEXT NOT NULL,
                     question TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    run_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     created_at TIMESTAMPTZ,
                     updated_at TIMESTAMPTZ,
                     codex_thread_id TEXT,
@@ -368,27 +133,10 @@ class PostgresThreadStore(ThreadStore):
             conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS codex_turn_id TEXT")
             conn.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {POSTGRES_RUN_TABLE} (
-                    id TEXT PRIMARY KEY,
-                    thread_id TEXT NOT NULL REFERENCES {POSTGRES_THREAD_TABLE}(id) ON DELETE CASCADE,
-                    turn_id TEXT NOT NULL REFERENCES {POSTGRES_TURN_TABLE}(id) ON DELETE CASCADE,
-                    status TEXT NOT NULL,
-                    started_at TIMESTAMPTZ,
-                    completed_at TIMESTAMPTZ,
-                    event_count INTEGER NOT NULL DEFAULT 0,
-                    item_count INTEGER NOT NULL DEFAULT 0,
-                    error TEXT,
-                    metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb
-                )
-                """
-            )
-            conn.execute(
-                f"""
                 CREATE TABLE IF NOT EXISTS {POSTGRES_ITEM_TABLE} (
                     id TEXT PRIMARY KEY,
                     thread_id TEXT NOT NULL REFERENCES {POSTGRES_THREAD_TABLE}(id) ON DELETE CASCADE,
                     turn_id TEXT NOT NULL REFERENCES {POSTGRES_TURN_TABLE}(id) ON DELETE CASCADE,
-                    run_id TEXT NOT NULL REFERENCES {POSTGRES_RUN_TABLE}(id) ON DELETE CASCADE,
                     kind TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     payload JSONB NOT NULL DEFAULT '{{}}'::jsonb,
@@ -408,8 +156,7 @@ class PostgresThreadStore(ThreadStore):
                     created_at TIMESTAMPTZ,
                     completed_at TIMESTAMPTZ,
                     genbi_thread_id TEXT REFERENCES {POSTGRES_THREAD_TABLE}(id) ON DELETE CASCADE,
-                    genbi_turn_id TEXT REFERENCES {POSTGRES_TURN_TABLE}(id) ON DELETE SET NULL,
-                    genbi_run_id TEXT REFERENCES {POSTGRES_RUN_TABLE}(id) ON DELETE SET NULL
+                    genbi_turn_id TEXT REFERENCES {POSTGRES_TURN_TABLE}(id) ON DELETE SET NULL
                 )
                 """
             )
@@ -419,8 +166,6 @@ class PostgresThreadStore(ThreadStore):
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_tenant_user ON {POSTGRES_THREAD_TABLE} (tenant_id, user_id)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_thread ON {POSTGRES_TURN_TABLE} (thread_id, created_at)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_codex ON {POSTGRES_TURN_TABLE} (codex_thread_id, codex_turn_id)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_RUN_TABLE}_thread ON {POSTGRES_RUN_TABLE} (thread_id, started_at)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ITEM_TABLE}_run ON {POSTGRES_ITEM_TABLE} (run_id, created_at)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ITEM_TABLE}_thread ON {POSTGRES_ITEM_TABLE} (thread_id, created_at)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_thread ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (genbi_thread_id, created_at)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_turn ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (codex_thread_id, codex_turn_id)")
@@ -455,18 +200,17 @@ class PostgresThreadStore(ThreadStore):
                 conn.execute(
                     f"""
                     INSERT INTO {POSTGRES_TURN_TABLE} (
-                        id, thread_id, input_kind, question, status, run_ids, created_at, updated_at,
+                        id, thread_id, input_kind, question, status, created_at, updated_at,
                         codex_thread_id, codex_turn_id, metadata
                     )
                     VALUES (
-                        %(id)s, %(thread_id)s, %(input_kind)s, %(question)s, %(status)s, %(run_ids)s,
+                        %(id)s, %(thread_id)s, %(input_kind)s, %(question)s, %(status)s,
                         %(created_at)s, %(updated_at)s, %(codex_thread_id)s, %(codex_turn_id)s, %(metadata)s
                     )
                     ON CONFLICT (id) DO UPDATE SET
                         input_kind = EXCLUDED.input_kind,
                         question = EXCLUDED.question,
                         status = EXCLUDED.status,
-                        run_ids = EXCLUDED.run_ids,
                         updated_at = EXCLUDED.updated_at,
                         codex_thread_id = EXCLUDED.codex_thread_id,
                         codex_turn_id = EXCLUDED.codex_turn_id,
@@ -474,33 +218,11 @@ class PostgresThreadStore(ThreadStore):
                     """,
                     _turn_params(turn),
                 )
-            for run in state["runs"].values():
-                conn.execute(
-                    f"""
-                    INSERT INTO {POSTGRES_RUN_TABLE} (
-                        id, thread_id, turn_id, status, started_at, completed_at, event_count, item_count, error, metadata
-                    )
-                    VALUES (
-                        %(id)s, %(thread_id)s, %(turn_id)s, %(status)s, %(started_at)s, %(completed_at)s,
-                        %(event_count)s, %(item_count)s, %(error)s, %(metadata)s
-                    )
-                    ON CONFLICT (id) DO UPDATE SET
-                        status = EXCLUDED.status,
-                        completed_at = EXCLUDED.completed_at,
-                        event_count = EXCLUDED.event_count,
-                        item_count = EXCLUDED.item_count,
-                        error = EXCLUDED.error,
-                        metadata = EXCLUDED.metadata
-                    """,
-                    _run_record_params(run),
-                )
-                conn.execute(f"DELETE FROM {POSTGRES_ITEM_TABLE} WHERE run_id = %(run_id)s", {"run_id": run.id})
-                conn.execute(f"DELETE FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} WHERE genbi_run_id = %(run_id)s", {"run_id": run.id})
             for item in state["items"]:
                 conn.execute(
                     f"""
-                    INSERT INTO {POSTGRES_ITEM_TABLE} (id, thread_id, turn_id, run_id, kind, event_type, payload, created_at)
-                    VALUES (%(id)s, %(thread_id)s, %(turn_id)s, %(run_id)s, %(kind)s, %(event_type)s, %(payload)s, %(created_at)s)
+                    INSERT INTO {POSTGRES_ITEM_TABLE} (id, thread_id, turn_id, kind, event_type, payload, created_at)
+                    VALUES (%(id)s, %(thread_id)s, %(turn_id)s, %(kind)s, %(event_type)s, %(payload)s, %(created_at)s)
                     ON CONFLICT (id) DO UPDATE SET
                         kind = EXCLUDED.kind,
                         event_type = EXCLUDED.event_type,
@@ -514,11 +236,11 @@ class PostgresThreadStore(ThreadStore):
                     f"""
                     INSERT INTO {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
                         codex_item_id, codex_thread_id, codex_turn_id, item_type, status, payload,
-                        created_at, completed_at, genbi_thread_id, genbi_turn_id, genbi_run_id
+                        created_at, completed_at, genbi_thread_id, genbi_turn_id
                     )
                     VALUES (
                         %(codex_item_id)s, %(codex_thread_id)s, %(codex_turn_id)s, %(item_type)s, %(status)s, %(payload)s,
-                        %(created_at)s, %(completed_at)s, %(genbi_thread_id)s, %(genbi_turn_id)s, %(genbi_run_id)s
+                        %(created_at)s, %(completed_at)s, %(genbi_thread_id)s, %(genbi_turn_id)s
                     )
                     ON CONFLICT (codex_item_id) DO UPDATE SET
                         codex_thread_id = EXCLUDED.codex_thread_id,
@@ -528,8 +250,7 @@ class PostgresThreadStore(ThreadStore):
                         payload = EXCLUDED.payload,
                         completed_at = EXCLUDED.completed_at,
                         genbi_thread_id = EXCLUDED.genbi_thread_id,
-                        genbi_turn_id = EXCLUDED.genbi_turn_id,
-                        genbi_run_id = EXCLUDED.genbi_run_id
+                        genbi_turn_id = EXCLUDED.genbi_turn_id
                     """,
                     _codex_item_projection_params(item),
                 )
@@ -544,22 +265,17 @@ class PostgresThreadStore(ThreadStore):
                 str(row["id"]): _turn_record_from_row(row)
                 for row in conn.execute(f"SELECT * FROM {POSTGRES_TURN_TABLE}").fetchall()
             }
-            runs = {
-                str(row["id"]): _run_record_from_row(row)
-                for row in conn.execute(f"SELECT * FROM {POSTGRES_RUN_TABLE}").fetchall()
-            }
             items = [_item_record_from_row(row) for row in conn.execute(f"SELECT * FROM {POSTGRES_ITEM_TABLE}").fetchall()]
             codex_item_projections = [
                 _codex_item_projection_from_row(row)
                 for row in conn.execute(f"SELECT * FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}").fetchall()
             ]
-        return {"threads": threads, "turns": turns, "runs": runs, "items": items, "codex_item_projections": codex_item_projections}
+        return {"threads": threads, "turns": turns, "items": items, "codex_item_projections": codex_item_projections}
 
     def clear(self) -> int:
         with _connect(self.database_url) as conn:
             item_count = conn.execute(f"DELETE FROM {POSTGRES_ITEM_TABLE}").rowcount or 0
             conn.execute(f"DELETE FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}")
-            conn.execute(f"DELETE FROM {POSTGRES_RUN_TABLE}")
             conn.execute(f"DELETE FROM {POSTGRES_TURN_TABLE}")
             conn.execute(f"DELETE FROM {POSTGRES_THREAD_TABLE}")
             return item_count
@@ -580,7 +296,6 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
                     source_task_id TEXT NOT NULL,
                     source_task_title TEXT NOT NULL,
                     source_conversation_id TEXT NOT NULL,
-                    source_run_id TEXT NOT NULL,
                     source_codex_thread_id TEXT,
                     source_codex_turn_id TEXT,
                     source_codex_item_id TEXT,
@@ -609,7 +324,6 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
                     title TEXT NOT NULL,
                     source_task_id TEXT NOT NULL,
                     source_conversation_id TEXT NOT NULL,
-                    source_run_id TEXT NOT NULL,
                     codex_thread_id TEXT,
                     codex_turn_id TEXT,
                     codex_item_id TEXT,
@@ -631,8 +345,6 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
         source_task_id: str,
         source_task_title: str,
         source_conversation_id: str,
-        source_run_id: str,
-        source_execution_attempt_id: str | None = None,
         source_codex_thread_id: str | None = None,
         source_codex_turn_id: str | None = None,
         source_codex_item_id: str | None = None,
@@ -647,15 +359,12 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
         file_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AnalysisAssetRecord:
-        execution_attempt_id = (source_execution_attempt_id or source_run_id).strip()
         for field_name, value in {
             "asset_id": asset_id,
             "artifact_version_id": artifact_version_id,
             "source_task_id": source_task_id,
             "source_task_title": source_task_title,
             "source_conversation_id": source_conversation_id,
-            "source_execution_attempt_id": execution_attempt_id,
-            "source_run_id": source_run_id,
             "asset_type": asset_type,
             "title": title,
             "label": label,
@@ -671,7 +380,6 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
         existing = self.get_asset(asset_id)
         codex_lineage = _codex_lineage(source_codex_thread_id, source_codex_turn_id, source_codex_item_id)
         record_metadata = dict(metadata or {})
-        record_metadata.setdefault("source_execution_attempt_id", execution_attempt_id)
         if codex_lineage:
             record_metadata["codex_lineage"] = codex_lineage
         record = AnalysisAssetRecord(
@@ -680,8 +388,6 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
             sourceTaskId=source_task_id.strip(),
             sourceTaskTitle=source_task_title.strip(),
             sourceConversationId=source_conversation_id.strip(),
-            sourceExecutionAttemptId=execution_attempt_id,
-            sourceRunId=source_run_id.strip(),
             sourceCodexThreadId=_optional_text(source_codex_thread_id),
             sourceCodexTurnId=_optional_text(source_codex_turn_id),
             sourceCodexItemId=_optional_text(source_codex_item_id),
@@ -704,13 +410,13 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
                     f"""
                     INSERT INTO {POSTGRES_ANALYSIS_ASSET_TABLE} (
                         asset_id, artifact_version_id, source_task_id, source_task_title, source_conversation_id,
-                        source_run_id, source_codex_thread_id, source_codex_turn_id, source_codex_item_id,
+                        source_codex_thread_id, source_codex_turn_id, source_codex_item_id,
                         asset_type, title, label, description, visibility, status, latest_version, file_id,
                         reopen_context, metadata, created_at, updated_at
                     )
                     VALUES (
                         %(asset_id)s, %(artifact_version_id)s, %(source_task_id)s, %(source_task_title)s, %(source_conversation_id)s,
-                        %(source_run_id)s, %(source_codex_thread_id)s, %(source_codex_turn_id)s, %(source_codex_item_id)s,
+                        %(source_codex_thread_id)s, %(source_codex_turn_id)s, %(source_codex_item_id)s,
                         %(asset_type)s, %(title)s, %(label)s, %(description)s, %(visibility)s, %(status)s, %(latest_version)s,
                         %(file_id)s, %(reopen_context)s, %(metadata)s, %(created_at)s, %(updated_at)s
                     )
@@ -719,7 +425,6 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
                         source_task_id = EXCLUDED.source_task_id,
                         source_task_title = EXCLUDED.source_task_title,
                         source_conversation_id = EXCLUDED.source_conversation_id,
-                        source_run_id = EXCLUDED.source_run_id,
                         source_codex_thread_id = EXCLUDED.source_codex_thread_id,
                         source_codex_turn_id = EXCLUDED.source_codex_turn_id,
                         source_codex_item_id = EXCLUDED.source_codex_item_id,
@@ -741,12 +446,12 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
                     f"""
                     INSERT INTO {POSTGRES_ARTIFACT_LINEAGE_TABLE} (
                         artifact_id, artifact_version_id, asset_id, asset_type, title, source_task_id,
-                        source_conversation_id, source_run_id, codex_thread_id, codex_turn_id, codex_item_id,
+                        source_conversation_id, codex_thread_id, codex_turn_id, codex_item_id,
                         created_at, updated_at
                     )
                     VALUES (
                         %(artifact_id)s, %(artifact_version_id)s, %(asset_id)s, %(asset_type)s, %(title)s, %(source_task_id)s,
-                        %(source_conversation_id)s, %(source_run_id)s, %(codex_thread_id)s, %(codex_turn_id)s,
+                        %(source_conversation_id)s, %(codex_thread_id)s, %(codex_turn_id)s,
                         %(codex_item_id)s, %(created_at)s, %(updated_at)s
                     )
                     ON CONFLICT (artifact_id) DO UPDATE SET
@@ -756,7 +461,6 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
                         title = EXCLUDED.title,
                         source_task_id = EXCLUDED.source_task_id,
                         source_conversation_id = EXCLUDED.source_conversation_id,
-                        source_run_id = EXCLUDED.source_run_id,
                         codex_thread_id = EXCLUDED.codex_thread_id,
                         codex_turn_id = EXCLUDED.codex_turn_id,
                         codex_item_id = EXCLUDED.codex_item_id,
@@ -847,8 +551,6 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
                 source_task_id=record.sourceTaskId,
                 source_task_title=record.sourceTaskTitle,
                 source_conversation_id=record.sourceConversationId,
-                source_execution_attempt_id=record.sourceExecutionAttemptId,
-                source_run_id=record.sourceRunId,
                 source_codex_thread_id=record.sourceCodexThreadId,
                 source_codex_turn_id=record.sourceCodexTurnId,
                 source_codex_item_id=record.sourceCodexItemId,
@@ -883,7 +585,6 @@ class PostgresInteractiveReportStore:
                     owner_id TEXT NOT NULL,
                     source_thread_id TEXT NOT NULL,
                     source_turn_id TEXT NOT NULL,
-                    source_run_id TEXT NOT NULL,
                     latest_version INTEGER NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -897,7 +598,6 @@ class PostgresInteractiveReportStore:
                     version INTEGER NOT NULL,
                     source_thread_id TEXT NOT NULL,
                     source_turn_id TEXT NOT NULL,
-                    source_run_id TEXT NOT NULL,
                     document JSONB NOT NULL,
                     filters JSONB NOT NULL,
                     queries JSONB NOT NULL,
@@ -910,21 +610,18 @@ class PostgresInteractiveReportStore:
             )
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS source_thread_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS source_turn_id TEXT")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS source_run_id TEXT")
             conn.execute(
                 f"""
                 UPDATE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} AS version
                 SET source_thread_id = report.source_thread_id,
-                    source_turn_id = report.source_turn_id,
-                    source_run_id = report.source_run_id
+                    source_turn_id = report.source_turn_id
                 FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} AS report
                 WHERE version.report_id = report.id
-                  AND (version.source_thread_id IS NULL OR version.source_turn_id IS NULL OR version.source_run_id IS NULL)
+                  AND (version.source_thread_id IS NULL OR version.source_turn_id IS NULL)
                 """
             )
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ALTER COLUMN source_thread_id SET NOT NULL")
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ALTER COLUMN source_turn_id SET NOT NULL")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ALTER COLUMN source_run_id SET NOT NULL")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_INTERACTIVE_REPORT_TABLE}_owner_updated ON {POSTGRES_INTERACTIVE_REPORT_TABLE} (owner_id, updated_at DESC)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_INTERACTIVE_REPORT_TABLE}_thread ON {POSTGRES_INTERACTIVE_REPORT_TABLE} (source_thread_id, updated_at DESC)")
 
@@ -952,7 +649,7 @@ class PostgresInteractiveReportStore:
                         UPDATE {POSTGRES_INTERACTIVE_REPORT_TABLE}
                         SET title = %(title)s, subtitle = %(subtitle)s, artifact_type = %(artifact_type)s,
                             renderer = %(renderer)s, owner_id = %(owner_id)s, source_thread_id = %(source_thread_id)s,
-                            source_turn_id = %(source_turn_id)s, source_run_id = %(source_run_id)s,
+                            source_turn_id = %(source_turn_id)s,
                             latest_version = %(latest_version)s, updated_at = now()
                         WHERE id = %(id)s
                         """,
@@ -963,10 +660,10 @@ class PostgresInteractiveReportStore:
                         f"""
                         INSERT INTO {POSTGRES_INTERACTIVE_REPORT_TABLE} (
                             id, title, subtitle, artifact_type, renderer, owner_id, source_thread_id,
-                            source_turn_id, source_run_id, latest_version
+                            source_turn_id, latest_version
                         ) VALUES (
                             %(id)s, %(title)s, %(subtitle)s, %(artifact_type)s, %(renderer)s, %(owner_id)s,
-                            %(source_thread_id)s, %(source_turn_id)s, %(source_run_id)s, %(latest_version)s
+                            %(source_thread_id)s, %(source_turn_id)s, %(latest_version)s
                         )
                         """,
                         report_params,
@@ -974,10 +671,10 @@ class PostgresInteractiveReportStore:
                 conn.execute(
                     f"""
                     INSERT INTO {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} (
-                        report_id, version, source_thread_id, source_turn_id, source_run_id,
+                        report_id, version, source_thread_id, source_turn_id,
                         document, filters, queries, chart_specs, grid_specs
                     ) VALUES (
-                        %(report_id)s, %(version)s, %(source_thread_id)s, %(source_turn_id)s, %(source_run_id)s,
+                        %(report_id)s, %(version)s, %(source_thread_id)s, %(source_turn_id)s,
                         %(document)s, %(filters)s, %(queries)s, %(chart_specs)s, %(grid_specs)s
                     )
                     """,
@@ -1046,16 +743,18 @@ class PostgresReportQueryAuditStore:
                     truncated BOOLEAN NOT NULL,
                     source TEXT NOT NULL,
                     thread_id TEXT,
-                    run_id TEXT,
+                    turn_id TEXT,
                     user_id TEXT,
                     data_egress_authorized BOOLEAN NOT NULL DEFAULT FALSE,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
             )
+            conn.execute(f"ALTER TABLE {POSTGRES_REPORT_QUERY_AUDIT_TABLE} ADD COLUMN IF NOT EXISTS thread_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_REPORT_QUERY_AUDIT_TABLE} ADD COLUMN IF NOT EXISTS turn_id TEXT")
             conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_REPORT_QUERY_AUDIT_TABLE}_run "
-                f"ON {POSTGRES_REPORT_QUERY_AUDIT_TABLE} (run_id, created_at DESC)"
+                f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_REPORT_QUERY_AUDIT_TABLE}_turn "
+                f"ON {POSTGRES_REPORT_QUERY_AUDIT_TABLE} (turn_id, created_at DESC)"
             )
 
     def record_query(
@@ -1071,10 +770,10 @@ class PostgresReportQueryAuditStore:
                 f"""
                 INSERT INTO {POSTGRES_REPORT_QUERY_AUDIT_TABLE} (
                     id, query_ref, filters, row_count, elapsed_ms, truncated, source,
-                    thread_id, run_id, user_id, data_egress_authorized
+                    thread_id, turn_id, user_id, data_egress_authorized
                 ) VALUES (
                     %(id)s, %(query_ref)s, %(filters)s, %(row_count)s, %(elapsed_ms)s, %(truncated)s, %(source)s,
-                    %(thread_id)s, %(run_id)s, %(user_id)s, %(data_egress_authorized)s
+                    %(thread_id)s, %(turn_id)s, %(user_id)s, %(data_egress_authorized)s
                 )
                 """,
                 {
@@ -1086,7 +785,7 @@ class PostgresReportQueryAuditStore:
                     "truncated": response.truncated,
                     "source": str(context.get("source") or "unspecified"),
                     "thread_id": context.get("thread_id"),
-                    "run_id": context.get("run_id"),
+                    "turn_id": context.get("turn_id"),
                     "user_id": context.get("user_id"),
                     "data_egress_authorized": context.get("data_egress_authorized") is True,
                 },
@@ -1110,15 +809,16 @@ class PostgresKnowledgeStore(KnowledgeStore):
                     scope TEXT NOT NULL,
                     verification TEXT NOT NULL,
                     evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
-                    run_id TEXT,
+                    turn_id TEXT,
                     created_at TIMESTAMPTZ NOT NULL,
                     metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
             )
+            conn.execute(f"ALTER TABLE {POSTGRES_KNOWLEDGE_TABLE} ADD COLUMN IF NOT EXISTS turn_id TEXT")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_KNOWLEDGE_TABLE}_created ON {POSTGRES_KNOWLEDGE_TABLE} (created_at DESC)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_KNOWLEDGE_TABLE}_run ON {POSTGRES_KNOWLEDGE_TABLE} (run_id)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_KNOWLEDGE_TABLE}_turn ON {POSTGRES_KNOWLEDGE_TABLE} (turn_id)")
 
     def save_verified_knowledge(
         self,
@@ -1129,7 +829,7 @@ class PostgresKnowledgeStore(KnowledgeStore):
         scope: str,
         verification: str,
         evidence_refs: list[str],
-        run_id: str | None = None,
+        turn_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> KnowledgeRecord:
         _require_text("title", title)
@@ -1147,7 +847,7 @@ class PostgresKnowledgeStore(KnowledgeStore):
             scope=scope.strip(),
             verification=verification.strip(),
             evidence_refs=[ref.strip() for ref in evidence_refs if ref.strip()],
-            run_id=run_id.strip() if run_id else None,
+            turn_id=turn_id.strip() if turn_id else None,
             created_at=datetime.now(UTC).isoformat(),
             metadata=metadata or {},
         )
@@ -1159,11 +859,11 @@ class PostgresKnowledgeStore(KnowledgeStore):
             conn.execute(
                 f"""
                 INSERT INTO {POSTGRES_KNOWLEDGE_TABLE} (
-                    id, title, question, conclusion, scope, verification, evidence_refs, run_id, created_at, metadata
+                    id, title, question, conclusion, scope, verification, evidence_refs, turn_id, created_at, metadata
                 )
                 VALUES (
                     %(id)s, %(title)s, %(question)s, %(conclusion)s, %(scope)s, %(verification)s,
-                    %(evidence_refs)s, %(run_id)s, %(created_at)s, %(metadata)s
+                    %(evidence_refs)s, %(turn_id)s, %(created_at)s, %(metadata)s
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     title = EXCLUDED.title,
@@ -1172,7 +872,7 @@ class PostgresKnowledgeStore(KnowledgeStore):
                     scope = EXCLUDED.scope,
                     verification = EXCLUDED.verification,
                     evidence_refs = EXCLUDED.evidence_refs,
-                    run_id = EXCLUDED.run_id,
+                    turn_id = EXCLUDED.turn_id,
                     created_at = EXCLUDED.created_at,
                     metadata = EXCLUDED.metadata,
                     updated_at = now()
@@ -1240,7 +940,7 @@ class PostgresKnowledgeStore(KnowledgeStore):
         scope: str | None = None,
         verification: str | None = None,
         evidence_refs: list[str] | None = None,
-        run_id: str | None = None,
+        turn_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> KnowledgeRecord | None:
         current = self.get_knowledge(record_id)
@@ -1257,7 +957,7 @@ class PostgresKnowledgeStore(KnowledgeStore):
             scope=scope.strip() if scope is not None else current.scope,
             verification=verification.strip() if verification is not None else current.verification,
             evidence_refs=[ref.strip() for ref in evidence_refs if ref.strip()] if evidence_refs is not None else current.evidence_refs,
-            run_id=run_id.strip() if run_id else current.run_id,
+            turn_id=turn_id.strip() if turn_id else current.turn_id,
             created_at=current.created_at,
             metadata=merged_metadata,
         )
@@ -1279,7 +979,7 @@ class PostgresKnowledgeStore(KnowledgeStore):
                 ORDER BY count DESC, tag ASC
                 """
             ).fetchall()
-        return [{"name": str(row["tag"]), "count": int(row["count"]), "group": "未分组"} for row in rows]
+        return [{"name": str(row["tag"]), "count": int(row["count"]), "group": "ungrouped"} for row in rows]
 
     def delete_knowledge(self, record_id: str) -> bool:
         with _connect(self.database_url) as conn:
@@ -1318,28 +1018,6 @@ def _normalize_postgres_url(raw: str) -> str:
     return urlunsplit((scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
-def _trace_params(trace: RunTrace) -> dict[str, Any]:
-    return {
-        "run_id": trace.run_id,
-        "title": trace.title,
-        "status": trace.status,
-        "question": trace.question,
-        "conversation_id": trace.conversation_id,
-        "user_id": trace.user_id,
-        "started_at": trace.started_at,
-        "completed_at": trace.completed_at,
-        "duration_ms": trace.duration_ms,
-        "event_count": trace.event_count,
-        "tool_call_count": trace.tool_call_count,
-        "failed_tool_call_count": trace.failed_tool_call_count,
-        "agent_message_count": trace.agent_message_count,
-        "token_usage": _jsonb(asdict(trace.token_usage)),
-        "cost": _jsonb(asdict(trace.cost)),
-        "error": trace.error,
-        "metadata": _jsonb(trace.metadata),
-    }
-
-
 def _knowledge_params(record: KnowledgeRecord) -> dict[str, Any]:
     return {
         "id": record.id,
@@ -1349,7 +1027,7 @@ def _knowledge_params(record: KnowledgeRecord) -> dict[str, Any]:
         "scope": record.scope,
         "verification": record.verification,
         "evidence_refs": _jsonb(record.evidence_refs),
-        "run_id": record.run_id,
+        "turn_id": record.turn_id,
         "created_at": record.created_at,
         "metadata": _jsonb(record.metadata),
     }
@@ -1378,26 +1056,10 @@ def _turn_params(record: TurnRecord) -> dict[str, Any]:
         "input_kind": record.inputKind,
         "question": record.question,
         "status": record.status,
-        "run_ids": _jsonb(record.runIds),
         "created_at": record.createdAt,
         "updated_at": record.updatedAt,
         "codex_thread_id": record.codexThreadId,
         "codex_turn_id": record.codexTurnId,
-        "metadata": _jsonb(record.metadata),
-    }
-
-
-def _run_record_params(record: RunRecord) -> dict[str, Any]:
-    return {
-        "id": record.id,
-        "thread_id": record.threadId,
-        "turn_id": record.turnId,
-        "status": record.status,
-        "started_at": record.startedAt,
-        "completed_at": record.completedAt,
-        "event_count": record.eventCount,
-        "item_count": record.itemCount,
-        "error": record.error,
         "metadata": _jsonb(record.metadata),
     }
 
@@ -1407,7 +1069,6 @@ def _item_params(record: ItemRecord) -> dict[str, Any]:
         "id": record.id,
         "thread_id": record.threadId,
         "turn_id": record.turnId,
-        "run_id": record.runId,
         "kind": record.kind,
         "event_type": record.eventType,
         "payload": _jsonb(record.payload),
@@ -1427,7 +1088,6 @@ def _codex_item_projection_params(record: CodexItemProjectionRecord) -> dict[str
         "completed_at": record.completedAt,
         "genbi_thread_id": record.genbiThreadId,
         "genbi_turn_id": record.genbiTurnId,
-        "genbi_run_id": record.genbiRunId,
     }
 
 
@@ -1438,7 +1098,6 @@ def _analysis_asset_params(record: AnalysisAssetRecord) -> dict[str, Any]:
         "source_task_id": record.sourceTaskId,
         "source_task_title": record.sourceTaskTitle,
         "source_conversation_id": record.sourceConversationId,
-        "source_run_id": record.sourceRunId,
         "source_codex_thread_id": record.sourceCodexThreadId,
         "source_codex_turn_id": record.sourceCodexTurnId,
         "source_codex_item_id": record.sourceCodexItemId,
@@ -1466,7 +1125,6 @@ def _artifact_lineage_params(record: ArtifactLineageRecord) -> dict[str, Any]:
         "title": record.title,
         "source_task_id": record.sourceTaskId,
         "source_conversation_id": record.sourceConversationId,
-        "source_run_id": record.sourceRunId,
         "codex_thread_id": record.codexThreadId,
         "codex_turn_id": record.codexTurnId,
         "codex_item_id": record.codexItemId,
@@ -1477,7 +1135,6 @@ def _artifact_lineage_params(record: ArtifactLineageRecord) -> dict[str, Any]:
 
 def _interactive_report_params(payload: dict[str, Any], *, latest_version: int) -> dict[str, Any]:
     source = dict(payload["source"])
-    execution_attempt_id = str(source.get("executionAttemptId") or source.get("runId")).strip()
     return {
         "id": str(payload["id"]).strip(),
         "title": str(payload["title"]).strip(),
@@ -1487,48 +1144,23 @@ def _interactive_report_params(payload: dict[str, Any], *, latest_version: int) 
         "owner_id": str(payload["ownerId"]).strip(),
         "source_thread_id": str(source["threadId"]).strip(),
         "source_turn_id": str(source["turnId"]).strip(),
-        "source_run_id": execution_attempt_id,
         "latest_version": latest_version,
     }
 
 
 def _interactive_report_version_params(payload: dict[str, Any], *, version: int) -> dict[str, Any]:
     source = dict(payload["source"])
-    execution_attempt_id = str(source.get("executionAttemptId") or source.get("runId")).strip()
     return {
         "report_id": str(payload["id"]).strip(),
         "version": version,
         "source_thread_id": str(source["threadId"]).strip(),
         "source_turn_id": str(source["turnId"]).strip(),
-        "source_run_id": execution_attempt_id,
         "document": _jsonb(payload["document"]),
         "filters": _jsonb(payload["filters"]),
         "queries": _jsonb(payload["queries"]),
         "chart_specs": _jsonb(payload["chartSpecs"]),
         "grid_specs": _jsonb(payload["gridSpecs"]),
     }
-
-
-def _trace_from_row(row: dict[str, Any]) -> RunTrace:
-    return RunTrace(
-        run_id=str(row["run_id"]),
-        title=row.get("title"),
-        status=str(row["status"]),
-        question=str(row["question"]),
-        conversation_id=row.get("conversation_id"),
-        user_id=row.get("user_id"),
-        started_at=_iso(row.get("started_at")),
-        completed_at=_iso(row.get("completed_at")),
-        duration_ms=row.get("duration_ms"),
-        event_count=int(row.get("event_count") or 0),
-        tool_call_count=int(row.get("tool_call_count") or 0),
-        failed_tool_call_count=int(row.get("failed_tool_call_count") or 0),
-        agent_message_count=int(row.get("agent_message_count") or 0),
-        token_usage=TokenUsage(**dict(row.get("token_usage") or {})),
-        cost=RunCost(**dict(row.get("cost") or {})),
-        error=row.get("error"),
-        metadata=dict(row.get("metadata") or {}),
-    )
 
 
 def _thread_record_from_row(row: dict[str, Any]) -> ThreadRecord:
@@ -1554,26 +1186,10 @@ def _turn_record_from_row(row: dict[str, Any]) -> TurnRecord:
         inputKind=str(row["input_kind"]),  # type: ignore[arg-type]
         question=str(row["question"]),
         status=str(row["status"]),
-        runIds=[str(item) for item in row.get("run_ids") or []],
         createdAt=_iso(row.get("created_at")) or "",
         updatedAt=_iso(row.get("updated_at")) or "",
         codexThreadId=row.get("codex_thread_id"),
         codexTurnId=row.get("codex_turn_id"),
-        metadata=dict(row.get("metadata") or {}),
-    )
-
-
-def _run_record_from_row(row: dict[str, Any]) -> RunRecord:
-    return RunRecord(
-        id=str(row["id"]),
-        threadId=str(row["thread_id"]),
-        turnId=str(row["turn_id"]),
-        status=str(row["status"]),
-        startedAt=_iso(row.get("started_at")),
-        completedAt=_iso(row.get("completed_at")),
-        eventCount=int(row.get("event_count") or 0),
-        itemCount=int(row.get("item_count") or 0),
-        error=row.get("error"),
         metadata=dict(row.get("metadata") or {}),
     )
 
@@ -1583,7 +1199,6 @@ def _item_record_from_row(row: dict[str, Any]) -> ItemRecord:
         id=str(row["id"]),
         threadId=str(row["thread_id"]),
         turnId=str(row["turn_id"]),
-        runId=str(row["run_id"]),
         kind=str(row["kind"]),
         eventType=str(row["event_type"]),
         payload=dict(row.get("payload") or {}),
@@ -1602,25 +1217,18 @@ def _codex_item_projection_from_row(row: dict[str, Any]) -> CodexItemProjectionR
         createdAt=_iso(row.get("created_at")) or "",
         completedAt=_iso(row.get("completed_at")),
         genbiThreadId=row.get("genbi_thread_id"),
-        genbiTurnId=row.get("genbi_turn_id"),
-        genbiRunId=row.get("genbi_run_id"),
-    )
+        genbiTurnId=row.get("genbi_turn_id"),    )
 
 
 def _analysis_asset_from_row(row: dict[str, Any]) -> AnalysisAssetRecord:
     context_payload = dict(row.get("reopen_context") or {})
     metadata = dict(row.get("metadata") or {})
-    source_run_id = str(row["source_run_id"])
-    source_execution_attempt_id = str(metadata.get("source_execution_attempt_id") or source_run_id)
-    context_payload.setdefault("sourceExecutionAttemptId", context_payload.get("sourceRunId") or source_execution_attempt_id)
     return AnalysisAssetRecord(
         assetId=str(row["asset_id"]),
         artifactVersionId=str(row["artifact_version_id"]),
         sourceTaskId=str(row["source_task_id"]),
         sourceTaskTitle=str(row["source_task_title"]),
         sourceConversationId=str(row["source_conversation_id"]),
-        sourceExecutionAttemptId=source_execution_attempt_id,
-        sourceRunId=source_run_id,
         sourceCodexThreadId=row.get("source_codex_thread_id"),
         sourceCodexTurnId=row.get("source_codex_turn_id"),
         sourceCodexItemId=row.get("source_codex_item_id"),
@@ -1641,15 +1249,13 @@ def _analysis_asset_from_row(row: dict[str, Any]) -> AnalysisAssetRecord:
 
 def _artifact_lineage_from_asset_record(record: AnalysisAssetRecord) -> ArtifactLineageRecord:
     return ArtifactLineageRecord(
-        artifactId=record.artifactVersionId,
+        artifactId=record.assetId,
         artifactVersionId=record.artifactVersionId,
         assetId=record.assetId,
         assetType=record.assetType,
         title=record.title,
         sourceTaskId=record.sourceTaskId,
         sourceConversationId=record.sourceConversationId,
-        sourceExecutionAttemptId=record.sourceExecutionAttemptId,
-        sourceRunId=record.sourceRunId,
         codexThreadId=record.sourceCodexThreadId,
         codexTurnId=record.sourceCodexTurnId,
         codexItemId=record.sourceCodexItemId,
@@ -1667,8 +1273,6 @@ def _artifact_lineage_from_row(row: dict[str, Any]) -> ArtifactLineageRecord:
         title=str(row["title"]),
         sourceTaskId=str(row["source_task_id"]),
         sourceConversationId=str(row["source_conversation_id"]),
-        sourceExecutionAttemptId=str(row["source_run_id"]),
-        sourceRunId=str(row["source_run_id"]),
         codexThreadId=row.get("codex_thread_id"),
         codexTurnId=row.get("codex_turn_id"),
         codexItemId=row.get("codex_item_id"),
@@ -1687,7 +1291,6 @@ def _interactive_report_from_row(row: dict[str, Any]) -> InteractiveReportRecord
         ownerId=str(row["owner_id"]),
         sourceThreadId=str(row["source_thread_id"]),
         sourceTurnId=str(row["source_turn_id"]),
-        sourceRunId=str(row["source_run_id"]),
         latestVersion=int(row["latest_version"]),
         createdAt=_iso(row["created_at"]) or "",
         updatedAt=_iso(row["updated_at"]) or "",
@@ -1700,7 +1303,6 @@ def _interactive_report_version_from_row(row: dict[str, Any]) -> InteractiveRepo
         version=int(row["version"]),
         sourceThreadId=str(row["source_thread_id"]),
         sourceTurnId=str(row["source_turn_id"]),
-        sourceRunId=str(row["source_run_id"]),
         document=dict(row["document"] or {}),
         filters=list(row["filters"] or []),
         queries=dict(row["queries"] or {}),
@@ -1719,7 +1321,7 @@ def _knowledge_from_row(row: dict[str, Any]) -> KnowledgeRecord:
         scope=str(row["scope"]),
         verification=str(row["verification"]),
         evidence_refs=[str(item) for item in row.get("evidence_refs") or []],
-        run_id=row.get("run_id"),
+        turn_id=row.get("turn_id"),
         created_at=_iso(row["created_at"]) or "",
         metadata=dict(row.get("metadata") or {}),
     )
@@ -1744,3 +1346,5 @@ def _iso(value: Any) -> str | None:
 def _require_text(field: str, value: str) -> None:
     if not value.strip():
         raise ValueError(f"{field} is required.")
+
+

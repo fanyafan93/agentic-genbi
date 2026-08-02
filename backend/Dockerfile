@@ -12,4 +12,4 @@ COPY backend /app/backend
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "backend.api.exploration_api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "backend.api.analysis_api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

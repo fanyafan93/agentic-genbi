@@ -64,7 +64,7 @@ function SkillDraftPreview() {
     version: "v0.1-draft",
     visibility: "team",
     sourceTask: "渠道销售占比分析",
-    sourceRun: "run_mock_skill_publish",
+    sourceTurn: "turn_mock_skill_publish",
     sourceAssets: ["analysis_skill.md", ...references],
     confirmations: ["适用场景", "销售额口径", "复用权限"],
   };
@@ -168,7 +168,7 @@ function SkillDraftPreview() {
             <div><dt>版本</dt><dd>{publicationMetadata.version}</dd></div>
             <div><dt>可见范围</dt><dd>{publicationMetadata.visibility}</dd></div>
             <div><dt>来源分析任务</dt><dd>{publicationMetadata.sourceTask}</dd></div>
-            <div><dt>来源执行</dt><dd>{publicationMetadata.sourceRun}</dd></div>
+            <div><dt>Codex Turn</dt><dd>{publicationMetadata.sourceTurn}</dd></div>
             <div><dt>入库状态</dt><dd>等待审批 / mock</dd></div>
           </dl>
           <div className="skill-lineage">

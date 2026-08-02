@@ -100,9 +100,9 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain("InteractiveReportPanel");
 
     expect(workspaceSource).not.toContain('label: "会话"');
-    expect(workspaceSource).not.toContain('label: "知识探索"');
+    expect(workspaceSource).not.toContain('label: "KnowledgeBaseLegacy"');
     expect(workspaceSource).not.toContain('label: "Agent 中心"');
-    expect(workspaceSource).not.toContain("KnowledgeExploration");
+    expect(workspaceSource).not.toContain("KnowledgeBaseLegacy");
     expect(workspaceSource).not.toContain("CONVERSATIONS");
     expect(workspaceSource).not.toContain("+ 新建会话");
     expect(suggestionsSource).not.toContain("开始一个会话");
@@ -167,7 +167,7 @@ describe("analysis task product language", () => {
   test("keeps the lower-level interaction event generic for shared conversations", () => {
     expect(agentTypesSource).toContain('"conversation-init"');
     expect(agentTypesSource).toContain("conversationId?: string");
-    expect(agentTypesSource).toContain('"run-init"');
+    expect(agentTypesSource).toContain("turnId?: string");
     expect(agentTypesSource).not.toContain('"analysis-task-init"');
   });
 
@@ -184,17 +184,17 @@ describe("analysis task product language", () => {
     expect(mockClientSource).toContain("语义查证");
   });
 
-  test("can switch analysis tasks from mock client to the real backend run API", () => {
+  test("can switch analysis tasks from mock client to the real backend turn API", () => {
     expect(agentClientIndexSource).toContain("BackendAnalysisAgentClient");
     expect(agentClientIndexSource).toContain("shouldUseBackendAnalysisClient");
     expect(backendClientSource).toContain("NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME");
     expect(backendClientSource).toContain("NEXT_PUBLIC_GENBI_API_BASE_URL");
     expect(backendClientSource).toContain("/api/analysis/threads/turns/stream");
     expect(backendClientSource).toContain("/turns/stream");
-    expect(backendClientSource).toContain("analysis.problem.classified");
-    expect(backendClientSource).toContain("analysis.retrieval.plan");
-    expect(backendClientSource).toContain("artifact.created");
-    expect(backendClientSource).toContain("artifact.updated");
+    expect(backendClientSource).toContain("item/completed");
+    expect(backendClientSource).toContain("item/agentMessage/delta");
+    expect(backendClientSource).toContain("genbi/artifact/created");
+    expect(backendClientSource).toContain("genbi/artifact/updated");
     expect(backendClientSource).toContain("mapBackendEvents");
     expect(backendClientSource).toContain("event.payload.conversation_id");
   });
@@ -262,7 +262,7 @@ describe("analysis task product language", () => {
     expect(assetContractsSource).toContain("artifactVersionId");
     expect(assetContractsSource).toContain("sourceTaskId");
     expect(assetContractsSource).toContain("sourceConversationId");
-    expect(assetContractsSource).toContain("sourceRunId");
+    expect(assetContractsSource).toContain("sourceCodexTurnId");
     expect(assetContractsSource).toContain("AnalysisAssetSourceContext");
     expect(assetContractsSource).toContain("sourceContext: AnalysisAssetSourceContext");
     expect(assetContractsSource).toContain("visibility");
@@ -283,7 +283,7 @@ describe("analysis task product language", () => {
     expect(sharedAssetLibrarySource).toContain("最新版本");
     expect(sharedAssetLibrarySource).toContain("可见范围");
     expect(sharedAssetLibrarySource).toContain("资产 ID");
-    expect(sharedAssetLibrarySource).toContain("来源执行");
+    expect(sharedAssetLibrarySource).toContain("Codex Turn");
     expect(sharedAssetLibrarySource).toContain("打开资产");
     expect(sharedAssetLibrarySource).toContain("回到分析工作台继续");
     expect(sharedAssetLibrarySource).toContain("保存资产或发布 Skill 后会出现在这里");
@@ -318,9 +318,9 @@ describe("analysis task product language", () => {
     expect(assetLibrarySource).toContain("复用元数据预览");
     expect(assetLibrarySource).toContain("REUSABLE METHOD PREVIEW");
     expect(assetLibrarySource).toContain("method_channel_sales_skill");
-    expect(assetLibrarySource).toContain("run_mock_skill_publish");
+    expect(assetLibrarySource).toContain("turn_mock_skill_publish");
     expect(assetLibrarySource).toContain("来源分析任务");
-    expect(assetLibrarySource).toContain("来源执行");
+    expect(assetLibrarySource).toContain("Codex Turn");
     expect(assetLibrarySource).toContain("等待审批 / mock");
     expect(assetLibrarySource).toContain("资产血缘");
     expect(assetLibrarySource).toContain("确认记录");

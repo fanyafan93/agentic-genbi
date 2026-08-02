@@ -46,7 +46,7 @@ export function SharedAnalysisAssetLibrary({
                 <div><dt>可见范围</dt><dd>{entry.visibility}</dd></div>
                 <div><dt>状态</dt><dd>{getStatusLabel(entry)}</dd></div>
                 <div><dt>资产 ID</dt><dd>{entry.assetId}</dd></div>
-                <div><dt>来源执行</dt><dd>{entry.sourceExecutionAttemptId}</dd></div>
+                <div><dt>Codex Turn</dt><dd>{entry.sourceCodexTurnId ?? "-"}</dd></div>
               </dl>
               <div className="shared-asset-actions">
                 <button type="button" onClick={() => onOpenEntry(entry)}>打开资产</button>

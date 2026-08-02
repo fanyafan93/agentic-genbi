@@ -21,7 +21,7 @@ class KnowledgeRecord:
     scope: str
     verification: str
     evidence_refs: list[str]
-    run_id: str | None
+    turn_id: str | None
     created_at: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -39,7 +39,7 @@ class KnowledgeStore:
         scope: str,
         verification: str,
         evidence_refs: list[str],
-        run_id: str | None = None,
+        turn_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> KnowledgeRecord:
         _require_text("title", title)
@@ -58,7 +58,7 @@ class KnowledgeStore:
             scope=scope.strip(),
             verification=verification.strip(),
             evidence_refs=[ref.strip() for ref in evidence_refs if ref.strip()],
-            run_id=run_id.strip() if run_id else None,
+            turn_id=turn_id.strip() if turn_id else None,
             created_at=datetime.now(UTC).isoformat(),
             metadata=metadata or {},
         )
@@ -124,7 +124,7 @@ class KnowledgeStore:
         scope: str | None = None,
         verification: str | None = None,
         evidence_refs: list[str] | None = None,
-        run_id: str | None = None,
+        turn_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> KnowledgeRecord | None:
         records = self._read_all()
@@ -145,7 +145,7 @@ class KnowledgeStore:
                 scope=scope.strip() if scope is not None else record.scope,
                 verification=verification.strip() if verification is not None else record.verification,
                 evidence_refs=[ref.strip() for ref in evidence_refs if ref.strip()] if evidence_refs is not None else record.evidence_refs,
-                run_id=run_id.strip() if run_id else record.run_id,
+                turn_id=turn_id.strip() if turn_id else record.turn_id,
                 metadata=merged_metadata,
             )
             next_records.append(updated)
@@ -232,7 +232,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     save.add_argument("--scope", required=True)
     save.add_argument("--verification", required=True)
     save.add_argument("--evidence", action="append", required=True)
-    save.add_argument("--run-id", default=None)
+    save.add_argument("--turn-id", default=None)
 
     list_cmd = subparsers.add_parser("list", help="List recent knowledge records.")
     list_cmd.add_argument("--limit", type=int, default=50)
@@ -257,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
                     scope=args.scope,
                     verification=args.verification,
                     evidence_refs=args.evidence,
-                    run_id=args.run_id,
+                    turn_id=args.turn_id,
                 )
             )
         )

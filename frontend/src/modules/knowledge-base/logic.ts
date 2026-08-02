@@ -18,7 +18,7 @@ export type BackendKnowledgeRecord = {
   scope: string;
   verification: string;
   evidence_refs?: string[];
-  run_id?: string | null;
+  turn_id?: string | null;
   created_at: string;
   metadata?: Record<string, unknown>;
 };
@@ -27,7 +27,6 @@ export function filterKnowledgeItems(items: KnowledgeBaseItem[], filters: Knowle
   const query = filters.query.trim().toLowerCase();
   return items.filter((item) => {
     if (filters.tab === "semantic" && !semanticTypes.includes(item.type as (typeof semanticTypes)[number])) return false;
-    if (filters.tab === "exploration" && item.source !== "exploration") return false;
     if (filters.tab === "certification" && !["pending", "conflicted", "expired"].includes(item.status)) return false;
     if (filters.type !== "all" && item.type !== filters.type) return false;
     if (filters.status !== "all" && item.status !== filters.status) return false;
@@ -80,7 +79,7 @@ export function mapBackendKnowledgeRecord(record: BackendKnowledgeRecord): Knowl
     title: record.title,
     type: asKnowledgeType(metadata.type, fallback?.type ?? "verified_conclusion"),
     status: asKnowledgeStatus(metadata.status, fallback?.status ?? "approved"),
-    source: metadata.source === "manual" || metadata.source === "import" ? metadata.source : "exploration",
+    source: metadata.source === "import" ? "import" : "manual",
     content: stringValue(metadata.content) || record.conclusion,
     businessDefinition: stringValue(metadata.business_definition) || record.conclusion,
     technicalDefinition: stringValue(metadata.technical_definition) || record.verification,
@@ -92,12 +91,11 @@ export function mapBackendKnowledgeRecord(record: BackendKnowledgeRecord): Knowl
     relatedResources: arrayOfStrings(metadata.related_resources),
     evidenceRefs: record.evidence_refs ?? [],
     sourceQuestion: record.question,
-    sourceExplorationId: record.run_id ?? null,
     createdBy: stringValue(metadata.created_by) || "当前用户",
     owner: stringValue(metadata.owner) || fallback?.owner || "未分配",
     visibility: asVisibility(metadata.visibility, fallback?.visibility ?? "team"),
     approvals: asApprovals(metadata.approvals, fallback?.approvals ?? []),
-    tags: arrayOfStrings(metadata.tags).length ? arrayOfStrings(metadata.tags) : fallback?.tags ?? ["探索沉淀"],
+    tags: arrayOfStrings(metadata.tags).length ? arrayOfStrings(metadata.tags) : fallback?.tags ?? [],
     version: stringValue(metadata.version) || fallback?.version || "v1.0",
     updatedAt: record.created_at.slice(0, 10),
     expiresAt: stringValue(metadata.expires_at) || undefined,

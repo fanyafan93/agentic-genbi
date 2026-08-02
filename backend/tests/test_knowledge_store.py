@@ -22,7 +22,7 @@ class KnowledgeStoreTest(unittest.TestCase):
                 scope="剃须刀品类",
                 verification="已核对历史报表和样例 SQL。",
                 evidence_refs=["res_abc", "dm.rebuy_analysis"],
-                run_id="run_1",
+                turn_id="turn_1",
             )
 
             records = store.list_knowledge()

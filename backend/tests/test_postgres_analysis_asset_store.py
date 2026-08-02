@@ -93,7 +93,6 @@ class PostgresAnalysisAssetStoreTest(unittest.TestCase):
                 source_task_id="analysis_task_1",
                 source_task_title="channel sales",
                 source_conversation_id="conv_analysis_1",
-                source_run_id="run_compat_1",
                 source_codex_thread_id="codex_thread_1",
                 source_codex_turn_id="codex_turn_1",
                 source_codex_item_id="codex_item_1",
@@ -108,7 +107,6 @@ class PostgresAnalysisAssetStoreTest(unittest.TestCase):
                 reopen_context=AnalysisAssetReopenContext(
                     sourceTaskId="analysis_task_1",
                     sourceConversationId="conv_analysis_1",
-                    sourceRunId="run_compat_1",
                     continuationPrompt="continue from report",
                     targetFileId="reports-analysis-report-html",
                     sourceCodexThreadId="codex_thread_1",
@@ -126,6 +124,8 @@ class PostgresAnalysisAssetStoreTest(unittest.TestCase):
         self.assertEqual(by_asset.sourceCodexItemId, "codex_item_1")
         self.assertEqual(len(lineage), 1)
         self.assertEqual(lineage[0].assetId, "asset_report")
+        self.assertEqual(lineage[0].artifactId, "asset_report")
+        self.assertEqual(lineage[0].artifactVersionId, "artifact_version_report_v1")
         self.assertEqual(lineage[0].codexItemId, "codex_item_1")
 
 

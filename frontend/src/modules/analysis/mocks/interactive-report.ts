@@ -12,8 +12,6 @@ export const mockInteractiveReport: InteractiveReport = {
   source: {
     threadId: "conv_analysis_channel",
     turnId: "turn_channel_202608",
-    executionAttemptId: "run_channel_202608",
-    runId: "run_channel_202608",
   },
   filters: [
     { id: "month", label: "月份", defaultValue: "2026-05", options: [{ label: "2026年4月", value: "2026-04" }, { label: "2026年5月", value: "2026-05" }] },
