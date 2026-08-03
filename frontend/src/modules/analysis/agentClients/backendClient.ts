@@ -22,7 +22,7 @@ export class BackendAnalysisAgentClient implements AgentClient {
     if (input.kind === "reset") {
       this.cancel();
       this.conversationId = null;
-      yield { type: "conversation-init", turnId: "analysis-reset" };
+      yield { type: "done" };
       return;
     }
 
@@ -58,7 +58,7 @@ export class BackendAnalysisAgentClient implements AgentClient {
         throw new Error(`Analysis SSE API returned ${response.status}`);
       }
       for await (const backendEvent of readAnalysisSse(response)) {
-        const conversationId = asString(backendEvent.payload.conversation_id);
+        const conversationId = asString(backendEvent.payload.thread_id) || asString(backendEvent.payload.conversation_id);
         if (conversationId) this.conversationId = conversationId;
         for (const event of mapBackendEvents([backendEvent], input.kind)) {
           yield event;
@@ -155,16 +155,11 @@ export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentIn
     const method = asString(event.payload.codex_method) || event.type;
     const codexItemType = asString(event.payload.codex_item_type);
     if (event.type === "turn/started" || method === "turn/started") {
-      const turnId = context.turnId || event.turn_id;
-      const conversationId = asString(event.payload.conversation_id);
       const question = asString(event.payload.question);
-      if (inputKind === "start") {
-        yield { ...context, type: "conversation-init", turnId, conversationId: conversationId || undefined };
-      }
       if (question) {
         yield {
           type: "user",
-          nodeId: `user-${turnId}`,
+          nodeId: `user-${context.turnId || event.turn_id}`,
           content: question,
           itemId: asString(event.payload.user_item_id) || asString(event.payload.item_id) || undefined,
           ...context,

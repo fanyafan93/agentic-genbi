@@ -10,7 +10,6 @@ export type AgentEventSystemContext = {
 };
 
 export type AgentEvent =
-  | ({ type: "conversation-init"; turnId: string; conversationId?: string; question?: string } & AgentEventSystemContext)
   | ({ type: "user"; nodeId: string; content: string } & AgentEventSystemContext)
   | ({ type: "agent"; nodeId: string; content: string; mode?: "delta" | "replace" } & AgentEventSystemContext)
   | ({ type: "debug"; nodeId: string; title: string; content: string } & AgentEventSystemContext)

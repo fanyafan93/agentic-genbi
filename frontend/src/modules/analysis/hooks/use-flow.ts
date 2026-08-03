@@ -51,18 +51,9 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
   }, [conversationKey, initial]);
 
   const applyEvent = useCallback((event: AgentEvent, currentNodes: FlowNode[]): FlowNode[] => {
+    if (event.turnId) setTurnId(event.turnId);
+    if (event.threadId) setConversationId(event.threadId);
     updateCodexLineage(event, setCodexLineage);
-
-    if (event.type === "conversation-init") {
-      setTurnId(event.turnId);
-      setConversationId(event.conversationId ?? event.threadId ?? event.turnId);
-      const next = currentNodes.some((node) => node.id === "user-pending" || node.id === "agent-pending") ? currentNodes : [];
-      setNodes(next);
-      setArtifacts([]);
-      setReportArtifact(null);
-      setCodexLineage(codexLineageFromEvent(event));
-      return next;
-    }
 
     if (event.type === "user") {
       const userNode: FlowNode = { id: event.nodeId, role: "user", content: event.content };
