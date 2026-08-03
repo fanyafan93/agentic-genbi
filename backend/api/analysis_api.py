@@ -208,9 +208,9 @@ def create_app(
         return {"threads": configured_thread_store.list_threads(limit=limit, product_kind="analysis_task")}
 
     @app.post("/api/analysis/threads/turns")
-    def create_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
+    async def create_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
         thread_id = body.conversation_id or _new_analysis_conversation_id()
-        return _create_analysis_turn_payload(configured_analysis_runtime, configured_thread_store, body, conversation_id=thread_id)
+        return await _create_analysis_turn_payload(configured_analysis_runtime, configured_thread_store, body, conversation_id=thread_id)
 
     @app.post("/api/analysis/threads/turns/stream")
     def stream_new_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> StreamingResponse:
@@ -218,8 +218,8 @@ def create_app(
         return _stream_analysis_turn_response(configured_analysis_runtime, configured_thread_store, body, thread_id=thread_id)
 
     @app.post("/api/analysis/threads/{thread_id}/turns")
-    def create_existing_analysis_thread_turn(thread_id: str, body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
-        return _create_analysis_turn_payload(configured_analysis_runtime, configured_thread_store, body, conversation_id=thread_id)
+    async def create_existing_analysis_thread_turn(thread_id: str, body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
+        return await _create_analysis_turn_payload(configured_analysis_runtime, configured_thread_store, body, conversation_id=thread_id)
 
     @app.post("/api/analysis/threads/{thread_id}/turns/stream")
     def stream_existing_analysis_thread_turn(thread_id: str, body: AnalysisTurnBody = Body(...)) -> StreamingResponse:
@@ -480,7 +480,7 @@ def _knowledge_metadata_from_body(body: Any, *, partial: bool = False) -> dict[s
     return metadata
 
 
-def _create_analysis_turn_payload(
+async def _create_analysis_turn_payload(
     analysis_runtime: CodexSdkAnalysisRuntime,
     thread_store: ThreadStore,
     body: Any,
@@ -489,7 +489,16 @@ def _create_analysis_turn_payload(
 ) -> dict[str, Any]:
     request = _analysis_request_from_body(body, conversation_id=conversation_id)
     turn_id = _new_analysis_turn_id()
-    events = list(_stream_runtime_events(analysis_runtime, thread_store, request, thread_id=conversation_id, turn_id=turn_id))
+    events = [
+        event
+        async for event in _astream_runtime_events(
+            analysis_runtime,
+            thread_store,
+            request,
+            thread_id=conversation_id,
+            turn_id=turn_id,
+        )
+    ]
     _save_analysis_turn(thread_store, request, thread_id=conversation_id, turn_id=turn_id, events=events)
     return {
         "thread_id": conversation_id,
@@ -528,23 +537,6 @@ def _stream_analysis_turn_response(
         _save_analysis_turn(thread_store, request, thread_id=thread_id, turn_id=turn_id, events=events)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-def _stream_runtime_events(
-    analysis_runtime: CodexSdkAnalysisRuntime,
-    thread_store: ThreadStore,
-    request: AnalysisTurnRequest,
-    *,
-    thread_id: str,
-    turn_id: str,
-) -> list[AgentEvent]:
-    return [
-        _enrich_analysis_event(event, thread_id=thread_id, turn_id=turn_id)
-        for event in analysis_runtime.stream(
-            request.question.strip(),
-            context=_runtime_context(thread_store, request, thread_id=thread_id, turn_id=turn_id),
-        )
-    ]
 
 
 async def _astream_runtime_events(
