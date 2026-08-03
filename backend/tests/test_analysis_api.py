@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -84,7 +85,26 @@ class _FakeCodexRuntime:
         )
 
 
-class AnalysisApiTest(unittest.TestCase):
+class _AsyncOnlyRuntime:
+    runtime_name = "openai-codex"
+
+    def stream(self, question: str, *, context: dict):
+        raise RuntimeError("sync stream must not be used from the create path")
+
+    async def async_stream(self, question: str, *, context: dict):
+        yield AgentEvent(
+            type="turn/completed",
+            turn_id="codex_turn_async",
+            payload={
+                "eventSource": "codex",
+                "codex_thread_id": context.get("codex_thread_id") or "codex_thread_async",
+                "codex_turn_id": "codex_turn_async",
+                "status": "completed",
+            },
+        )
+
+
+class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
     def test_default_analysis_runtime_uses_codex_runtime_when_configured(self) -> None:
         with patch.dict("os.environ", {"GENBI_ANALYSIS_RUNTIME": "codex"}, clear=False):
             with patch.object(analysis_api.CodexSdkAnalysisRuntime, "from_env") as from_env:
@@ -146,6 +166,27 @@ class AnalysisApiTest(unittest.TestCase):
             self.assertEqual(turn_detail.json()["turn"]["id"], payload["turn_id"])
             self.assertNotIn("executionAttempts", turn_detail.json())
             self.assertEqual(turn_detail.json()["codexItemProjections"][0]["codexItemId"], "codex_item_msg")
+
+    async def test_create_analysis_turn_payload_uses_async_runtime_inside_running_event_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            body = SimpleNamespace(
+                question="async create path",
+                user_id=None,
+                turn_kind="start",
+                metadata={},
+            )
+
+            payload = await analysis_api._create_analysis_turn_payload(
+                _AsyncOnlyRuntime(),  # type: ignore[arg-type]
+                thread_store,
+                body,
+                conversation_id="thread_async_create",
+            )
+
+            self.assertEqual(payload["thread_id"], "thread_async_create")
+            self.assertEqual(payload["events"][0]["type"], "turn/completed")
+            self.assertEqual(thread_store.get_thread("thread_async_create")["thread"]["codexThreadId"], "codex_thread_async")  # type: ignore[index]
 
     def test_analysis_thread_turn_stream_api_preserves_codex_thread_for_followup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

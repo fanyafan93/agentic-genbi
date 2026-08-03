@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-- 分支：`feature/codex-runtime-boundary-cleanup`。
+- 分支：`feature/async-analysis-create-path`。
 - 产品主线仍是单一分析工作台。
 - Codex 负责 `Thread / Turn / Item`、上下文、工具调度、流式事件、中断、重试、sandbox 和 approval。
 - GenBI 负责用户、租户、数据权限、数据源、FineReport 语义案例、指标与规则、Artifact 版本、血缘、分享、发布和治理。
@@ -20,11 +20,12 @@
 - 分析 API 改为直接调用 `CodexSdkAnalysisRuntime`，并把 Codex 返回的事件保存到 `ThreadStore`。
 - `CodexSdkAnalysisRuntime` 改为从 Codex notification 产出 `AgentEvent`，不再返回自定义 final-result wrapper。
 - 前端删除 `conversation-init`；当前 thread、turn 和 Codex 血缘改为从流式事件上下文中获取。
-- 补充测试，约束旧执行层文件不得再存在，并验证连续追问会从 `ThreadStore` 恢复 `codex_thread_id`。
+- 修复非流式 create 路径的 event loop 风险：`POST /api/analysis/threads/turns` 和 `POST /api/analysis/threads/{thread_id}/turns` 改为 async 路由，并统一走 `async_stream`。
+- 补充 async 测试，验证已有 event loop 中创建分析 Turn 时不会调用同步 `stream()`。
 
 ## 本轮验证
 
-- `python -m unittest discover backend\tests -v`：39 个测试通过。
+- `python -m unittest discover backend\tests -v`：40 个测试通过。
 - `npm.cmd test`（frontend）：52 个测试通过。
 - `npx.cmd tsc --noEmit --pretty false`（frontend）：通过。
 - `npm.cmd run build`（frontend）：通过。
@@ -32,8 +33,8 @@
 
 ## 工作区状态
 
-- 工作区包含 `feature/codex-runtime-boundary-cleanup` 分支上的 Codex runtime 边界收敛改动。
-- 未回退用户无关改动。
+- 工作区包含 `feature/async-analysis-create-path` 分支上的 async create 路径修复。
+- `AGENTS.md` 有一处用户已有的未提交改动，本轮未修改、未回退。
 
 ## 风险 / 未完成
 
