@@ -17,6 +17,7 @@ type Props = {
   onReply: (optionId: string) => void;
   onStartFromSuggestion: (suggestionId: string, title: string) => void;
   onSendMessage: (content: string) => void;
+  onStop: () => void;
 };
 
 export function AnalysisTaskThread({
@@ -30,6 +31,7 @@ export function AnalysisTaskThread({
   onReply,
   onStartFromSuggestion,
   onSendMessage,
+  onStop,
 }: Props) {
   const threadScrollRef = useRef<HTMLDivElement>(null);
   const lastNodeCountRef = useRef<number>(-1);
@@ -91,8 +93,10 @@ export function AnalysisTaskThread({
       </div>
       <FlowComposer
         disabled={running}
+        running={running}
         placeholder={isNewTask ? "输入待解决的业务问题，按回车发送" : "有什么问题，或想继续分析什么？"}
         onSubmit={onSendMessage}
+        onStop={onStop}
       />
     </div>
   );

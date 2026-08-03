@@ -1,10 +1,12 @@
 ﻿import json
+import asyncio
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 from uuid import uuid4
 
 from backend.config import check_runtime_env, load_project_env
+from backend.analysis.report_artifact import normalize_report_artifact, validate_report_artifact
 from backend.analysis.report_compiler import compile_interactive_report
 from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
 from backend.analysis.interactive_report_store import InteractiveReportStore, InteractiveReportVersionConflict
@@ -578,6 +580,10 @@ def _stream_analysis_turn_response(
             async for event in _astream_runtime_events(analysis_runtime, thread_store, interactive_report_store, request, thread_id=thread_id, turn_id=turn_id):
                 events.append(event)
                 yield event.to_sse()
+        except asyncio.CancelledError:
+            if not _has_terminal_turn_event(events):
+                events.append(_interrupted_terminal_event(thread_id=thread_id, turn_id=turn_id))
+            raise
         finally:
             if events:
                 _save_analysis_turn(thread_store, request, thread_id=thread_id, turn_id=turn_id, events=events)
@@ -625,6 +631,25 @@ def _missing_terminal_event(*, thread_id: str, turn_id: str) -> AgentEvent:
     )
 
 
+def _interrupted_terminal_event(*, thread_id: str, turn_id: str) -> AgentEvent:
+    return AgentEvent(
+        type="turn/completed",
+        turn_id=turn_id,
+        payload={
+            "eventSource": "genbi",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "status": "interrupted",
+            "error": "client_disconnected",
+            "detail": "Analysis stream was interrupted before Codex returned a terminal event.",
+        },
+    )
+
+
+def _has_terminal_turn_event(events: list[AgentEvent]) -> bool:
+    return any(event.type == "turn/completed" for event in events)
+
+
 def _enrich_analysis_event(event: AgentEvent, *, thread_id: str, turn_id: str, question: str | None = None) -> AgentEvent:
     payload = dict(event.payload)
     payload.setdefault("thread_id", thread_id)
@@ -654,10 +679,15 @@ def _interactive_report_artifact_event(event: AgentEvent, *, thread_id: str, tur
             thread_id=thread_id,
             turn_id=turn_id,
         )
+    else:
+        report = normalize_report_artifact(report)
     source = dict(report.get("source") or {})
     source["threadId"] = thread_id
     source["turnId"] = turn_id
     report["source"] = source
+    report = normalize_report_artifact(report)
+    if validate_report_artifact(report):
+        return None
     version_number = None
     if interactive_report_store is not None:
         try:

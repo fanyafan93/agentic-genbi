@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, type PointerEvent as ReactPointerEvent } from "react";
+import { useState, useMemo, useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
 import { useSession } from "next-auth/react";
 import { UserChip } from "@/modules/auth/components/UserChip";
 import {
@@ -142,7 +142,10 @@ export function AnalysisWorkspace() {
   const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
   const [initialFlowMessages, setInitialFlowMessages] = useState<ReturnType<typeof flowNodesFromBackendThread>>([]);
   const [openedReportId, setOpenedReportId] = useState<string | null>(null);
+  const [openedReportLoadingThreadId, setOpenedReportLoadingThreadId] = useState<string | null>(null);
   const [pendingStartQuestion, setPendingStartQuestion] = useState<string | null>(null);
+  const hadLocalRunningFlowRef = useRef(false);
+  const reportLoadRequestRef = useRef(0);
   const reportOwnerId = session?.user?.id ?? "local-user";
   const flow = useFlow(currentAnalysisTaskId, initialFlowMessages);
   useEffect(() => {
@@ -171,7 +174,7 @@ export function AnalysisWorkspace() {
       .catch(() => { if (!cancelled) setAnalysisThreads([]); })
       .finally(() => { if (!cancelled) setAnalysisThreadsLoading(false); });
     return () => { cancelled = true; };
-  }, [flow.threadId]);
+  }, []);
   useEffect(() => {
     if (!pendingStartQuestion) return;
     flow.start(pendingStartQuestion);
@@ -180,10 +183,13 @@ export function AnalysisWorkspace() {
   useEffect(() => {
     if (!flow.threadId || flow.threadId.startsWith("draft_") || !selectedAnalysisTask) return;
     const threadId = flow.threadId;
-    setCurrentAnalysisTaskId(threadId);
+    const hadLocalRunningFlow = hadLocalRunningFlowRef.current;
+    if (flow.running) hadLocalRunningFlowRef.current = true;
     setAnalysisThreads((threads) => {
       const now = new Date().toISOString();
       const existing = threads.find((thread) => thread.id === threadId);
+      const shouldSyncThread = flow.running || currentAnalysisTaskId?.startsWith("draft_") || hadLocalRunningFlow;
+      if (!shouldSyncThread) return threads;
       const nextThread: BackendAnalysisThreadSummary = {
         ...(existing ?? { id: threadId, createdAt: now }),
         title: selectedAnalysisTask,
@@ -193,10 +199,19 @@ export function AnalysisWorkspace() {
       };
       return [nextThread, ...threads.filter((thread) => thread.id !== threadId)];
     });
-  }, [flow.threadId, flow.running, selectedAnalysisTask]);
+    if (!flow.running && hadLocalRunningFlow) hadLocalRunningFlowRef.current = false;
+  }, [currentAnalysisTaskId, flow.threadId, flow.running, selectedAnalysisTask]);
   const isAdmin = true;
   const isNewAnalysisTask = selectedAnalysisTask === null;
   const openedReport = savedReports.find((saved) => saved.report.id === openedReportId);
+  const openedReportBelongsToCurrentTask = openedReport?.report.source.threadId === currentAnalysisTaskId;
+  const flowReportBelongsToCurrentTask = Boolean(
+    flow.reportArtifact
+    && (flow.reportArtifact.source.threadId === currentAnalysisTaskId || flow.reportArtifact.source.threadId === flow.threadId),
+  );
+  const currentPanelReport = flowReportBelongsToCurrentTask ? flow.reportArtifact : openedReportBelongsToCurrentTask ? openedReport.report : undefined;
+  const currentPanelVersion = openedReportBelongsToCurrentTask ? openedReport.version : undefined;
+  const currentPanelReportLoading = openedReportLoadingThreadId === currentAnalysisTaskId;
   const analysisTaskGroups = useMemo(() => groupAnalysisThreads(analysisThreads), [analysisThreads]);
   const selectedThreadCount = selectedThreadIds.length;
 
@@ -209,22 +224,30 @@ export function AnalysisWorkspace() {
     setCurrentAnalysisTaskId(thread.id);
     setInitialFlowMessages([]);
     setOpenedReportId(null);
+    const reportLoadRequestId = ++reportLoadRequestRef.current;
+    if (shouldUseBackendInteractiveReports()) setOpenedReportLoadingThreadId(thread.id);
     try {
       const detail = await getBackendAnalysisThread(thread.id);
+      if (reportLoadRequestId !== reportLoadRequestRef.current) return;
       setInitialFlowMessages(flowNodesFromBackendThread(detail));
     } catch {
+      if (reportLoadRequestId !== reportLoadRequestRef.current) return;
       setInitialFlowMessages([]);
     }
     if (shouldUseBackendInteractiveReports()) {
       try {
         const reports = await listInteractiveReportsByThreadFromBackend(thread.id);
         const latest = reports[0];
+        if (reportLoadRequestId !== reportLoadRequestRef.current) return;
         setOpenedReportId(latest?.report.id ?? null);
         if (latest) {
           setSavedReports((items) => [latest, ...items.filter((item) => item.report.id !== latest.report.id)]);
         }
       } catch {
+        if (reportLoadRequestId !== reportLoadRequestRef.current) return;
         setOpenedReportId(null);
+      } finally {
+        if (reportLoadRequestId === reportLoadRequestRef.current) setOpenedReportLoadingThreadId(null);
       }
     }
   }
@@ -523,12 +546,13 @@ export function AnalysisWorkspace() {
                   onReply={(optionId) => { flow.reply(optionId); }}
                   onStartFromSuggestion={handleStartFromSuggestion}
                   onSendMessage={handleSendMessage}
+                  onStop={flow.stop}
                 />
 
                 <div className="workspace-resizer" role="separator" aria-label="调整分析工作台和当前任务资产宽度" aria-orientation="vertical" onPointerDown={startResize} onDoubleClick={() => setSplitPercent(40)}><span /></div>
 
                 <div className={`analysis-result-pane ${mobilePane !== "assetLibrary" ? "mobile-hidden" : ""}`}>
-                  <InteractiveReportPanel taskTitle={selectedAnalysisTask ?? "当前分析任务"} running={flow.running} initialReport={flow.reportArtifact ?? openedReport?.report ?? undefined} initialVersion={openedReport?.version} onSaveReport={handleSaveReport} onListVersions={shouldUseBackendInteractiveReports() ? listInteractiveReportVersionsFromBackend : undefined} onLoadVersion={shouldUseBackendInteractiveReports() ? handleLoadReportVersion : undefined} />
+                  <InteractiveReportPanel taskTitle={selectedAnalysisTask ?? "当前分析任务"} running={flow.running} loading={currentPanelReportLoading} initialReport={currentPanelReport ?? undefined} initialVersion={currentPanelVersion} onSaveReport={handleSaveReport} onListVersions={shouldUseBackendInteractiveReports() ? listInteractiveReportVersionsFromBackend : undefined} onLoadVersion={shouldUseBackendInteractiveReports() ? handleLoadReportVersion : undefined} />
                 </div>
               </section>
           </div>

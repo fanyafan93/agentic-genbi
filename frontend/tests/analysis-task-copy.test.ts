@@ -261,8 +261,10 @@ describe("analysis task product language", () => {
   test("lets saved interactive results reopen the analysis workspace", () => {
     expect(workspaceSource).toContain("handleOpenReport");
     expect(workspaceSource).toContain("openedReportId");
-    expect(workspaceSource).toContain("initialReport={flow.reportArtifact ?? openedReport?.report ?? undefined}");
-    expect(workspaceSource).toContain("initialVersion={openedReport?.version}");
+    expect(workspaceSource).toContain("openedReportBelongsToCurrentTask");
+    expect(workspaceSource).toContain("currentPanelReport");
+    expect(workspaceSource).toContain("loading={currentPanelReportLoading}");
+    expect(workspaceSource).toContain("initialVersion={currentPanelVersion}");
     expect(interactiveReportSource).toContain("onSaveReport");
     expect(interactiveReportSource).toContain("已保存新的报告版本");
   });
@@ -341,5 +343,14 @@ describe("analysis task product language", () => {
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 适用场景"');
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 需要确认"');
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 推荐步骤"');
+  });
+
+  test("keeps the history list stable when opening an existing task", () => {
+    expect(workspaceSource).toContain("}, []);");
+    expect(workspaceSource).toContain('if (!flow.threadId || flow.threadId.startsWith("draft_") || !selectedAnalysisTask) return;');
+    expect(workspaceSource).toContain('const shouldSyncThread = flow.running || currentAnalysisTaskId?.startsWith("draft_") || hadLocalRunningFlow;');
+    expect(workspaceSource).toContain("if (!shouldSyncThread) return threads;");
+    expect(workspaceSource).not.toContain("setCurrentAnalysisTaskId(threadId);");
+    expect(workspaceSource).not.toContain("}, [flow.threadId]);");
   });
 });

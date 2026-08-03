@@ -272,7 +272,7 @@ describe("analysis backend client event mapping", () => {
     expect(events).toEqual([
       expect.objectContaining({
         type: "step",
-        label: "工具调用：BI_doris / read_mcp_resource",
+        label: "BI_doris / read_mcp_resource",
         detail: expect.stringContaining("mysql://dm/dm_channel_mtsg_sale_total"),
       }),
     ]);
@@ -374,7 +374,33 @@ describe("analysis backend client event mapping", () => {
     expect(getBackendAnalysisRequestTimeoutMs()).toBe(1234);
 
     process.env.NEXT_PUBLIC_ANALYSIS_AGENT_TIMEOUT_MS = "-1";
-    expect(getBackendAnalysisRequestTimeoutMs()).toBe(95_000);
+    expect(getBackendAnalysisRequestTimeoutMs()).toBe(300_000);
+  });
+
+  test("maps Codex reasoning items to a visible thinking state", () => {
+    const events = Array.from(mapBackendEvents([
+      {
+        type: "item/completed",
+        turn_id: "turn_reasoning",
+        created_at: "2026-08-03T00:00:00Z",
+        payload: {
+          codex_method: "item/completed",
+          codex_item_type: "reasoning",
+          codex_item_id: "reasoning_1",
+          turn_id: "turn_reasoning",
+          thread_id: "thread_reasoning",
+        },
+      },
+    ], "start"));
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        nodeId: "agent-turn_reasoning",
+        codexItemId: "reasoning_1",
+        threadId: "thread_reasoning",
+      }),
+    ]);
   });
 
   test("emits a visible error when the backend request times out", async () => {
@@ -482,7 +508,7 @@ describe("analysis backend client event mapping", () => {
         activity: [
           {
             kind: "tool",
-            label: "工具调用：BI_doris / mysql_query",
+            label: "BI_doris / mysql_query",
             count: 2,
             details: ["SELECT 1", "SELECT 2"],
           },
@@ -539,7 +565,7 @@ describe("analysis backend client event mapping", () => {
 
     expect(events[0]).toMatchObject({
       type: "step",
-      label: "工具调用：BI_doris / mysql_query",
+      label: "BI_doris / mysql_query",
       state: "done",
       detail: "SELECT 1 AS one",
       itemId: undefined,

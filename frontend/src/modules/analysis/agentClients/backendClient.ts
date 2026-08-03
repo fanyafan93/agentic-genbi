@@ -61,7 +61,7 @@ export type BackendMcpServer = {
 };
 
 const artifactKinds = new Set<ArtifactKind>(["html", "sql", "python", "csv", "markdown", "json"]);
-const DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS = 95_000;
+const DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS = 300_000;
 const DEFAULT_TOKEN_FLUSH_INTERVAL_MS = 14;
 const DEFAULT_TOKEN_FLUSH_CHARS = 2;
 
@@ -319,7 +319,7 @@ function agentNodeFromTurnProjections(
 function toolLabelFromPayload(payload: Record<string, unknown>): string {
   const toolName = asString(payload.mcp_tool) || asString(payload.tool) || asString(payload.name) || "tool";
   const toolServer = asString(payload.mcp_server);
-  return `工具调用：${toolServer ? `${toolServer} / ` : ""}${toolName}`;
+  return `${toolServer ? `${toolServer} / ` : ""}${toolName}`;
 }
 
 function appendHistoricalToolActivity(activity: FlowActivity[], toolActivity: Extract<FlowActivity, { kind: "tool" }>): void {
@@ -414,11 +414,26 @@ export function* mapBackendEvents(
       const itemId = asString(event.payload.item_id) || asString(event.payload.codex_item_id) || undefined;
       yield {
         type: "step",
-        label: `工具调用：${toolServer ? `${toolServer} / ` : ""}${toolName}`,
+        label: `${toolServer ? `${toolServer} / ` : ""}${toolName}`,
         state: event.type === "item/started" ? "running" : "done",
         nodeId: toolNodeId,
         detail: toolCallDetail(event.payload),
         itemId,
+        ...context,
+      };
+      continue;
+    }
+
+    if (
+      (event.type === "item/started" || event.type === "item/completed" || method === "item/started" || method === "item/completed")
+      && codexItemType === "reasoning"
+    ) {
+      const agentNodeId = getAgentNodeId(event);
+      mappingContext.currentAgentNodeId = agentNodeId;
+      yield {
+        type: "thinking",
+        nodeId: agentNodeId,
+        itemId: asString(event.payload.item_id) || asString(event.payload.codex_item_id) || undefined,
         ...context,
       };
       continue;

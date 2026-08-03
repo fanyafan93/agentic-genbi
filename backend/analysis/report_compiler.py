@@ -3,6 +3,8 @@ from __future__ import annotations
 from hashlib import sha1
 from typing import Any
 
+from backend.analysis.report_artifact import normalize_report_artifact
+
 
 def compile_interactive_report(payload: dict[str, Any], *, thread_id: str, turn_id: str) -> dict[str, Any]:
     title = _text(payload.get("title")) or "渠道销售占比分析"
@@ -12,7 +14,7 @@ def compile_interactive_report(payload: dict[str, Any], *, thread_id: str, turn_
     rows = _rows(payload.get("rows") or payload.get("dataset") or payload.get("data"))
     report_id = _text(payload.get("id")) or f"report_{sha1((thread_id + turn_id + title).encode('utf-8')).hexdigest()[:12]}"
 
-    return {
+    report = {
         "artifactType": "interactive_report",
         "schemaVersion": "1.0",
         "id": report_id,
@@ -22,12 +24,12 @@ def compile_interactive_report(payload: dict[str, Any], *, thread_id: str, turn_
         "document": {
             "root": {"props": {"title": title}},
             "content": [
-                {"type": "SectionBlock", "props": {"title": "本期结论", "tone": "coral"}},
-                {"type": "MarkdownBlock", "props": {"content": _text(payload.get("summary")) or "已根据真实查询结果生成最小交互式报告。"}},
-                {"type": "SectionBlock", "props": {"title": "渠道贡献", "tone": "navy"}},
-                {"type": "ChartBlock", "props": {"chartSpecRef": "channel-sales-chart", "queryRef": "channel-sales-query"}},
-                {"type": "GridBlock", "props": {"gridSpecRef": "channel-sales-grid", "queryRef": "channel-sales-query"}},
-                {"type": "EvidenceBlock", "props": {"label": "数据来源", "content": source_text or "本轮已查证数据集"}},
+                {"type": "SectionBlock", "props": {"id": f"{report_id}-section-summary", "title": "本期结论", "tone": "coral"}},
+                {"type": "MarkdownBlock", "props": {"id": f"{report_id}-summary", "content": _text(payload.get("summary")) or "已根据真实查询结果生成最小交互式报告。"}},
+                {"type": "SectionBlock", "props": {"id": f"{report_id}-section-channel", "title": "渠道贡献", "tone": "navy"}},
+                {"type": "ChartBlock", "props": {"id": f"{report_id}-chart", "chartSpecRef": "channel-sales-chart", "queryRef": "channel-sales-query"}},
+                {"type": "GridBlock", "props": {"id": f"{report_id}-grid", "gridSpecRef": "channel-sales-grid", "queryRef": "channel-sales-query"}},
+                {"type": "EvidenceBlock", "props": {"id": f"{report_id}-evidence", "label": "数据来源", "content": source_text or "本轮已查证数据集"}},
             ],
             "zones": {},
         },
@@ -73,6 +75,7 @@ def compile_interactive_report(payload: dict[str, Any], *, thread_id: str, turn_
         },
         "ownerId": _text(payload.get("ownerId")) or "codex-agent",
     }
+    return normalize_report_artifact(report)
 
 
 def _text(value: Any) -> str:

@@ -31,6 +31,10 @@ const AskAvatar = () => (
   </svg>
 );
 
+function cleanToolLabel(label: string): string {
+  return label.replace(/^工具调用：\s*/, "");
+}
+
 type Props = {
   node: FlowNodeData;
   onReply?: (optionId: string) => void;
@@ -74,14 +78,19 @@ export function FlowNodeView({ node, onReply }: Props) {
                   ) : (
                     <>
                       {item.detail ? (
-                        <details className="tool-step-detail">
-                          <summary><strong>{item.label}{item.count && item.count > 1 ? ` ×${item.count}` : ""}</strong></summary>
+                        <details className="tool-step-detail" aria-label={`工具 ${cleanToolLabel(item.label)}`}>
+                          <summary>
+                            <span className="agent-activity-tool-icon" aria-hidden="true">TOOL</span>
+                            <strong>{cleanToolLabel(item.label)}{item.count && item.count > 1 ? ` ×${item.count}` : ""}</strong>
+                          </summary>
                           <pre>{(item.details && item.details.length > 0 ? item.details : [item.detail]).join("\n\n")}</pre>
                         </details>
                       ) : (
-                        <strong>{item.label}{item.count && item.count > 1 ? ` ×${item.count}` : ""}</strong>
+                        <span className="agent-activity-tool-label" aria-label={`工具 ${cleanToolLabel(item.label)}`}>
+                          <span className="agent-activity-tool-icon" aria-hidden="true">TOOL</span>
+                          <strong>{cleanToolLabel(item.label)}{item.count && item.count > 1 ? ` ×${item.count}` : ""}</strong>
+                        </span>
                       )}
-                      <em>{item.state === "done" ? "已完成" : item.state === "running" ? "进行中" : "等待中"}</em>
                     </>
                   )}
                 </li>
@@ -106,13 +115,9 @@ export function FlowNodeView({ node, onReply }: Props) {
                   ) : (
                     <strong>{step.label}</strong>
                   )}
-                  <em>
-                    {step.state === "done"
-                      ? "已完成"
-                      : step.state === "running"
-                      ? "进行中"
-                      : "等待中"}
-                  </em>
+                  {step.state !== "done" && (
+                    <em>{step.state === "running" ? "进行中" : "等待中"}</em>
+                  )}
                 </li>
               ))}
             </ol>

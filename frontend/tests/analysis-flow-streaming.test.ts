@@ -95,6 +95,32 @@ describe("analysis flow streaming", () => {
     });
   });
 
+  test("shows thinking while Codex is in a reasoning item", async () => {
+    mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
+      yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };
+      yield { type: "tokens", nodeId: "agent-1", text: "先确认数据范围。", codexItemId: "msg-1" };
+      yield { type: "thinking", nodeId: "agent-1", codexItemId: "reasoning-1" };
+      yield { type: "done" };
+    });
+
+    const { result } = renderHook(() => useFlow(null, EMPTY_FLOW));
+
+    act(() => {
+      void result.current.start("分析渠道销售");
+    });
+
+    await waitFor(() => {
+      expect(result.current.nodes).toHaveLength(2);
+      expect(result.current.nodes[1]).toMatchObject({
+        role: "agent",
+        content: "思考中...",
+        activity: [
+          { kind: "message", itemId: "msg-1", content: "先确认数据范围。" },
+        ],
+      });
+    });
+  });
+
   test("replaces the thinking placeholder when the turn fails", async () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
       yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };
@@ -117,9 +143,9 @@ describe("analysis flow streaming", () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
       yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };
       yield { type: "tokens", nodeId: "agent-1", text: "开始确认数据范围。", codexItemId: "msg-1" };
-      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" };
+      yield { type: "step", nodeId: "agent-1", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" };
       yield { type: "tokens", nodeId: "agent-1", text: "继续核验渠道口径。", codexItemId: "msg-2" };
-      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 2", itemId: "call-2" };
+      yield { type: "step", nodeId: "agent-1", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 2", itemId: "call-2" };
       yield { type: "tokens", nodeId: "agent-1", text: "最终分析结论。", codexItemId: "msg-final" };
       yield { type: "done" };
     });
@@ -137,9 +163,9 @@ describe("analysis flow streaming", () => {
         content: "最终分析结论。",
         activity: [
           { kind: "message", itemId: "msg-1", content: "开始确认数据范围。" },
-          { kind: "tool", itemId: "call-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 1" },
+          { kind: "tool", itemId: "call-1", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 1" },
           { kind: "message", itemId: "msg-2", content: "继续核验渠道口径。" },
-          { kind: "tool", itemId: "call-2", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 2" },
+          { kind: "tool", itemId: "call-2", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 2" },
         ],
       });
     });
@@ -190,8 +216,8 @@ describe("analysis flow streaming", () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
       yield { type: "user", nodeId: "user-1", content: "渠道销售占比分析", turnId: "turn-1", threadId: "thread-1" };
       yield { type: "tokens", nodeId: "agent-1", text: "开始查询" };
-      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" };
-      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 2", itemId: "call-2" };
+      yield { type: "step", nodeId: "agent-1", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" };
+      yield { type: "step", nodeId: "agent-1", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 2", itemId: "call-2" };
       yield { type: "done" };
     });
 
@@ -206,8 +232,8 @@ describe("analysis flow streaming", () => {
       expect(agentNode).toMatchObject({ role: "agent" });
       if (agentNode.role !== "agent") throw new Error("expected agent node");
       expect(agentNode.steps).toEqual([
-        { label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" },
-        { label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 2", itemId: "call-2" },
+        { label: "BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" },
+        { label: "BI_doris / mysql_query", state: "done", detail: "SELECT 2", itemId: "call-2" },
       ]);
     });
   });
@@ -216,9 +242,9 @@ describe("analysis flow streaming", () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
       yield { type: "user", nodeId: "user-1", content: "查表", turnId: "turn-1", threadId: "thread-1" };
       yield { type: "tokens", nodeId: "agent-1", text: "开始查。", codexItemId: "msg-1" };
-      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" };
-      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 2", itemId: "call-2" };
-      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 3", itemId: "call-3" };
+      yield { type: "step", nodeId: "agent-1", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" };
+      yield { type: "step", nodeId: "agent-1", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 2", itemId: "call-2" };
+      yield { type: "step", nodeId: "agent-1", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 3", itemId: "call-3" };
       yield { type: "tokens", nodeId: "agent-1", text: "查完。", codexItemId: "msg-2" };
       yield { type: "done" };
     });
@@ -238,7 +264,7 @@ describe("analysis flow streaming", () => {
         {
           kind: "tool",
           itemId: "call-1",
-          label: "工具调用：BI_doris / mysql_query",
+          label: "BI_doris / mysql_query",
           state: "done",
           detail: "SELECT 1",
           count: 3,
@@ -251,7 +277,7 @@ describe("analysis flow streaming", () => {
   test("keeps a tool item that arrives before the first agent message", async () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
       yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };
-      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" };
+      yield { type: "step", nodeId: "agent-1", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" };
       yield { type: "tokens", nodeId: "agent-1", text: "查询完成。", codexItemId: "msg-final" };
       yield { type: "done" };
     });
@@ -269,7 +295,7 @@ describe("analysis flow streaming", () => {
         role: "agent",
         content: "查询完成。",
         activity: [
-          { kind: "tool", itemId: "call-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 1" },
+          { kind: "tool", itemId: "call-1", label: "BI_doris / mysql_query", state: "done", detail: "SELECT 1" },
         ],
       });
     });

@@ -111,6 +111,7 @@ function ReportRuntimeProvider({ report, filters, children }: { report: Interact
 type Props = {
   taskTitle: string;
   running: boolean;
+  loading?: boolean;
   initialReport?: InteractiveReport;
   initialVersion?: number;
   onSaveReport?: (saved: SavedInteractiveReport) => Promise<SavedInteractiveReport>;
@@ -125,34 +126,35 @@ export function InteractiveReportPanel(props: Props) {
         <header className="result-panel-header">
           <div>
             <span className="result-kicker">INTERACTIVE RESULT</span>
-            <h2>暂无分析结果</h2>
-            <p>{props.taskTitle}</p>
-          </div>
-        </header>
-        <div className="report-awaiting-body" role="status">
-          <strong>{props.running ? "分析进行中" : "当前任务尚无报告"}</strong>
+            <h2>{props.loading ? "加载分析结果" : "暂无分析结果"}</h2>
+          <p>{props.taskTitle}</p>
         </div>
-      </section>
-    );
+      </header>
+      <div className="report-awaiting-body" role="status">
+          <strong>{props.loading ? "报告加载中" : props.running ? "分析进行中" : "当前任务尚无报告"}</strong>
+      </div>
+    </section>
+  );
   }
   return <InteractiveReportContent {...props} initialReport={props.initialReport} />;
 }
 
 function InteractiveReportContent({ taskTitle, running, initialReport, initialVersion = 1, onSaveReport, onListVersions, onLoadVersion }: Props & { initialReport: InteractiveReport }) {
-  const [report, setReport] = useState(initialReport);
-  const [filters, setFilters] = useState(() => createDefaultReportFilters(initialReport));
+  const normalizedInitialReport = useMemo(() => withStablePuckIds(initialReport), [initialReport]);
+  const [report, setReport] = useState(normalizedInitialReport);
+  const [filters, setFilters] = useState(() => createDefaultReportFilters(normalizedInitialReport));
   const [editorOpen, setEditorOpen] = useState(false);
   const [notice, setNotice] = useState("Agent 已生成一份可继续编辑的分析结果。");
   const [version, setVersion] = useState(initialVersion);
   const [versionHistory, setVersionHistory] = useState<InteractiveReportVersionSummary[] | null>(null);
 
   useEffect(() => {
-    setReport(initialReport);
+    setReport(normalizedInitialReport);
     setVersion(initialVersion);
-    setFilters(createDefaultReportFilters(initialReport));
+    setFilters(createDefaultReportFilters(normalizedInitialReport));
     setVersionHistory(null);
     setNotice("已加载本轮分析结果；当前筛选是新的运行时视图。");
-  }, [initialReport, initialVersion]);
+  }, [normalizedInitialReport, initialVersion]);
 
   const changeFilter = (id: keyof ReportRuntimeFilters, value: string) => setFilters((current) => ({ ...current, [id]: value }));
   const persist = async (nextReport: InteractiveReport) => {
@@ -244,6 +246,34 @@ function InteractiveReportContent({ taskTitle, running, initialReport, initialVe
       )}
     </section>
   );
+}
+
+function withStablePuckIds(report: InteractiveReport): InteractiveReport {
+  const document = report.document;
+  const content = Array.isArray(document.content)
+    ? document.content.map((item, index) => withStablePuckItemId(item, `${report.id}-content-${index}`))
+    : [];
+  const zones = document.zones
+    ? Object.fromEntries(Object.entries(document.zones).map(([zone, items]) => [
+        zone,
+        Array.isArray(items) ? items.map((item, index) => withStablePuckItemId(item, `${report.id}-${zone}-${index}`)) : [],
+      ]))
+    : {};
+  return {
+    ...report,
+    document: {
+      ...document,
+      content: content as Data["content"],
+      zones: zones as Data["zones"],
+    },
+  };
+}
+
+function withStablePuckItemId(item: unknown, fallbackId: string) {
+  if (!item || typeof item !== "object") return item;
+  const block = item as { props?: Record<string, unknown> };
+  const props = block.props && typeof block.props === "object" ? block.props : {};
+  return { ...block, props: { ...props, id: typeof props.id === "string" && props.id ? props.id : fallbackId } };
 }
 
 function createDefaultReportFilters(report: InteractiveReport): ReportRuntimeFilters {

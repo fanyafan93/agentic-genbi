@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator, Callable, Iterable
 
 from backend.config import load_project_env
 from backend.harness.codex_mcp_config import (
-    load_codex_mcp_servers_from_env,
+    load_runtime_codex_mcp_servers_from_env,
     to_codex_config_overrides,
 )
 from backend.harness.events import AgentEvent
@@ -71,7 +71,8 @@ class CodexSdkAnalysisRuntime:
         # Codex CLI reads config from $CODEX_HOME/config.toml at startup. Render
         # provider + MCP config into a runtime-only directory so deploys that
         # lack a baked-in ~/.codex/config.toml still pick up our overrides.
-        raw_mcp_servers = load_codex_mcp_servers_from_env()
+        raw_mcp_servers = load_runtime_codex_mcp_servers_from_env()
+        default_tools_enabled = _codex_default_tools_enabled_from_env()
         self.codex_home = os.getenv("GENBI_CODEX_HOME", "").strip() or None
         if not self.codex_home and (self.provider != "openai" or raw_mcp_servers):
             self.codex_home = tempfile.mkdtemp(prefix="genbi-codex-home-")
@@ -82,6 +83,7 @@ class CodexSdkAnalysisRuntime:
                 base_url=self.base_url,
                 api_key_env=_provider_env_key(self.provider),
                 mcp_servers=raw_mcp_servers,
+                default_tools_enabled=default_tools_enabled,
             )
         self._codex_factory = codex_factory
         self._async_codex_factory = async_codex_factory
@@ -204,6 +206,9 @@ class CodexSdkAnalysisRuntime:
             kwargs["model"] = self.model
         if self.provider != "openai":
             kwargs["model_provider"] = self.provider
+        thread_config = _analysis_thread_config()
+        if thread_config:
+            kwargs["config"] = thread_config
         return kwargs
 
     def _turn_kwargs(self, context: CodexSdkRunnerContext) -> dict[str, Any]:
@@ -230,7 +235,10 @@ class CodexSdkAnalysisRuntime:
                     f"model_providers.{self.provider}.wire_api=\"responses\"",
                 ]
             )
-        raw_mcp_servers = load_codex_mcp_servers_from_env()
+        default_tools_enabled = _codex_default_tools_enabled_from_env()
+        if default_tools_enabled is not None:
+            overrides.append(f"default_tools_enabled={_toml_bool(default_tools_enabled)}")
+        raw_mcp_servers = load_runtime_codex_mcp_servers_from_env()
         overrides.extend(to_codex_config_overrides(raw_mcp_servers))
         return overrides
 
@@ -531,6 +539,24 @@ def _provider_env_key(provider: str) -> str:
     return f"{provider.upper()}_API_KEY"
 
 
+def _analysis_thread_config() -> dict[str, Any]:
+    default_tools_enabled = _codex_default_tools_enabled_from_env()
+    if default_tools_enabled is None:
+        return {}
+    return {"default_tools_enabled": default_tools_enabled}
+
+
+def _codex_default_tools_enabled_from_env() -> bool | None:
+    raw_value = os.getenv("GENBI_CODEX_DEFAULT_TOOLS_ENABLED", "false").strip().lower()
+    if not raw_value or raw_value in {"unset", "default"}:
+        return None
+    return raw_value not in {"0", "false", "off", "no", "disabled"}
+
+
+def _toml_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
 def _toml_string(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
@@ -543,6 +569,7 @@ def _render_codex_home_config(
     base_url: str,
     api_key_env: str,
     mcp_servers: list[Any],
+    default_tools_enabled: bool | None = None,
 ) -> None:
     """Write $CODEX_HOME/config.toml from current runtime configuration.
 
@@ -555,6 +582,8 @@ def _render_codex_home_config(
     home.mkdir(parents=True, exist_ok=True)
     config_path = home / "config.toml"
     lines: list[str] = []
+    if default_tools_enabled is not None:
+        lines.extend([f"default_tools_enabled={_toml_bool(default_tools_enabled)}", ""])
     if provider and provider != "openai":
         lines.extend(
             [

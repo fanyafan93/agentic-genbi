@@ -89,6 +89,27 @@ def load_codex_mcp_servers_from_env(
     return servers
 
 
+def load_runtime_codex_mcp_servers_from_env(
+    environ: dict[str, str] | None = None,
+) -> list[CodexMcpServer]:
+    """Return only MCP servers allowed for the analysis Codex runtime.
+
+    The system UI may list all configured servers so operators can inspect and
+    toggle them. The analysis runtime should expose only enabled servers that
+    are explicitly allowed by GenBI configuration.
+    """
+    env = environ if environ is not None else dict(os.environ)
+    allowed_names = _allowed_runtime_server_names(env)
+    servers: list[CodexMcpServer] = []
+    for server in load_codex_mcp_servers_from_env(env):
+        if not _enabled_server(server, env=env):
+            continue
+        if allowed_names is not None and server.name not in allowed_names:
+            continue
+        servers.append(server)
+    return servers
+
+
 def _split_tokens(value: str) -> list[str]:
     if not value:
         return []
@@ -169,6 +190,17 @@ def _enabled_server(server: CodexMcpServer, *, env: dict[str, str]) -> bool:
     return value not in {"0", "false", "off", "no", "disabled"}
 
 
+def _allowed_runtime_server_names(env: dict[str, str]) -> set[str] | None:
+    raw_value = env.get("GENBI_CODEX_ALLOWED_MCP_SERVERS", "").strip()
+    if not raw_value:
+        return None
+    return {
+        item.strip()
+        for item in raw_value.replace(",", " ").split()
+        if item.strip()
+    }
+
+
 def _trusted_server(server: CodexMcpServer, *, env: dict[str, str]) -> bool:
     trusted_names = {
         item.strip()
@@ -196,6 +228,12 @@ def _known_tools(server: CodexMcpServer, *, trusted: bool) -> list[CodexMcpTool]
                 trusted=trusted,
             ),
             CodexMcpTool(
+                name="validate_interactive_report",
+                description="Validate a GenBI ReportArtifact without saving it.",
+                permission="artifact.validate",
+                trusted=trusted,
+            ),
+            CodexMcpTool(
                 name="update_interactive_report",
                 description="Planned: update an existing interactive_report artifact.",
                 permission="artifact.write",
@@ -211,8 +249,6 @@ def _known_tools(server: CodexMcpServer, *, trusted: bool) -> list[CodexMcpTool]
     if "mysql" in " ".join([server.command, *server.args]).lower() or "doris" in server.name.lower():
         return [
             CodexMcpTool("mysql_query", "Run a readonly SQL query through the configured Doris/MySQL MCP server.", "database.readonly"),
-            CodexMcpTool("list_mcp_resources", "List MCP resources exposed by the server.", "metadata.read"),
-            CodexMcpTool("read_mcp_resource", "Read a specific MCP resource exposed by the server.", "metadata.read"),
         ]
     return []
 

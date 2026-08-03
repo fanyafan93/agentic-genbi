@@ -136,6 +136,38 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertEqual(fake_codex.resumed[0], "codex_existing")
         self.assertEqual(events[-1].type, "turn/completed")
 
+    def test_thread_start_receives_default_tools_disabled_config(self) -> None:
+        fake_codex = _FakeAsyncCodex()
+        with patch.dict(
+            "os.environ",
+            {
+                "GENBI_ENV_FILE": "missing-test.env",
+                "GENBI_CODEX_DEFAULT_TOOLS_ENABLED": "false",
+            },
+            clear=True,
+        ):
+            runtime = CodexSdkAnalysisRuntime(async_codex_factory=lambda: fake_codex)
+
+        list(runtime.stream("analyze"))
+
+        self.assertEqual(fake_codex.started_kwargs["config"], {"default_tools_enabled": False})
+
+    def test_config_overrides_include_default_tools_disabled(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "GENBI_ENV_FILE": "missing-test.env",
+                "GENBI_CODEX_DEFAULT_TOOLS_ENABLED": "false",
+            },
+            clear=True,
+        ):
+            runtime = CodexSdkAnalysisRuntime(
+                codex_factory=lambda: None,
+                async_codex_factory=lambda: None,
+            )
+
+        self.assertIn("default_tools_enabled=false", runtime._config_overrides())
+
     def test_disabled_runtime_returns_failed_turn_event(self) -> None:
         events = list(CodexSdkAnalysisRuntime.disabled().stream("analyze", context={"genbi_turn_id": "turn_disabled"}))
 

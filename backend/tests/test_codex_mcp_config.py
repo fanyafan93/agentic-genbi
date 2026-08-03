@@ -10,6 +10,7 @@ from backend.harness.codex_mcp_config import (
     CodexMcpServer,
     codex_mcp_server_status_payload,
     load_codex_mcp_servers_from_env,
+    load_runtime_codex_mcp_servers_from_env,
     test_codex_mcp_server,
     to_codex_config_overrides,
 )
@@ -69,6 +70,28 @@ class LoadCodexMcpServersFromEnvTest(unittest.TestCase):
         }
         servers = load_codex_mcp_servers_from_env(env)
         self.assertEqual([s.name for s in servers], ["BI_doris", "openmetadata"])
+
+    def test_runtime_loader_keeps_only_enabled_allowed_servers(self) -> None:
+        env = {
+            "GENBI_CODEX_MCP_COUNT": "4",
+            "GENBI_CODEX_ALLOWED_MCP_SERVERS": "BI_doris GenBI_report",
+            "GENBI_CODEX_MCP_BI_doris_ENABLED": "true",
+            "GENBI_CODEX_MCP_GenBI_report_ENABLED": "true",
+            "GENBI_CODEX_MCP_openmetadata_ENABLED": "true",
+            "GENBI_CODEX_MCP_chrome_devtools_ENABLED": "false",
+            "GENBI_CODEX_MCP_1_NAME": "BI_doris",
+            "GENBI_CODEX_MCP_1_COMMAND": "npx",
+            "GENBI_CODEX_MCP_2_NAME": "GenBI_report",
+            "GENBI_CODEX_MCP_2_COMMAND": "python",
+            "GENBI_CODEX_MCP_3_NAME": "openmetadata",
+            "GENBI_CODEX_MCP_3_COMMAND": "npx",
+            "GENBI_CODEX_MCP_4_NAME": "chrome_devtools",
+            "GENBI_CODEX_MCP_4_COMMAND": "npx",
+        }
+
+        servers = load_runtime_codex_mcp_servers_from_env(env)
+
+        self.assertEqual([server.name for server in servers], ["BI_doris", "GenBI_report"])
 
     def test_status_marks_genbi_report_as_trusted_internal_tool(self) -> None:
         payload = codex_mcp_server_status_payload({

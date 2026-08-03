@@ -215,8 +215,13 @@ img.user-chip-avatar { object-fit: cover; }
 .agent-activity-item.activity-message { padding: 2px 0; color: var(--text-secondary); }
 .activity-message-content p { margin: 0; }
 .agent-activity-item.activity-tool { display: flex; align-items: center; gap: 7px; padding: 5px 6px; border-radius: 5px; background: rgba(30,58,95,.035); font-size: .74rem; }
-.agent-activity-item.activity-tool > strong { min-width: 0; flex: 1; font-weight: 600; }
-.agent-activity-item.activity-tool > em { flex: 0 0 auto; font-style: normal; font-size: .62rem; color: var(--text-tertiary); }
+.agent-activity-item.activity-tool > .tool-step-detail { flex: 1; min-width: 0; }
+.agent-activity-tool-label,
+.tool-step-detail summary { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.agent-activity-tool-label { flex: 1; }
+.agent-activity-tool-icon { height: 16px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; padding: 0 4px; border-radius: 3px; background: rgba(107,143,137,.14); color: var(--accent-moss); font-size: .52rem; font-weight: 800; letter-spacing: .02em; line-height: 1; }
+.agent-activity-tool-label strong,
+.tool-step-detail summary strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .agent-activity + .flow-content { margin-top: 3px; padding-top: 9px; border-top: 1px solid rgba(30,58,95,.08); }
 .debug-events { display: grid; gap: 6px; margin-top: 8px; }
 .debug-event { border: 1px solid var(--line-subtle); border-radius: 6px; background: rgba(246,248,250,.72); overflow: hidden; }
@@ -256,6 +261,8 @@ img.user-chip-avatar { object-fit: cover; }
 .composer .send-btn svg { width: 14px; height: 14px; }
 .composer .send-btn:hover { background: #d75b4e; box-shadow: 0 6px 14px rgba(232,104,90,.34); }
 .composer .send-btn:active { transform: translateY(1px); }
+.composer .send-btn.is-stopping { background: #243b55; box-shadow: 0 4px 10px rgba(36,59,85,.22); }
+.composer .send-btn.is-stopping:hover { background: #17283c; box-shadow: 0 6px 14px rgba(36,59,85,.28); }
 .workspace-resizer { position: relative; display: grid; place-items: center; cursor: col-resize; touch-action: none; }
 .workspace-resizer::before { content: ""; position: absolute; inset: 0 3px; background: transparent; }
 .workspace-resizer span { width: 1px; height: 56px; border-radius: 999px; background: rgba(30,58,95,.14); transition: 160ms ease; }

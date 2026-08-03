@@ -377,6 +377,40 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(detail.json()["thread"]["status"], "failed")
             self.assertEqual(detail.json()["turns"][0]["status"], "failed")
 
+    def test_interrupted_terminal_event_persists_interrupted_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            events = [
+                AgentEvent(
+                    type="turn/started",
+                    turn_id="analysis_turn_cancelled",
+                    payload={
+                        "thread_id": "analysis_thread_cancelled",
+                        "turn_id": "analysis_turn_cancelled",
+                        "codex_thread_id": "codex_thread_cancelled",
+                        "codex_turn_id": "codex_turn_cancelled",
+                    },
+                ),
+                analysis_api._interrupted_terminal_event(
+                    thread_id="analysis_thread_cancelled",
+                    turn_id="analysis_turn_cancelled",
+                ),
+            ]
+
+            thread_store.save_turn(
+                thread_id="analysis_thread_cancelled",
+                turn_id="analysis_turn_cancelled",
+                question="cancelled stream",
+                input_kind="start",
+                product_kind="analysis_task",
+                user_id=None,
+                events=events,
+            )
+            detail = thread_store.get_thread("analysis_thread_cancelled")
+
+            self.assertEqual(detail["thread"]["status"], "interrupted")
+            self.assertEqual(detail["turns"][0]["status"], "interrupted")
+
     def test_disabled_runtime_fails_explicitly_without_fabricated_content(self) -> None:
         app = create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled())
         client = TestClient(app)

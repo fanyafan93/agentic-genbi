@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { getAgentClient } from "@/modules/analysis/agentClients";
 import type { AgentEvent, AgentInput } from "@/modules/analysis/agentClients";
 import type { ArtifactFolder, ArtifactKind } from "../types/artifact";
@@ -51,6 +51,7 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
   const [reportArtifact, setReportArtifact] = useState<InteractiveReport | null>(null);
   const [codexLineage, setCodexLineage] = useState<FlowCodexLineage>({});
   const [running, setRunning] = useState(false);
+  const runningRef = useRef(false);
 
   useEffect(() => {
     cancelled = false;
@@ -61,8 +62,10 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
     setReportArtifact(null);
     setCodexLineage({});
     setRunning(false);
+    runningRef.current = false;
+    agent.cancel?.();
     return () => { cancelled = true; };
-  }, [threadKey, initial]);
+  }, [agent, threadKey, initial]);
 
   const applyEvent = useCallback((event: AgentEvent, currentNodes: FlowNode[]): FlowNode[] => {
     if (event.turnId) setTurnId(event.turnId);
@@ -106,6 +109,56 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
           role: "agent",
           content: cleanDisplayText(event.content),
           mode: event.mode,
+          steps: [],
+          activity: [],
+          activeItemId: getAgentEventItemId(event),
+        });
+      }
+      setNodes(next);
+      return next;
+    }
+
+    if (event.type === "thinking") {
+      const pendingIndex = currentNodes.findIndex((node) => node.id === "agent-pending");
+      if (pendingIndex >= 0) {
+        const thinkingNode: FlowNode = {
+          id: event.nodeId,
+          role: "agent",
+          content: "思考中...",
+          mode: "replace",
+          steps: [],
+          activity: [],
+          activeItemId: getAgentEventItemId(event),
+        };
+        const next = currentNodes.map((node, index) => (index === pendingIndex ? thinkingNode : node));
+        setNodes(next);
+        return next;
+      }
+
+      const next: FlowNode[] = currentNodes.map((node) => ({ ...node }) as FlowNode);
+      const exactIndex = next.findIndex((node) => node.id === event.nodeId && node.role === "agent");
+      const reverseIndex = [...next].reverse().findIndex((node) => node.role === "agent");
+      const targetIndex = exactIndex >= 0 ? exactIndex : reverseIndex >= 0 ? next.length - 1 - reverseIndex : -1;
+      if (targetIndex >= 0) {
+        const target = next[targetIndex];
+        if (target.role === "agent") {
+          const withArchivedMessage = target.content.trim() && target.content !== "思考中..."
+            ? archiveAgentMessage(target)
+            : target;
+          next[targetIndex] = {
+            ...withArchivedMessage,
+            id: event.nodeId,
+            content: "思考中...",
+            mode: "replace",
+            activeItemId: getAgentEventItemId(event) ?? withArchivedMessage.activeItemId,
+          };
+        }
+      } else {
+        next.push({
+          id: event.nodeId,
+          role: "agent",
+          content: "思考中...",
+          mode: "replace",
           steps: [],
           activity: [],
           activeItemId: getAgentEventItemId(event),
@@ -263,6 +316,7 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
   const consume = useCallback(async (input: AgentInput) => {
     if (cancelled) return;
     setRunning(true);
+    runningRef.current = true;
     let snapshot: FlowNode[] = withOptimisticTurn(nodes, input);
     if (snapshot !== nodes) setNodes(snapshot);
     try {
@@ -275,12 +329,20 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
       }
     } finally {
       setRunning(false);
+      runningRef.current = false;
     }
   }, [agent, applyEvent, nodes, threadId]);
 
   const start = useCallback((question?: string) => consume({ kind: "start", question }), [consume]);
   const send = useCallback((content: string) => consume({ kind: "message", content }), [consume]);
   const reply = useCallback((optionId: string) => consume({ kind: "reply", optionId }), [consume]);
+  const stop = useCallback(() => {
+    if (!runningRef.current) return;
+    agent.cancel?.();
+    runningRef.current = false;
+    setRunning(false);
+    setNodes((current) => current.filter((node) => node.id !== "agent-pending"));
+  }, [agent]);
 
   return {
     turnId,
@@ -293,6 +355,7 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
     start,
     send,
     reply,
+    stop,
   };
 }
 
