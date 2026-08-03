@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-from backend.harness.thread_store import CodexItemProjectionRecord, ItemRecord, ThreadRecord, ThreadStore, TurnRecord
+from backend.harness.thread_store import CodexItemProjectionRecord, ItemRecord, ThreadProductKind, ThreadRecord, ThreadStore, TurnRecord
 from backend.analysis.asset_store import (
     AnalysisAssetRecord,
     AnalysisAssetReopenContext,
@@ -286,6 +286,20 @@ class PostgresThreadStore(ThreadStore):
             conn.execute(f"DELETE FROM {POSTGRES_TURN_TABLE}")
             conn.execute(f"DELETE FROM {POSTGRES_THREAD_TABLE}")
             return item_count
+
+    def delete_thread(self, thread_id: str, *, product_kind: ThreadProductKind | None = None) -> bool:
+        with _connect(self.database_url) as conn:
+            if product_kind:
+                result = conn.execute(
+                    f"DELETE FROM {POSTGRES_THREAD_TABLE} WHERE id = %(id)s AND product_kind = %(product_kind)s",
+                    {"id": thread_id, "product_kind": product_kind},
+                )
+            else:
+                result = conn.execute(
+                    f"DELETE FROM {POSTGRES_THREAD_TABLE} WHERE id = %(id)s",
+                    {"id": thread_id},
+                )
+            return bool(result.rowcount)
 
 
 class PostgresAnalysisAssetStore(AnalysisAssetStore):
@@ -610,13 +624,45 @@ class PostgresInteractiveReportStore:
                     queries JSONB NOT NULL,
                     chart_specs JSONB NOT NULL,
                     grid_specs JSONB NOT NULL,
+                    datasets JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     PRIMARY KEY (report_id, version)
                 )
                 """
             )
+            conn.execute(
+                f"""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = '{POSTGRES_INTERACTIVE_REPORT_TABLE}'
+                          AND column_name = 'source_run_id'
+                    ) THEN
+                        ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ALTER COLUMN source_run_id DROP NOT NULL;
+                    END IF;
+                END $$;
+                """
+            )
+            conn.execute(
+                f"""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = '{POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE}'
+                          AND column_name = 'source_run_id'
+                    ) THEN
+                        ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ALTER COLUMN source_run_id DROP NOT NULL;
+                    END IF;
+                END $$;
+                """
+            )
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS source_thread_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS source_turn_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS datasets JSONB NOT NULL DEFAULT '{{}}'::jsonb")
             conn.execute(
                 f"""
                 UPDATE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} AS version
@@ -679,10 +725,10 @@ class PostgresInteractiveReportStore:
                     f"""
                     INSERT INTO {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} (
                         report_id, version, source_thread_id, source_turn_id,
-                        document, filters, queries, chart_specs, grid_specs
+                        document, filters, queries, chart_specs, grid_specs, datasets
                     ) VALUES (
                         %(report_id)s, %(version)s, %(source_thread_id)s, %(source_turn_id)s,
-                        %(document)s, %(filters)s, %(queries)s, %(chart_specs)s, %(grid_specs)s
+                        %(document)s, %(filters)s, %(queries)s, %(chart_specs)s, %(grid_specs)s, %(datasets)s
                     )
                     """,
                     _interactive_report_version_params(payload, version=next_version),
@@ -1098,6 +1144,7 @@ def _interactive_report_version_params(payload: dict[str, Any], *, version: int)
         "queries": _jsonb(payload["queries"]),
         "chart_specs": _jsonb(payload["chartSpecs"]),
         "grid_specs": _jsonb(payload["gridSpecs"]),
+        "datasets": _jsonb(payload.get("datasets", {})),
     }
 
 
@@ -1246,6 +1293,7 @@ def _interactive_report_version_from_row(row: dict[str, Any]) -> InteractiveRepo
         queries=dict(row["queries"] or {}),
         chartSpecs=dict(row["chart_specs"] or {}),
         gridSpecs=dict(row["grid_specs"] or {}),
+        datasets=dict(row["datasets"] or {}),
         createdAt=_iso(row["created_at"]) or "",
     )
 

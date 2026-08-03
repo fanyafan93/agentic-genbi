@@ -212,6 +212,42 @@ describe("analysis flow streaming", () => {
     });
   });
 
+  test("groups consecutive identical tool activity items", async () => {
+    mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
+      yield { type: "user", nodeId: "user-1", content: "查表", turnId: "turn-1", threadId: "thread-1" };
+      yield { type: "tokens", nodeId: "agent-1", text: "开始查。", codexItemId: "msg-1" };
+      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 1", itemId: "call-1" };
+      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 2", itemId: "call-2" };
+      yield { type: "step", nodeId: "agent-1", label: "工具调用：BI_doris / mysql_query", state: "done", detail: "SELECT 3", itemId: "call-3" };
+      yield { type: "tokens", nodeId: "agent-1", text: "查完。", codexItemId: "msg-2" };
+      yield { type: "done" };
+    });
+
+    const { result } = renderHook(() => useFlow(null, EMPTY_FLOW));
+
+    act(() => {
+      void result.current.start("查表");
+    });
+
+    await waitFor(() => {
+      const agentNode = result.current.nodes[1];
+      expect(agentNode).toMatchObject({ role: "agent" });
+      if (agentNode.role !== "agent") throw new Error("expected agent node");
+      expect(agentNode.activity).toEqual([
+        { kind: "message", itemId: "msg-1", content: "开始查。" },
+        {
+          kind: "tool",
+          itemId: "call-1",
+          label: "工具调用：BI_doris / mysql_query",
+          state: "done",
+          detail: "SELECT 1",
+          count: 3,
+          details: ["SELECT 1", "SELECT 2", "SELECT 3"],
+        },
+      ]);
+    });
+  });
+
   test("keeps a tool item that arrives before the first agent message", async () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
       yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };

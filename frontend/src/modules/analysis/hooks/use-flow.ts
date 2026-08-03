@@ -10,7 +10,15 @@ export type FlowRole = "user" | "agent" | "ask";
 
 export type FlowActivity =
   | { kind: "message"; content: string; itemId?: string }
-  | { kind: "tool"; label: string; state: "queued" | "running" | "done"; detail?: string; itemId?: string };
+  | {
+      kind: "tool";
+      label: string;
+      state: "queued" | "running" | "done";
+      detail?: string;
+      details?: string[];
+      itemId?: string;
+      count?: number;
+    };
 
 export type FlowNode =
   | { id: string; role: "user"; content: string }
@@ -34,10 +42,10 @@ export type FlowCodexLineage = {
 
 export const STEP_INITIAL = ["识别业务口径", "查询可用数据表", "生成并校验 SQL", "整理图表与结论"];
 
-export function useFlow(conversationKey: string | null, initial: FlowNode[] = []) {
+export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
   const agent = useMemo(() => getAgentClient(), []);
-  const [turnId, setTurnId] = useState<string | null>(conversationKey);
-  const [conversationId, setConversationId] = useState<string | null>(conversationKey);
+  const [turnId, setTurnId] = useState<string | null>(threadKey);
+  const [threadId, setThreadId] = useState<string | null>(threadKey);
   const [nodes, setNodes] = useState<FlowNode[]>(initial);
   const [artifacts, setArtifacts] = useState<ArtifactFolder[]>([]);
   const [reportArtifact, setReportArtifact] = useState<InteractiveReport | null>(null);
@@ -46,23 +54,23 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
 
   useEffect(() => {
     cancelled = false;
-    setTurnId(conversationKey);
-    setConversationId(conversationKey);
+    setTurnId(threadKey);
+    setThreadId(threadKey);
     setNodes([...initial]);
     setArtifacts([]);
     setReportArtifact(null);
     setCodexLineage({});
     setRunning(false);
     return () => { cancelled = true; };
-  }, [conversationKey, initial]);
+  }, [threadKey, initial]);
 
   const applyEvent = useCallback((event: AgentEvent, currentNodes: FlowNode[]): FlowNode[] => {
     if (event.turnId) setTurnId(event.turnId);
-    if (event.threadId) setConversationId(event.threadId);
+    if (event.threadId) setThreadId(event.threadId);
     updateCodexLineage(event, setCodexLineage);
 
     if (event.type === "user") {
-      const userNode: FlowNode = { id: event.nodeId, role: "user", content: event.content };
+      const userNode: FlowNode = { id: event.nodeId, role: "user", content: cleanDisplayText(event.content) };
       const pendingIndex = currentNodes.findIndex((node) => node.id === "user-pending");
       const next = pendingIndex >= 0
         ? currentNodes.map((node, index) => (index === pendingIndex ? userNode : node))
@@ -79,13 +87,14 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
         if (target.role === "agent") {
           const itemId = getAgentEventItemId(event);
           const itemChanged = Boolean(itemId && target.activeItemId && itemId !== target.activeItemId);
-          if (isDuplicateAgentContent(target.content, event.content)) {
+          const content = cleanDisplayText(event.content);
+          if (isDuplicateAgentContent(target.content, content)) {
             next[existing] = { ...target, mode: event.mode };
           } else {
             const withArchivedMessage = itemChanged ? archiveAgentMessage(target) : target;
             next[existing] = {
               ...withArchivedMessage,
-              content: event.content,
+              content,
               mode: event.mode,
               activeItemId: itemId ?? withArchivedMessage.activeItemId,
             };
@@ -95,7 +104,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
         next.push({
           id: event.nodeId,
           role: "agent",
-          content: event.content,
+          content: cleanDisplayText(event.content),
           mode: event.mode,
           steps: [],
           activity: [],
@@ -112,7 +121,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
         const streamedNode: FlowNode = {
           id: event.nodeId,
           role: "agent",
-          content: event.text,
+          content: cleanDisplayText(event.text),
           mode: "delta",
           steps: [],
           activity: [],
@@ -133,7 +142,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
           const withArchivedMessage = itemChanged ? archiveAgentMessage(target) : target;
           next[idx] = {
             ...withArchivedMessage,
-            content: withArchivedMessage.content + event.text,
+            content: withArchivedMessage.content + cleanDisplayText(event.text),
             activeItemId: itemId ?? withArchivedMessage.activeItemId,
           };
         }
@@ -141,7 +150,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
         next.push({
           id: event.nodeId,
           role: "agent",
-          content: event.text,
+          content: cleanDisplayText(event.text),
           mode: "delta",
           steps: [],
           activity: [],
@@ -180,7 +189,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
           const activityIndex = activity.findIndex((item) => item.kind === "tool" && (
             event.itemId ? item.itemId === event.itemId : item.label === event.label && item.detail === event.detail
           ));
-          const toolActivity: FlowActivity = {
+          const toolActivity: Extract<FlowActivity, { kind: "tool" }> = {
             kind: "tool",
             label: event.label,
             state: event.state,
@@ -188,7 +197,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
             itemId: event.itemId,
           };
           if (activityIndex >= 0) activity[activityIndex] = toolActivity;
-          else activity.push(toolActivity);
+          else appendToolActivity(activity, toolActivity);
           next[targetIndex] = { ...withArchivedMessage, id: event.nodeId ?? target.id, steps, activity };
         }
       } else if (event.nodeId) {
@@ -239,7 +248,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
     }
 
     if (event.type === "error") {
-      const errorNode: FlowNode = { id: `agent-error-${Date.now()}`, role: "agent", content: event.message, mode: "replace" };
+      const errorNode: FlowNode = { id: `agent-error-${Date.now()}`, role: "agent", content: cleanDisplayText(event.message), mode: "replace" };
       const pendingIndex = currentNodes.findIndex((node) => node.id === "agent-pending");
       const next = pendingIndex >= 0
         ? currentNodes.map((node, index) => (index === pendingIndex ? errorNode : node))
@@ -257,14 +266,17 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
     let snapshot: FlowNode[] = withOptimisticTurn(nodes, input);
     if (snapshot !== nodes) setNodes(snapshot);
     try {
-      for await (const event of agent.send(input)) {
+      const inputWithThread = input.kind === "reset" || input.threadId
+        ? input
+        : { ...input, threadId };
+      for await (const event of agent.send(inputWithThread)) {
         if (cancelled) break;
         snapshot = applyEvent(event, snapshot);
       }
     } finally {
       setRunning(false);
     }
-  }, [agent, applyEvent, nodes]);
+  }, [agent, applyEvent, nodes, threadId]);
 
   const start = useCallback((question?: string) => consume({ kind: "start", question }), [consume]);
   const send = useCallback((content: string) => consume({ kind: "message", content }), [consume]);
@@ -272,7 +284,7 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
 
   return {
     turnId,
-    conversationId,
+    threadId,
     nodes,
     artifacts,
     reportArtifact,
@@ -290,12 +302,16 @@ function isDuplicateAgentContent(currentContent: string, nextContent: string): b
   return Boolean(currentContent && nextContent && currentContent.includes(nextContent));
 }
 
+function cleanDisplayText(value: string): string {
+  return value.replace(/\uFFFD+/g, "");
+}
+
 function withOptimisticTurn(nodes: FlowNode[], input: AgentInput): FlowNode[] {
   const content = input.kind === "start" ? input.question : input.kind === "message" ? input.content : "";
   if (!content || nodes.some((node) => node.id === "user-pending" || node.id === "agent-pending")) return nodes;
   return [
     ...nodes,
-    { id: "user-pending", role: "user", content },
+    { id: "user-pending", role: "user", content: cleanDisplayText(content) },
     { id: "agent-pending", role: "agent", content: "正在思考...", mode: "replace", steps: [] },
   ];
 }
@@ -312,6 +328,27 @@ function archiveAgentMessage(node: Extract<FlowNode, { role: "agent" }>): Extrac
   if (existing >= 0) activity[existing] = message;
   else activity.push(message);
   return { ...node, content: "", activity };
+}
+
+function appendToolActivity(activity: FlowActivity[], toolActivity: Extract<FlowActivity, { kind: "tool" }>): void {
+  const previous = activity.at(-1);
+  if (
+    previous?.kind === "tool"
+    && previous.label === toolActivity.label
+    && previous.state === toolActivity.state
+  ) {
+    const details = [
+      ...(previous.details ?? (previous.detail ? [previous.detail] : [])),
+      ...(toolActivity.detail ? [toolActivity.detail] : []),
+    ];
+    activity[activity.length - 1] = {
+      ...previous,
+      count: (previous.count ?? 1) + 1,
+      details,
+    };
+    return;
+  }
+  activity.push(toolActivity);
 }
 
 function updateCodexLineage(

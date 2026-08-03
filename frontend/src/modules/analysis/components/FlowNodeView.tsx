@@ -73,14 +73,13 @@ export function FlowNodeView({ node, onReply }: Props) {
                     </div>
                   ) : (
                     <>
-                      <span className={`timeline-dot ${item.state}`} aria-hidden="true" />
                       {item.detail ? (
                         <details className="tool-step-detail">
-                          <summary><strong>{item.label}</strong></summary>
-                          <pre>{item.detail}</pre>
+                          <summary><strong>{item.label}{item.count && item.count > 1 ? ` ×${item.count}` : ""}</strong></summary>
+                          <pre>{(item.details && item.details.length > 0 ? item.details : [item.detail]).join("\n\n")}</pre>
                         </details>
                       ) : (
-                        <strong>{item.label}</strong>
+                        <strong>{item.label}{item.count && item.count > 1 ? ` ×${item.count}` : ""}</strong>
                       )}
                       <em>{item.state === "done" ? "已完成" : item.state === "running" ? "进行中" : "等待中"}</em>
                     </>

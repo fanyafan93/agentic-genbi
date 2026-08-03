@@ -11,6 +11,7 @@ from backend.harness.minimax_codex_adapter import (
     NamespaceToolMap,
     adapter_base_url,
     adapter_enabled,
+    _rewrite_model_name,
     rewrite_request_body,
     rewrite_response_event,
     rewrite_sse_chunk_text,
@@ -27,6 +28,18 @@ class MinimaxCodexAdapterTest(unittest.TestCase):
             adapter_base_url({"GENBI_CODEX_MINIMAX_ADAPTER_BASE_URL": "http://backend/proxy/v1"}),
             "http://backend/proxy/v1",
         )
+
+    def test_rewrite_codex_auto_review_model_to_configured_minimax_model(self) -> None:
+        self.assertEqual(_rewrite_model_name("codex-auto-review", {"GENBI_CODEX_AUTO_REVIEW_MODEL": "MiniMax-Review"}), "MiniMax-Review")
+        self.assertEqual(_rewrite_model_name("codex-auto-review", {"GENBI_ANALYSIS_MODEL": "MiniMax-M3"}), "MiniMax-M3")
+        self.assertEqual(_rewrite_model_name("codex-auto-review", {}), "MiniMax-M3")
+        self.assertEqual(_rewrite_model_name("MiniMax-M3", {"GENBI_CODEX_AUTO_REVIEW_MODEL": "MiniMax-Review"}), "MiniMax-M3")
+
+    def test_rewrite_request_maps_codex_auto_review_model(self) -> None:
+        rewritten, maps = rewrite_request_body({"model": "codex-auto-review"})
+
+        self.assertEqual(rewritten["model"], "MiniMax-M3")
+        self.assertEqual(maps, [])
 
     def test_rewrite_request_flattens_namespace_tools(self) -> None:
         body = {
@@ -96,6 +109,27 @@ class MinimaxCodexAdapterTest(unittest.TestCase):
 
         self.assertEqual(rewritten["output"][0]["namespace"], "mcp__BI_doris__")
         self.assertEqual(rewritten["output"][0]["name"], "mysql_query")
+
+    def test_rewrite_response_maps_unique_bare_tool_name_to_namespace(self) -> None:
+        event = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "name": "create_interactive_report",
+                "arguments": "{}",
+            },
+        }
+
+        rewritten = rewrite_response_event(
+            event,
+            [
+                NamespaceToolMap(namespace="mcp__BI_doris__", tool_names=frozenset({"mysql_query"})),
+                NamespaceToolMap(namespace="mcp__GenBI_report__", tool_names=frozenset({"create_interactive_report"})),
+            ],
+        )
+
+        self.assertEqual(rewritten["item"]["namespace"], "mcp__GenBI_report__")
+        self.assertEqual(rewritten["item"]["name"], "create_interactive_report")
 
     def test_rewrite_sse_chunk_text_rewrites_data_payloads(self) -> None:
         payload = {

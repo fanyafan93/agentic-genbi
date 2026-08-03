@@ -8,12 +8,22 @@ import {
   type BusinessSemanticSection,
   type StructuredKnowledgeSource,
 } from "@/modules/business-semantics/components/BusinessSemanticLibrary";
-import { useFlow } from "../hooks/use-flow";
+import { useFlow, type FlowNode } from "../hooks/use-flow";
 import { AnalysisTaskThread } from "./AnalysisTaskThread";
 import { InteractiveReportPanel } from "./InteractiveReportPanel";
 import { MyAnalysisPage } from "./MyAnalysisPage";
+import { SystemMcpPage } from "./SystemMcpPage";
+import {
+  deleteBackendAnalysisThread,
+  flowNodesFromBackendThread,
+  getBackendAnalysisThread,
+  listBackendAnalysisThreads,
+  shouldUseBackendAnalysisClient,
+  type BackendAnalysisThreadSummary,
+} from "../agentClients/backendClient";
 import {
   getInteractiveReportFromBackend,
+  listInteractiveReportsByThreadFromBackend,
   listInteractiveReportsFromBackend,
   listInteractiveReportVersionsFromBackend,
   saveInteractiveReportToBackend,
@@ -40,22 +50,6 @@ const structuredKnowledgeNav: Array<{
   { id: "database", label: "数据库", description: "MySQL / Doris 元数据" },
   { id: "kingdee", label: "金蝶", description: "业务数据字典" },
 ];
-const analysisTaskGroups = [
-  {
-    label: "今天",
-    items: [
-      { title: "渠道销售占比分析", time: "14:32", status: "saved", statusLabel: "已保存" },
-      { title: "库存周转异常排查", time: "10:18", status: "running", statusLabel: "运行中" },
-    ],
-  },
-  {
-    label: "更早",
-    items: [
-      { title: "华东区域 GMV 趋势", time: "昨天", status: "readonly", statusLabel: "只读" },
-      { title: "月度经营复盘", time: "7月21日", status: "readonly", statusLabel: "只读" },
-    ],
-  },
-] as const;
 type NavIconName = (typeof navItems)[number]["icon"] | typeof adminNavItem["icon"];
 
 function NavIcon({ name }: { name: NavIconName }) {
@@ -70,6 +64,67 @@ function NavIcon({ name }: { name: NavIconName }) {
   return <svg data-icon={name} aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
+type AnalysisThreadGroup = {
+  label: string;
+  items: BackendAnalysisThreadSummary[];
+};
+
+function groupAnalysisThreads(threads: BackendAnalysisThreadSummary[]): AnalysisThreadGroup[] {
+  const today = new Date().toDateString();
+  const todayItems = threads.filter((thread) => threadDate(thread).toDateString() === today);
+  const earlierItems = threads.filter((thread) => threadDate(thread).toDateString() !== today);
+  return [
+    ...(todayItems.length > 0 ? [{ label: "今天", items: todayItems }] : []),
+    ...(earlierItems.length > 0 ? [{ label: "更早", items: earlierItems }] : []),
+  ];
+}
+
+function analysisThreadTitle(thread: BackendAnalysisThreadSummary): string {
+  return usefulThreadTitle(thread.title) || usefulThreadTitle(thread.latestQuestion) || "历史任务";
+}
+
+function usefulThreadTitle(value: string | null | undefined): string {
+  const text = String(value ?? "").trim();
+  return text && text !== "未命名分析任务" ? text : "";
+}
+
+function taskTitleFromQuestion(question: string): string {
+  const text = question.trim().replace(/\s+/g, " ");
+  return text.slice(0, 32) || "未命名分析任务";
+}
+
+function optimisticStartNodes(question: string): FlowNode[] {
+  return [
+    { id: "user-pending", role: "user", content: question },
+    { id: "agent-pending", role: "agent", content: "正在思考...", mode: "replace", steps: [] },
+  ];
+}
+
+function analysisThreadTime(thread: BackendAnalysisThreadSummary): string {
+  const date = threadDate(thread);
+  if (Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) {
+    return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return "昨天";
+  return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+}
+
+function analysisThreadStatus(thread: BackendAnalysisThreadSummary): "running" | "saved" | "readonly" {
+  return thread.status === "running" ? "running" : thread.status === "completed" ? "saved" : "readonly";
+}
+
+function analysisThreadStatusLabel(thread: BackendAnalysisThreadSummary): string {
+  return thread.status === "running" ? "运行中" : thread.status === "completed" ? "已完成" : "已保存";
+}
+
+function threadDate(thread: BackendAnalysisThreadSummary): Date {
+  return new Date(thread.updatedAt || thread.createdAt || 0);
+}
+
 export function AnalysisWorkspace() {
   const { data: session } = useSession();
   const [activeTool, setActiveTool] = useState<ActiveTool>("analysis-workspace");
@@ -81,10 +136,14 @@ export function AnalysisWorkspace() {
   const [businessSemanticSection, setBusinessSemanticSection] = useState<BusinessSemanticSection>("structured");
   const [structuredKnowledgeSource, setStructuredKnowledgeSource] = useState<StructuredKnowledgeSource>("finereport");
   const [savedReports, setSavedReports] = useState<SavedInteractiveReport[]>([]);
+  const [analysisThreads, setAnalysisThreads] = useState<BackendAnalysisThreadSummary[]>([]);
+  const [analysisThreadsLoading, setAnalysisThreadsLoading] = useState(false);
+  const [selectingAnalysisThreads, setSelectingAnalysisThreads] = useState(false);
+  const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
+  const [initialFlowMessages, setInitialFlowMessages] = useState<ReturnType<typeof flowNodesFromBackendThread>>([]);
   const [openedReportId, setOpenedReportId] = useState<string | null>(null);
   const [pendingStartQuestion, setPendingStartQuestion] = useState<string | null>(null);
   const reportOwnerId = session?.user?.id ?? "local-user";
-  const initialFlowMessages = useMemo(() => [], []);
   const flow = useFlow(currentAnalysisTaskId, initialFlowMessages);
   useEffect(() => {
     let cancelled = false;
@@ -101,24 +160,115 @@ export function AnalysisWorkspace() {
     if (activeTool === "business-semantics") setCollapsed(false);
   }, [activeTool]);
   useEffect(() => {
+    let cancelled = false;
+    if (!shouldUseBackendAnalysisClient()) {
+      setAnalysisThreads([]);
+      return () => { cancelled = true; };
+    }
+    setAnalysisThreadsLoading(true);
+    void listBackendAnalysisThreads()
+      .then((threads) => { if (!cancelled) setAnalysisThreads(threads); })
+      .catch(() => { if (!cancelled) setAnalysisThreads([]); })
+      .finally(() => { if (!cancelled) setAnalysisThreadsLoading(false); });
+    return () => { cancelled = true; };
+  }, [flow.threadId]);
+  useEffect(() => {
     if (!pendingStartQuestion) return;
     flow.start(pendingStartQuestion);
     setPendingStartQuestion(null);
   }, [flow, pendingStartQuestion]);
+  useEffect(() => {
+    if (!flow.threadId || flow.threadId.startsWith("draft_") || !selectedAnalysisTask) return;
+    const threadId = flow.threadId;
+    setCurrentAnalysisTaskId(threadId);
+    setAnalysisThreads((threads) => {
+      const now = new Date().toISOString();
+      const existing = threads.find((thread) => thread.id === threadId);
+      const nextThread: BackendAnalysisThreadSummary = {
+        ...(existing ?? { id: threadId, createdAt: now }),
+        title: selectedAnalysisTask,
+        latestQuestion: selectedAnalysisTask,
+        updatedAt: now,
+        status: flow.running ? "running" : "completed",
+      };
+      return [nextThread, ...threads.filter((thread) => thread.id !== threadId)];
+    });
+  }, [flow.threadId, flow.running, selectedAnalysisTask]);
   const isAdmin = true;
   const isNewAnalysisTask = selectedAnalysisTask === null;
   const openedReport = savedReports.find((saved) => saved.report.id === openedReportId);
+  const analysisTaskGroups = useMemo(() => groupAnalysisThreads(analysisThreads), [analysisThreads]);
+  const selectedThreadCount = selectedThreadIds.length;
 
-  function selectExistingAnalysisTask(title: string) {
-    setSelectedAnalysisTask(title);
-    setCurrentAnalysisTaskId(`task_${title}`);
+  async function selectExistingAnalysisTask(thread: BackendAnalysisThreadSummary) {
+    if (selectingAnalysisThreads) {
+      toggleSelectedThread(thread.id);
+      return;
+    }
+    setSelectedAnalysisTask(analysisThreadTitle(thread));
+    setCurrentAnalysisTaskId(thread.id);
+    setInitialFlowMessages([]);
     setOpenedReportId(null);
+    try {
+      const detail = await getBackendAnalysisThread(thread.id);
+      setInitialFlowMessages(flowNodesFromBackendThread(detail));
+    } catch {
+      setInitialFlowMessages([]);
+    }
+    if (shouldUseBackendInteractiveReports()) {
+      try {
+        const reports = await listInteractiveReportsByThreadFromBackend(thread.id);
+        const latest = reports[0];
+        setOpenedReportId(latest?.report.id ?? null);
+        if (latest) {
+          setSavedReports((items) => [latest, ...items.filter((item) => item.report.id !== latest.report.id)]);
+        }
+      } catch {
+        setOpenedReportId(null);
+      }
+    }
+  }
+
+  function toggleSelectedThread(threadId: string) {
+    setSelectedThreadIds((ids) => (
+      ids.includes(threadId)
+        ? ids.filter((id) => id !== threadId)
+        : [...ids, threadId]
+    ));
+  }
+
+  function startThreadSelection() {
+    setSelectingAnalysisThreads(true);
+    setSelectedThreadIds([]);
+  }
+
+  function cancelThreadSelection() {
+    setSelectingAnalysisThreads(false);
+    setSelectedThreadIds([]);
+  }
+
+  async function deleteSelectedThreads() {
+    if (selectedThreadIds.length === 0) return;
+    const confirmed = window.confirm(`确认删除选中的 ${selectedThreadIds.length} 个任务？删除后不可恢复。`);
+    if (!confirmed) return;
+    const idsToDelete = [...selectedThreadIds];
+    await Promise.all(idsToDelete.map((threadId) => deleteBackendAnalysisThread(threadId)));
+    setAnalysisThreads((threads) => threads.filter((thread) => !idsToDelete.includes(thread.id)));
+    if (currentAnalysisTaskId && idsToDelete.includes(currentAnalysisTaskId)) {
+      setSelectedAnalysisTask(null);
+      setCurrentAnalysisTaskId(null);
+      setInitialFlowMessages([]);
+      setOpenedReportId(null);
+    }
+    setSelectingAnalysisThreads(false);
+    setSelectedThreadIds([]);
   }
 
   function handleSendMessage(content: string) {
     if (isNewAnalysisTask) {
-      setSelectedAnalysisTask("未命名分析任务");
+      setSelectedAnalysisTask(taskTitleFromQuestion(content));
       setCurrentAnalysisTaskId(`draft_${Date.now()}`);
+      setInitialFlowMessages(optimisticStartNodes(content));
       setOpenedReportId(null);
       setMobilePane("analysisTask");
       setPendingStartQuestion(content);
@@ -128,11 +278,13 @@ export function AnalysisWorkspace() {
   }
 
   function handleStartFromSuggestion(_id: string, title: string) {
-    setSelectedAnalysisTask("未命名分析任务");
+    const question = `${title}。请基于当前数据展开分析。`;
+    setSelectedAnalysisTask(taskTitleFromQuestion(title));
     setCurrentAnalysisTaskId(`draft_${_id}_${Date.now()}`);
+    setInitialFlowMessages(optimisticStartNodes(question));
     setOpenedReportId(null);
     setMobilePane("analysisTask");
-    setPendingStartQuestion(`${title}。请基于当前数据展开分析。`);
+    setPendingStartQuestion(question);
   }
 
   async function handleSaveReport(saved: SavedInteractiveReport): Promise<SavedInteractiveReport> {
@@ -152,6 +304,7 @@ export function AnalysisWorkspace() {
     setOpenedReportId(saved.report.id);
     setSelectedAnalysisTask(saved.report.title);
     setCurrentAnalysisTaskId(saved.report.source.threadId);
+    setInitialFlowMessages([]);
     setActiveTool("analysis-workspace");
     setMobilePane("assetLibrary");
   }
@@ -236,21 +389,31 @@ export function AnalysisWorkspace() {
             <div className="analysis-task-panel">
               <header className="panel-header"><span className="panel-kicker">ANALYSIS WORKSPACE</span><h2>分析工作台</h2></header>
               <label className="analysis-task-search"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg><input type="search" placeholder="搜索分析任务" /></label>
-              <button className="analysis-task-new" type="button" onClick={() => { setSelectedAnalysisTask(null); setCurrentAnalysisTaskId(null); setOpenedReportId(null); }}><span>+ 新建分析</span></button>
+              <button className="analysis-task-new" type="button" onClick={() => { setSelectedAnalysisTask(null); setCurrentAnalysisTaskId(null); setInitialFlowMessages([]); setOpenedReportId(null); }}><span>+ 新建分析</span></button>
+              <div className="analysis-task-bulk-actions" data-selecting={selectingAnalysisThreads}>
+                {selectingAnalysisThreads ? (
+                  <>
+                    <button type="button" onClick={cancelThreadSelection}>取消</button>
+                    <button className="danger" type="button" disabled={selectedThreadCount === 0} onClick={() => { void deleteSelectedThreads(); }}>删除{selectedThreadCount > 0 ? ` ${selectedThreadCount}` : ""}</button>
+                  </>
+                ) : (
+                  <button type="button" disabled={analysisThreads.length === 0} onClick={startThreadSelection}>多选删除</button>
+                )}
+              </div>
               <div className="analysis-task-groups">
+                {analysisThreadsLoading && analysisTaskGroups.length === 0 && <p className="analysis-task-empty">正在加载历史任务...</p>}
+                {!analysisThreadsLoading && analysisTaskGroups.length === 0 && <p className="analysis-task-empty">暂无历史任务</p>}
                 {analysisTaskGroups.map((group) => (
                   <section className="analysis-task-group" key={group.label}>
                     <h3>{group.label}</h3>
                     <div className="analysis-task-list">
                       {group.items.map((item) => (
-                        <button key={item.title} className={`analysis-task-item ${selectedAnalysisTask === item.title ? "active" : ""}`} type="button" onClick={() => selectExistingAnalysisTask(item.title)}>
+                        <button key={item.id} className={`analysis-task-item ${currentAnalysisTaskId === item.id ? "active" : ""} ${selectedThreadIds.includes(item.id) ? "selected" : ""}`} type="button" onClick={() => { void selectExistingAnalysisTask(item); }}>
+                          {selectingAnalysisThreads && <span className="analysis-task-check" aria-hidden="true">{selectedThreadIds.includes(item.id) ? "✓" : ""}</span>}
                           <span className="analysis-task-item-main">
-                            <strong>{item.title}</strong>
+                            <strong>{analysisThreadTitle(item)}</strong>
                           </span>
-                          <span className="analysis-task-item-meta"><time>{item.time}</time><span className={`status-dot ${item.status}`} title={item.statusLabel} aria-label={item.statusLabel} /></span>
-                          <span className="analysis-task-item-actions" aria-label={`${item.title} 操作`}>
-                            <span role="button" tabIndex={0} title="置顶">↑</span><span role="button" tabIndex={0} title="重命名">✎</span><span role="button" tabIndex={0} title="删除">×</span>
-                          </span>
+                          <span className="analysis-task-item-meta"><time>{analysisThreadTime(item)}</time><span className={`status-dot ${analysisThreadStatus(item)}`} title={analysisThreadStatusLabel(item)} aria-label={analysisThreadStatusLabel(item)} /></span>
                         </button>
                       ))}
                     </div>
@@ -324,7 +487,9 @@ export function AnalysisWorkspace() {
         </button>
 
         <main className="main" data-mode={mode} data-tool={activeTool}>
-          {activeTool === "analysis-assets" ? (
+          {activeTool === "system" ? (
+            <SystemMcpPage />
+          ) : activeTool === "analysis-assets" ? (
             <MyAnalysisPage reports={savedReports} onOpenReport={handleOpenReport} />
           ) : activeTool === "business-semantics" ? (
              <BusinessSemanticLibrary section={businessSemanticSection} structuredKnowledgeSource={structuredKnowledgeSource} />
@@ -340,14 +505,6 @@ export function AnalysisWorkspace() {
                 <article><span>最近资产</span><strong>5 个分析资产</strong><small>报告、SQL、业务规则和可复用分析方法</small></article>
                 <article><span>语义层</span><strong>6 类语义模型</strong><small>FineReport、MySQL/Doris、ETL、金蝶、SQL 示例、指标维度</small></article>
               </div>
-            </section>
-          ) : activeTool === "system" ? (
-            <section className="overview-workbench" aria-label="系统">
-              <header>
-                <span>SYSTEM</span>
-                <h1>系统</h1>
-                <p>治理、安全和配置能力会放在这里，包括 RBAC/RLS、敏感字段、只读数据源、模型工具和审计。</p>
-              </header>
             </section>
           ) : <div key={currentAnalysisTaskId ?? "new"} className="workbench-frame" style={{ height: "100%" }}>
               <div className="mobile-pane-switch" role="tablist" aria-label="分析任务工作区">

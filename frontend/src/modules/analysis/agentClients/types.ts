@@ -22,9 +22,9 @@ export type AgentEvent =
   | ({ type: "done" } & AgentEventSystemContext);
 
 export type AgentInput =
-  | { kind: "start"; suggestionId?: string; question?: string }
-  | { kind: "message"; content: string }
-  | { kind: "reply"; optionId: string }
+  | { kind: "start"; suggestionId?: string; question?: string; threadId?: string | null }
+  | { kind: "message"; content: string; threadId?: string | null }
+  | { kind: "reply"; optionId: string; threadId?: string | null }
   | { kind: "reset" };
 
 export interface AgentClient {

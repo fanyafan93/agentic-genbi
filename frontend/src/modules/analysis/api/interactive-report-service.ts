@@ -30,6 +30,7 @@ type BackendReportVersion = {
   queries: InteractiveReport["queries"];
   chartSpecs: InteractiveReport["chartSpecs"];
   gridSpecs: InteractiveReport["gridSpecs"];
+  datasets?: InteractiveReport["datasets"];
   createdAt: string;
 };
 
@@ -87,6 +88,12 @@ export async function listInteractiveReportsFromBackend(ownerId = DEFAULT_REPORT
   return Promise.all(payload.reports.map((report) => getInteractiveReportFromBackend(report.id)));
 }
 
+export async function listInteractiveReportsByThreadFromBackend(threadId: string): Promise<SavedInteractiveReport[]> {
+  const response = await fetchInteractiveReport(`/api/analysis/reports?source_thread_id=${encodeURIComponent(threadId)}`);
+  const payload = await readJson<{ reports: BackendReportSummary[] }>(response);
+  return Promise.all(payload.reports.map((report) => getInteractiveReportFromBackend(report.id)));
+}
+
 async function fetchInteractiveReport(path: string, init?: RequestInit): Promise<Response> {
   const apiBaseUrl = getInteractiveReportApiBaseUrl();
   if (!apiBaseUrl) throw new Error("Interactive report API base URL is not configured.");
@@ -117,6 +124,7 @@ function toSavedInteractiveReport(payload: BackendReportDetailResponse): SavedIn
       queries: version.queries,
       chartSpecs: version.chartSpecs,
       gridSpecs: version.gridSpecs,
+      datasets: version.datasets,
       source: {
         threadId: version.sourceThreadId,
         turnId: version.sourceTurnId,

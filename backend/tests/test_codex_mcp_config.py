@@ -8,7 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.harness.codex_mcp_config import (
     CodexMcpServer,
+    codex_mcp_server_status_payload,
     load_codex_mcp_servers_from_env,
+    test_codex_mcp_server,
     to_codex_config_overrides,
 )
 
@@ -67,6 +69,31 @@ class LoadCodexMcpServersFromEnvTest(unittest.TestCase):
         }
         servers = load_codex_mcp_servers_from_env(env)
         self.assertEqual([s.name for s in servers], ["BI_doris", "openmetadata"])
+
+    def test_status_marks_genbi_report_as_trusted_internal_tool(self) -> None:
+        payload = codex_mcp_server_status_payload({
+            "GENBI_CODEX_MCP_COUNT": "1",
+            "GENBI_CODEX_MCP_1_NAME": "GenBI_report",
+            "GENBI_CODEX_MCP_1_COMMAND": "python",
+            "GENBI_CODEX_MCP_1_ARGS": "-m backend.mcp_servers.genbi_report_server",
+        })
+
+        server = payload["servers"][0]  # type: ignore[index]
+        self.assertEqual(server["name"], "GenBI_report")
+        self.assertEqual(server["approval"], "trusted")
+        self.assertEqual(server["permission"], "artifact.write")
+        self.assertEqual(server["tools"][0]["name"], "create_interactive_report")
+
+    def test_can_test_configured_mcp_server(self) -> None:
+        result = test_codex_mcp_server("GenBI_report", {
+            "GENBI_CODEX_MCP_COUNT": "1",
+            "GENBI_CODEX_MCP_1_NAME": "GenBI_report",
+            "GENBI_CODEX_MCP_1_COMMAND": "python",
+            "GENBI_CODEX_MCP_1_ARGS": "-m backend.mcp_servers.genbi_report_server",
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "trusted")
 
 
 class ToCodexConfigOverridesTest(unittest.TestCase):

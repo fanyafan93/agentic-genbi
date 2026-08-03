@@ -46,7 +46,7 @@ GenBI 负责：
 
 ```text
 Analysis Task：GenBI 的业务任务记录，保存用户、租户、工作空间、标题、权限归属和 codexThreadId。
-Codex Thread：真实 Agent 会话、上下文和压缩状态。
+Codex Thread：真实 Agent 任务线程、上下文和压缩状态。
 Codex Turn：用户触发的一轮 Agent 工作。
 Codex Item：Turn 内的消息、推理、工具调用、工具结果、模型输出和产物。
 GenBI Artifact：可复用分析资产，由 Codex Item 产生或更新。

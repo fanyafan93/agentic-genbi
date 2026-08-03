@@ -49,6 +49,7 @@ def minimax_api_key(environ: dict[str, str] | None = None) -> str:
 
 def rewrite_request_body(body: dict[str, Any]) -> tuple[dict[str, Any], list[NamespaceToolMap]]:
     rewritten = dict(body)
+    rewritten["model"] = _rewrite_model_name(rewritten.get("model"))
     tools = body.get("tools")
     if not isinstance(tools, list):
         return rewritten, []
@@ -81,6 +82,18 @@ def rewrite_request_body(body: dict[str, Any]) -> tuple[dict[str, Any], list[Nam
             namespace_maps.append(NamespaceToolMap(namespace=namespace, tool_names=frozenset(tool_names)))
     rewritten["tools"] = out_tools
     return rewritten, namespace_maps
+
+
+def _rewrite_model_name(model: Any, environ: dict[str, str] | None = None) -> Any:
+    if model != "codex-auto-review":
+        return model
+    env = environ if environ is not None else os.environ
+    return (
+        env.get("GENBI_CODEX_AUTO_REVIEW_MODEL", "").strip()
+        or env.get("GENBI_ANALYSIS_MODEL", "").strip()
+        or env.get("MINIMAX_MODEL", "").strip()
+        or "MiniMax-M3"
+    )
 
 
 def rewrite_response_event(event: dict[str, Any], namespace_maps: Iterable[NamespaceToolMap]) -> dict[str, Any]:
@@ -172,6 +185,14 @@ def _match_flattened_name(name: str, namespace_maps: list[NamespaceToolMap]) -> 
         tool_name = normalized[len(prefix) :]
         if tool_name in item.tool_names:
             return item.namespace, tool_name
+    bare_matches = [
+        (item.namespace, tool_name)
+        for item in namespace_maps
+        for tool_name in item.tool_names
+        if normalized == _normalize_tool_name(tool_name)
+    ]
+    if len(bare_matches) == 1:
+        return bare_matches[0]
     return None
 
 

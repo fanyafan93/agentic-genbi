@@ -104,6 +104,23 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertEqual(item_events[0].payload["codex_item_id"], "codex_item_msg")
         self.assertEqual(events[-1].payload["status"], "completed")
 
+    def test_mcp_tool_call_includes_result_payload(self) -> None:
+        from backend.harness.codex_sdk_runner import _mcp_tool_call_payload
+
+        payload = _mcp_tool_call_payload(
+            SimpleNamespace(
+                type="mcpToolCall",
+                server="GenBI_report",
+                tool="create_interactive_report",
+                status=SimpleNamespace(value="completed"),
+                arguments={"title": "report"},
+                result={"content": [{"type": "text", "text": "{\"ok\":true}"}]},
+            )
+        )
+
+        self.assertEqual(payload["mcp_server"], "GenBI_report")
+        self.assertEqual(payload["mcp_result"]["content"][0]["text"], "{\"ok\":true}")
+
     def test_async_stream_resumes_codex_thread_when_context_has_codex_thread_id(self) -> None:
         fake_codex = _FakeAsyncCodex()
         runtime = CodexSdkAnalysisRuntime(async_codex_factory=lambda: fake_codex)

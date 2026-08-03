@@ -26,6 +26,15 @@ CODEX_ANALYSIS_INSTRUCTIONS = """
 """.strip()
 
 
+CODEX_ANALYSIS_INSTRUCTIONS = """
+围绕用户提出的业务问题推进分析。
+- 涉及真实业务数据时，必须先查证，不能编造表、字段、指标、金额、占比或增长结论。
+- 报告只输出有据可查的数据和明确下一步建议。
+- 需要生成右侧交互式报告时，先用数据工具取得真实聚合数据，再调用 GenBI_report.create_interactive_report；不要把完整报告正文写在聊天回复中。
+- 输出中文。
+""".strip()
+
+
 @dataclass(frozen=True)
 class CodexSdkRunnerContext:
     genbi_thread_id: str | None = None
@@ -403,9 +412,34 @@ def _mcp_tool_call_payload(root: Any) -> dict[str, Any]:
         "mcp_status": _string_or_none(getattr(getattr(root, "status", None), "value", None) or getattr(root, "status", None)),
         "mcp_arguments": getattr(root, "arguments", None),
     }
+    result = _mcp_tool_result(root)
+    if result is not None:
+        out["mcp_result"] = result
     if error_message:
         out["mcp_error"] = error_message
     return out
+
+
+def _mcp_tool_result(root: Any) -> Any:
+    for name in ("result", "output", "content"):
+        value = getattr(root, name, None)
+        if value is not None:
+            return _jsonable(value)
+    return None
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if hasattr(value, "model_dump"):
+        return _jsonable(value.model_dump())
+    if hasattr(value, "__dict__"):
+        return _jsonable(vars(value))
+    return str(value)
 
 
 def _is_agent_message(root: Any) -> bool:

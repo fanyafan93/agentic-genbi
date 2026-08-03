@@ -32,6 +32,7 @@ def _report_payload(
         "queries": {"channel-sales-query": {"datasetId": "channel_sales", "filterBindings": ["month"]}},
         "chartSpecs": {"channel-sales-chart": {"id": "channel-sales-chart", "datasetId": "channel_sales", "type": "bar"}},
         "gridSpecs": {"channel-sales-grid": {"id": "channel-sales-grid", "datasetId": "channel_sales", "columns": []}},
+        "datasets": {"channel_sales": {"rows": [{"channel": "direct", "salesAmount": 1000}]}},
         "source": source,
         "ownerId": "user_jason",
     }
@@ -67,6 +68,7 @@ class InteractiveReportApiTest(unittest.TestCase):
             self.assertEqual(listed.status_code, 200)
             self.assertEqual(listed.json()["reports"][0]["latestVersion"], 2)
             self.assertEqual(latest.json()["version"]["document"]["content"][0]["props"]["content"], "Channel Sales Share revised")
+            self.assertEqual(latest.json()["version"]["datasets"]["channel_sales"]["rows"][0]["salesAmount"], 1000)
             self.assertEqual(version_one.json()["version"]["document"]["content"][0]["props"]["content"], "Channel Sales Share")
             self.assertEqual(version_one.json()["version"]["sourceTurnId"], "turn_analysis_123")
             self.assertEqual(latest.json()["version"]["sourceTurnId"], "turn_analysis_456")

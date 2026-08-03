@@ -30,7 +30,7 @@ Agentic GenBI 是一个围绕业务问题展开的 Agentic BI 分析工作台。
 | --- | --- |
 | `Analysis Task` | GenBI 业务任务记录，保存用户、租户、工作空间、标题、权限归属和 `codexThreadId`。 |
 | `Analysis Result` | 产品层的分析结果；第一类结果是交互式分析报告。 |
-| `Codex Thread` | Codex 管理的真实 Agent 会话、上下文和压缩状态。 |
+| `Codex Thread` | Codex 管理的真实 Agent 任务线程、上下文和压缩状态。 |
 | `Codex Turn` | 用户触发的一轮 Agent 工作。 |
 | `Codex Item` | Turn 内产生的消息、推理、工具调用、工具结果、模型输出和产物。 |
 | `Business Semantic Library` | 业务语义库，承载 FineReport 语义案例、指标、字段、关联规则和业务知识。 |

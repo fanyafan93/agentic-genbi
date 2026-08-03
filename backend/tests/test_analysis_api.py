@@ -104,6 +104,35 @@ class _AsyncOnlyRuntime:
         )
 
 
+class _MissingTerminalRuntime:
+    runtime_name = "openai-codex"
+
+    async def async_stream(self, question: str, *, context: dict):
+        yield AgentEvent(
+            type="turn/started",
+            turn_id="codex_turn_missing_terminal",
+            payload={
+                "eventSource": "codex",
+                "codex_thread_id": "codex_thread_missing_terminal",
+                "codex_turn_id": "codex_turn_missing_terminal",
+            },
+        )
+        yield AgentEvent(
+            type="item/completed",
+            turn_id="codex_turn_missing_terminal",
+            payload={
+                "eventSource": "codex",
+                "codex_thread_id": "codex_thread_missing_terminal",
+                "codex_turn_id": "codex_turn_missing_terminal",
+                "codex_item_id": "codex_item_tool",
+                "codex_item_type": "mcpToolCall",
+                "mcp_server": "BI_doris",
+                "mcp_tool": "mysql_query",
+                "mcp_status": "completed",
+            },
+        )
+
+
 class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
     def test_default_analysis_runtime_uses_codex_runtime_when_configured(self) -> None:
         with patch.dict("os.environ", {"GENBI_ANALYSIS_RUNTIME": "codex"}, clear=False):
@@ -132,6 +161,25 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(app)
                 build_thread_store.assert_called_once()
 
+    def test_system_mcp_server_api_lists_trusted_report_tool(self) -> None:
+        with patch.dict("os.environ", {
+            "GENBI_CODEX_MCP_COUNT": "1",
+            "GENBI_CODEX_MCP_1_NAME": "GenBI_report",
+            "GENBI_CODEX_MCP_1_COMMAND": "python",
+            "GENBI_CODEX_MCP_1_ARGS": "-m backend.mcp_servers.genbi_report_server",
+        }, clear=False):
+            app = create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled())
+            client = TestClient(app)
+
+            listed = client.get("/api/system/mcp/servers")
+            tested = client.post("/api/system/mcp/servers/GenBI_report/test")
+
+            self.assertEqual(listed.status_code, 200)
+            self.assertEqual(listed.json()["servers"][0]["name"], "GenBI_report")
+            self.assertEqual(listed.json()["servers"][0]["approval"], "trusted")
+            self.assertEqual(tested.status_code, 200)
+            self.assertTrue(tested.json()["ok"])
+
     def test_analysis_thread_turn_api_streams_codex_events_and_persists_thread(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
@@ -149,23 +197,97 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             payload = response.json()
 
             self.assertEqual(response.status_code, 200)
-            self.assertTrue(payload["conversation_id"].startswith("conv_analysis_"))
-            self.assertEqual(payload["thread_id"], payload["conversation_id"])
+            self.assertTrue(payload["thread_id"].startswith("analysis_thread_"))
+            self.assertNotIn("conversation_id", payload)
             self.assertTrue(payload["turn_id"].startswith("analysis_turn_"))
             self.assertEqual([event["type"] for event in payload["events"]], ["turn/started", "item/agentMessage/delta", "item/completed", "turn/completed"])
             self.assertTrue(all(event["payload"]["eventSource"] == "codex" for event in payload["events"]))
 
-            thread = client.get(f"/api/analysis/threads/{payload['conversation_id']}")
+            thread = client.get(f"/api/analysis/threads/{payload['thread_id']}")
             turn_detail = client.get(f"/api/analysis/threads/{payload['thread_id']}/turns/{payload['turn_id']}")
 
             self.assertEqual(thread.status_code, 200)
-            self.assertEqual(thread.json()["thread"]["id"], payload["conversation_id"])
+            self.assertEqual(thread.json()["thread"]["id"], payload["thread_id"])
             self.assertEqual(thread.json()["thread"]["codexThreadId"], "codex_thread_created")
             self.assertEqual(thread.json()["turns"][0]["codexTurnId"], "codex_turn_created")
             self.assertEqual(turn_detail.status_code, 200)
             self.assertEqual(turn_detail.json()["turn"]["id"], payload["turn_id"])
             self.assertNotIn("executionAttempts", turn_detail.json())
             self.assertEqual(turn_detail.json()["codexItemProjections"][0]["codexItemId"], "codex_item_msg")
+
+    def test_analysis_thread_list_includes_latest_question_for_sidebar_titles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            runtime = _FakeCodexRuntime()
+            app = create_app(
+                analysis_runtime=runtime,  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            created = client.post("/api/analysis/threads/turns", json={"question": "real sidebar question"})
+            listed = client.get("/api/analysis/threads")
+
+            self.assertEqual(created.status_code, 200)
+            self.assertEqual(listed.status_code, 200)
+            self.assertEqual(listed.json()["threads"][0]["latestQuestion"], "real sidebar question")
+
+    def test_analysis_thread_api_repairs_legacy_mojibake_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            runtime = _FakeCodexRuntime()
+            app = create_app(
+                analysis_runtime=runtime,  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            created = client.post("/api/analysis/threads/turns", json={"question": "ä½ å¥½"})
+            thread_id = created.json()["thread_id"]
+            listed = client.get("/api/analysis/threads")
+            detail = client.get(f"/api/analysis/threads/{thread_id}")
+
+            self.assertEqual(listed.json()["threads"][0]["latestQuestion"], "你好")
+            self.assertEqual(detail.json()["turns"][0]["question"], "你好")
+
+    def test_analysis_thread_api_hides_unrecoverable_legacy_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            runtime = _FakeCodexRuntime()
+            app = create_app(
+                analysis_runtime=runtime,  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            created = client.post("/api/analysis/threads/turns", json={"question": "?? GMV ???????????????"})
+            thread_id = created.json()["thread_id"]
+            listed = client.get("/api/analysis/threads")
+            detail = client.get(f"/api/analysis/threads/{thread_id}")
+
+            self.assertIsNone(listed.json()["threads"][0]["latestQuestion"])
+            self.assertIsNone(detail.json()["turns"][0]["question"])
+
+    def test_delete_analysis_thread_removes_sidebar_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            runtime = _FakeCodexRuntime()
+            app = create_app(
+                analysis_runtime=runtime,  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            created = client.post("/api/analysis/threads/turns", json={"question": "delete sidebar item"})
+            thread_id = created.json()["thread_id"]
+            deleted = client.delete(f"/api/analysis/threads/{thread_id}")
+            listed = client.get("/api/analysis/threads")
+            missing = client.delete(f"/api/analysis/threads/{thread_id}")
+
+            self.assertEqual(deleted.status_code, 200)
+            self.assertEqual(deleted.json(), {"deleted": True, "thread_id": thread_id})
+            self.assertEqual(listed.json()["threads"], [])
+            self.assertEqual(missing.status_code, 404)
 
     async def test_create_analysis_turn_payload_uses_async_runtime_inside_running_event_loop(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -180,8 +302,9 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             payload = await analysis_api._create_analysis_turn_payload(
                 _AsyncOnlyRuntime(),  # type: ignore[arg-type]
                 thread_store,
+                InteractiveReportStore(Path(temp_dir) / "interactive-reports.json"),
                 body,
-                conversation_id="thread_async_create",
+                thread_id="thread_async_create",
             )
 
             self.assertEqual(payload["thread_id"], "thread_async_create")
@@ -236,6 +359,24 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(_event_payload_value(second.text, "question"), "continue analysis")
             self.assertEqual(runtime.contexts[1]["codex_thread_id"], "codex_thread_created")
 
+    def test_stream_appends_failed_terminal_event_when_codex_stops_without_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_MissingTerminalRuntime(),  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            response = client.post("/api/analysis/threads/turns/stream", json={"question": "missing completion"})
+            thread_id = _thread_id_from_store(thread_store)
+            detail = client.get(f"/api/analysis/threads/{thread_id}")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("codex_stream_ended_without_turn_completed", response.text)
+            self.assertEqual(detail.json()["thread"]["status"], "failed")
+            self.assertEqual(detail.json()["turns"][0]["status"], "failed")
+
     def test_disabled_runtime_fails_explicitly_without_fabricated_content(self) -> None:
         app = create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled())
         client = TestClient(app)
@@ -246,6 +387,74 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["events"], [event for event in payload["events"] if event["type"] == "turn/completed"])
         self.assertEqual(payload["events"][0]["payload"]["error"], "codex_runtime_not_configured")
+
+    def test_genbi_report_tool_call_emits_interactive_report_artifact(self) -> None:
+        event = AgentEvent(
+            type="item/completed",
+            turn_id="codex_turn_report",
+            payload={
+                "eventSource": "codex",
+                "codex_item_type": "mcpToolCall",
+                "codex_item_id": "codex_item_report",
+                "mcp_server": "GenBI_report",
+                "mcp_tool": "create_interactive_report",
+                "mcp_status": "completed",
+                "mcp_arguments": {
+                    "title": "渠道销售占比分析",
+                    "summary": "线上直营贡献最高。",
+                    "sourceTable": "dm.dm_channel_mtsg_sale_total",
+                    "rows": [{"channel": "线上直营", "salesAmount": 1000, "salesShare": 0.42}],
+                },
+            },
+        )
+
+        artifact = analysis_api._interactive_report_artifact_event(event, thread_id="thread_report", turn_id="turn_report")
+
+        self.assertIsNotNone(artifact)
+        assert artifact is not None
+        self.assertEqual(artifact.type, "genbi/artifact/updated")
+        self.assertEqual(artifact.payload["artifactType"], "interactive_report")
+        self.assertEqual(artifact.payload["source"]["threadId"], "thread_report")
+        self.assertEqual(artifact.payload["source"]["turnId"], "turn_report")
+        self.assertEqual(artifact.payload["datasets"]["channel_sales"]["rows"][0]["channel"], "线上直营")
+
+    def test_report_payload_mcp_item_emits_artifact_without_server_tool_fields(self) -> None:
+        event = AgentEvent(
+            type="item/completed",
+            turn_id="codex_turn_report",
+            payload={
+                "eventSource": "codex",
+                "codex_item_type": "mcpToolCall",
+                "codex_item_id": "codex_item_report",
+                "mcp_status": "completed",
+                "mcp_result": {
+                    "interactive_report": {
+                        "id": "report_from_payload",
+                        "title": "channel report",
+                        "subtitle": "minimal",
+                        "artifactType": "interactive_report",
+                        "renderer": "puck",
+                        "ownerId": "codex-agent",
+                        "source": {"threadId": "codex_thread_pending", "turnId": "codex_turn_pending"},
+                        "document": {"root": {"props": {"title": "channel report"}}},
+                        "filters": [],
+                        "queries": {},
+                        "chartSpecs": {},
+                        "gridSpecs": {},
+                        "datasets": {"channel_sales": {"rows": [{"channel": "A", "sales": 1}]}},
+                    }
+                },
+            },
+        )
+
+        artifact = analysis_api._interactive_report_artifact_event(event, thread_id="thread_report", turn_id="turn_report")
+
+        self.assertIsNotNone(artifact)
+        assert artifact is not None
+        self.assertEqual(artifact.type, "genbi/artifact/updated")
+        self.assertEqual(artifact.payload["source"]["threadId"], "thread_report")
+        self.assertEqual(artifact.payload["source"]["turnId"], "turn_report")
+        self.assertEqual(artifact.payload["datasets"]["channel_sales"]["rows"][0]["channel"], "A")
 
     def test_analysis_asset_api_saves_lists_and_reopens_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

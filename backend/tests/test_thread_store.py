@@ -62,6 +62,7 @@ class ThreadStoreTest(unittest.TestCase):
             self.assertIsNotNone(turn)
             assert turn is not None
             self.assertEqual(thread["thread"]["id"], "thread_1")
+            self.assertEqual(thread["thread"]["title"], "analyze GMV")
             self.assertEqual(thread["turns"][0]["id"], "turn_1")
             self.assertNotIn("runs", thread)
             self.assertEqual([item["kind"] for item in thread["items"]], ["message", "sql"])
@@ -179,6 +180,40 @@ class ThreadStoreTest(unittest.TestCase):
             self.assertEqual(projection["itemType"], "agentMessage")
             self.assertEqual(projection["status"], "completed")
             self.assertEqual(projection["payload"]["content"], "complete Codex output")
+
+    def test_delete_thread_removes_thread_turn_items_and_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            store.save_turn(
+                thread_id="thread_delete",
+                turn_id="turn_delete",
+                question="delete me",
+                input_kind="start",
+                product_kind="analysis_task",
+                user_id=None,
+                events=[
+                    AgentEvent(
+                        type="item/completed",
+                        turn_id="turn_delete",
+                        payload={
+                            "codex_method": "item/completed",
+                            "codex_item_type": "agentMessage",
+                            "codex_item_id": "codex_item_delete",
+                            "item_id": "item_delete",
+                            "item_kind": "message",
+                            "content": "done",
+                        },
+                    ),
+                ],
+                metadata={},
+            )
+
+            self.assertTrue(store.delete_thread("thread_delete", product_kind="analysis_task"))
+
+            self.assertIsNone(store.get_thread("thread_delete"))
+            self.assertIsNone(store.get_turn("thread_delete", "turn_delete"))
+            self.assertEqual(store.get_turn_events("turn_delete"), [])
+            self.assertFalse(store.delete_thread("thread_delete", product_kind="analysis_task"))
 
 
 if __name__ == "__main__":

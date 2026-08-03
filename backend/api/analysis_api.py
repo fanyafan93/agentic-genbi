@@ -5,10 +5,12 @@ from typing import Any
 from uuid import uuid4
 
 from backend.config import check_runtime_env, load_project_env
+from backend.analysis.report_compiler import compile_interactive_report
 from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
 from backend.analysis.interactive_report_store import InteractiveReportStore, InteractiveReportVersionConflict
 from backend.business_semantics.finereport_reports import FineReportReportRepository
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
+from backend.harness.codex_mcp_config import codex_mcp_server_status_payload, test_codex_mcp_server
 from backend.harness.events import AgentEvent
 from backend.harness.minimax_codex_adapter import proxy_minimax_response
 from backend.harness.thread_store import ThreadStore
@@ -24,7 +26,7 @@ from backend.business_semantics.knowledge_store import KnowledgeStore
 @dataclass(frozen=True)
 class AnalysisTurnRequest:
     question: str
-    conversation_id: str | None = None
+    thread_id: str | None = None
     user_id: str | None = None
     turn_kind: str = "start"
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -49,6 +51,7 @@ def create_app(
 
     class AnalysisTurnBody(BaseModel):
         question: str = Field(min_length=1)
+        thread_id: str | None = None
         conversation_id: str | None = None
         user_id: str | None = None
         turn_kind: str = "start"
@@ -99,6 +102,7 @@ def create_app(
         queries: dict[str, Any] = Field(default_factory=dict)
         chartSpecs: dict[str, Any] = Field(default_factory=dict)
         gridSpecs: dict[str, Any] = Field(default_factory=dict)
+        datasets: dict[str, Any] = Field(default_factory=dict)
         source: InteractiveReportSourceBody
         ownerId: str = Field(min_length=1)
         expectedVersion: int | None = Field(default=None, ge=0)
@@ -193,6 +197,14 @@ def create_app(
     def runtime_status() -> dict[str, Any]:
         return check_runtime_env()
 
+    @app.get("/api/system/mcp/servers")
+    def list_mcp_servers() -> dict[str, Any]:
+        return codex_mcp_server_status_payload()
+
+    @app.post("/api/system/mcp/servers/{server_name}/test")
+    def test_mcp_server(server_name: str) -> dict[str, Any]:
+        return test_codex_mcp_server(server_name)
+
     @app.post("/api/codex-minimax/v1/responses")
     async def codex_minimax_responses(body: dict[str, Any] = Body(...)) -> Any:
         raw_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -222,32 +234,40 @@ def create_app(
 
     @app.get("/api/analysis/threads")
     def list_analysis_threads(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
-        return {"threads": configured_thread_store.list_threads(limit=limit, product_kind="analysis_task")}
+        threads = configured_thread_store.list_threads(limit=limit, product_kind="analysis_task")
+        return {"threads": [_with_latest_thread_question(configured_thread_store, item) for item in threads]}
 
     @app.post("/api/analysis/threads/turns")
     async def create_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
-        thread_id = body.conversation_id or _new_analysis_conversation_id()
-        return await _create_analysis_turn_payload(configured_analysis_runtime, configured_thread_store, body, conversation_id=thread_id)
+        thread_id = body.thread_id or body.conversation_id or _new_analysis_thread_id()
+        return await _create_analysis_turn_payload(configured_analysis_runtime, configured_thread_store, configured_interactive_report_store, body, thread_id=thread_id)
 
     @app.post("/api/analysis/threads/turns/stream")
     def stream_new_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> StreamingResponse:
-        thread_id = body.conversation_id or _new_analysis_conversation_id()
-        return _stream_analysis_turn_response(configured_analysis_runtime, configured_thread_store, body, thread_id=thread_id)
+        thread_id = body.thread_id or body.conversation_id or _new_analysis_thread_id()
+        return _stream_analysis_turn_response(configured_analysis_runtime, configured_thread_store, configured_interactive_report_store, body, thread_id=thread_id)
 
     @app.post("/api/analysis/threads/{thread_id}/turns")
     async def create_existing_analysis_thread_turn(thread_id: str, body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
-        return await _create_analysis_turn_payload(configured_analysis_runtime, configured_thread_store, body, conversation_id=thread_id)
+        return await _create_analysis_turn_payload(configured_analysis_runtime, configured_thread_store, configured_interactive_report_store, body, thread_id=thread_id)
 
     @app.post("/api/analysis/threads/{thread_id}/turns/stream")
     def stream_existing_analysis_thread_turn(thread_id: str, body: AnalysisTurnBody = Body(...)) -> StreamingResponse:
-        return _stream_analysis_turn_response(configured_analysis_runtime, configured_thread_store, body, thread_id=thread_id)
+        return _stream_analysis_turn_response(configured_analysis_runtime, configured_thread_store, configured_interactive_report_store, body, thread_id=thread_id)
 
     @app.get("/api/analysis/threads/{thread_id}")
     def get_analysis_thread(thread_id: str) -> dict[str, Any]:
         thread = configured_thread_store.get_thread(thread_id)
         if not thread:
             raise HTTPException(status_code=404, detail="analysis_thread_not_found")
-        return thread
+        return _repair_thread_detail_text(thread)
+
+    @app.delete("/api/analysis/threads/{thread_id}")
+    def delete_analysis_thread(thread_id: str) -> dict[str, Any]:
+        deleted = configured_thread_store.delete_thread(thread_id, product_kind="analysis_task")
+        if not deleted:
+            raise HTTPException(status_code=404, detail="analysis_thread_not_found")
+        return {"deleted": True, "thread_id": thread_id}
 
     @app.get("/api/analysis/threads/{thread_id}/turns/{turn_id}")
     def get_analysis_thread_turn(thread_id: str, turn_id: str) -> dict[str, Any]:
@@ -355,9 +375,13 @@ def create_app(
     @app.get("/api/analysis/reports")
     def list_interactive_reports(
         owner_id: str | None = None,
+        source_thread_id: str | None = None,
         limit: int = Query(default=50, ge=1, le=200),
     ) -> dict[str, Any]:
-        return {"reports": [asdict(report) for report in configured_interactive_report_store.list_reports(owner_id=owner_id, limit=limit)]}
+        reports = configured_interactive_report_store.list_reports(owner_id=owner_id, limit=limit)
+        if source_thread_id:
+            reports = [report for report in reports if report.sourceThreadId == source_thread_id]
+        return {"reports": [asdict(report) for report in reports]}
 
     @app.post("/api/analysis/reports")
     def save_interactive_report(body: InteractiveReportBody = Body(...)) -> dict[str, Any]:
@@ -500,28 +524,29 @@ def _knowledge_metadata_from_body(body: Any, *, partial: bool = False) -> dict[s
 async def _create_analysis_turn_payload(
     analysis_runtime: CodexSdkAnalysisRuntime,
     thread_store: ThreadStore,
+    interactive_report_store: Any,
     body: Any,
     *,
-    conversation_id: str,
+    thread_id: str,
 ) -> dict[str, Any]:
-    request = _analysis_request_from_body(body, conversation_id=conversation_id)
+    request = _analysis_request_from_body(body, thread_id=thread_id)
     turn_id = _new_analysis_turn_id()
     events = [
         event
         async for event in _astream_runtime_events(
             analysis_runtime,
             thread_store,
+            interactive_report_store,
             request,
-            thread_id=conversation_id,
+            thread_id=thread_id,
             turn_id=turn_id,
         )
     ]
-    _save_analysis_turn(thread_store, request, thread_id=conversation_id, turn_id=turn_id, events=events)
+    _save_analysis_turn(thread_store, request, thread_id=thread_id, turn_id=turn_id, events=events)
     return {
-        "thread_id": conversation_id,
-        "conversation_id": conversation_id,
+        "thread_id": thread_id,
         "turn_id": turn_id,
-        "events_url": f"/api/analysis/threads/{conversation_id}/turns/{turn_id}",
+        "events_url": f"/api/analysis/threads/{thread_id}/turns/{turn_id}",
         "events": [asdict(event) for event in events],
     }
 
@@ -537,19 +562,20 @@ def _first_event_payload_value(events: list[Any], key: str) -> str | None:
 def _stream_analysis_turn_response(
     analysis_runtime: CodexSdkAnalysisRuntime,
     thread_store: ThreadStore,
+    interactive_report_store: Any,
     body: Any,
     *,
     thread_id: str,
 ) -> Any:
     from fastapi.responses import StreamingResponse
 
-    request = _analysis_request_from_body(body, conversation_id=thread_id)
+    request = _analysis_request_from_body(body, thread_id=thread_id)
     turn_id = _new_analysis_turn_id()
 
     async def event_stream() -> Any:
         events: list[AgentEvent] = []
         try:
-            async for event in _astream_runtime_events(analysis_runtime, thread_store, request, thread_id=thread_id, turn_id=turn_id):
+            async for event in _astream_runtime_events(analysis_runtime, thread_store, interactive_report_store, request, thread_id=thread_id, turn_id=turn_id):
                 events.append(event)
                 yield event.to_sse()
         finally:
@@ -562,28 +588,126 @@ def _stream_analysis_turn_response(
 async def _astream_runtime_events(
     analysis_runtime: CodexSdkAnalysisRuntime,
     thread_store: ThreadStore,
+    interactive_report_store: Any,
     request: AnalysisTurnRequest,
     *,
     thread_id: str,
     turn_id: str,
 ) -> Any:
+    saw_terminal_event = False
     async for event in analysis_runtime.async_stream(
         request.question.strip(),
         context=_runtime_context(thread_store, request, thread_id=thread_id, turn_id=turn_id),
     ):
-        yield _enrich_analysis_event(event, thread_id=thread_id, turn_id=turn_id, question=request.question.strip())
+        enriched = _enrich_analysis_event(event, thread_id=thread_id, turn_id=turn_id, question=request.question.strip())
+        if enriched.type == "turn/completed":
+            saw_terminal_event = True
+        yield enriched
+        artifact_event = _interactive_report_artifact_event(enriched, thread_id=thread_id, turn_id=turn_id, interactive_report_store=interactive_report_store)
+        if artifact_event:
+            yield artifact_event
+    if not saw_terminal_event:
+        yield _missing_terminal_event(thread_id=thread_id, turn_id=turn_id)
+
+
+def _missing_terminal_event(*, thread_id: str, turn_id: str) -> AgentEvent:
+    return AgentEvent(
+        type="turn/completed",
+        turn_id=turn_id,
+        payload={
+            "eventSource": "genbi",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "status": "failed",
+            "error": "codex_stream_ended_without_turn_completed",
+            "detail": "Codex stream ended without a terminal turn/completed event.",
+        },
+    )
 
 
 def _enrich_analysis_event(event: AgentEvent, *, thread_id: str, turn_id: str, question: str | None = None) -> AgentEvent:
     payload = dict(event.payload)
     payload.setdefault("thread_id", thread_id)
-    payload.setdefault("conversation_id", thread_id)
     payload.setdefault("turn_id", turn_id)
     if event.type == "turn/started" and question:
         payload.setdefault("question", question)
     if payload.get("codex_item_type") == "userMessage" and question:
         payload.setdefault("content", question)
     return AgentEvent(type=event.type, turn_id=turn_id, payload=payload, created_at=event.created_at)
+
+
+def _interactive_report_artifact_event(event: AgentEvent, *, thread_id: str, turn_id: str, interactive_report_store: Any | None = None) -> AgentEvent | None:
+    payload = dict(event.payload)
+    if (
+        event.type != "item/completed"
+        or payload.get("codex_item_type") != "mcpToolCall"
+        or payload.get("mcp_status") not in ("completed", "success", None)
+    ):
+        return None
+    report = _extract_interactive_report(payload)
+    is_named_report_tool = payload.get("mcp_server") == "GenBI_report" and payload.get("mcp_tool") == "create_interactive_report"
+    if report is None and not is_named_report_tool:
+        return None
+    if report is None:
+        report = compile_interactive_report(
+            dict(payload.get("mcp_arguments") or {}),
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
+    source = dict(report.get("source") or {})
+    source["threadId"] = thread_id
+    source["turnId"] = turn_id
+    report["source"] = source
+    version_number = None
+    if interactive_report_store is not None:
+        try:
+            _, version = interactive_report_store.save_report(report)
+            version_number = version.version
+        except (InteractiveReportVersionConflict, ValueError):
+            version_number = None
+    return AgentEvent(
+        type="genbi/artifact/updated",
+        turn_id=turn_id,
+        payload={
+            **report,
+            **({"version": version_number} if version_number is not None else {}),
+            "eventSource": "genbi_projection",
+            "codex_thread_id": payload.get("codex_thread_id"),
+            "codex_turn_id": payload.get("codex_turn_id"),
+            "codex_item_id": payload.get("codex_item_id"),
+        },
+    )
+
+
+def _extract_interactive_report(payload: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("mcp_result", "mcp_output", "result", "output"):
+        candidate = _maybe_report_payload(payload.get(key))
+        if candidate:
+            return candidate
+    return None
+
+
+def _maybe_report_payload(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        content_candidate = _maybe_report_payload(value.get("content"))
+        if content_candidate:
+            return content_candidate
+        nested = value.get("interactive_report") or value.get("report") or value
+        return dict(nested) if isinstance(nested, dict) and nested.get("artifactType") == "interactive_report" else None
+    if isinstance(value, str):
+        try:
+            return _maybe_report_payload(json.loads(value))
+        except json.JSONDecodeError:
+            return None
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict) and item.get("type") == "text":
+                candidate = _maybe_report_payload(item.get("text"))
+            else:
+                candidate = _maybe_report_payload(item)
+            if candidate:
+                return candidate
+    return None
 
 
 def _runtime_context(thread_store: ThreadStore, request: AnalysisTurnRequest, *, thread_id: str, turn_id: str) -> dict[str, Any]:
@@ -636,7 +760,7 @@ def _last_event_payload_value(events: list[AgentEvent], key: str) -> str | None:
     return None
 
 
-def _analysis_request_from_body(body: Any, *, conversation_id: str) -> AnalysisTurnRequest:
+def _analysis_request_from_body(body: Any, *, thread_id: str) -> AnalysisTurnRequest:
     turn_kind = str(getattr(body, "turn_kind", "start") or "start").strip().lower()
     if turn_kind not in {"start", "message", "reply"}:
         turn_kind = "message"
@@ -644,29 +768,23 @@ def _analysis_request_from_body(body: Any, *, conversation_id: str) -> AnalysisT
     metadata.pop("data_egress_authorized", None)
     metadata.pop("semantic_context_egress_authorized", None)
     metadata.setdefault("domain", "analysis_task")
-    metadata.setdefault("conversation_root", not bool(getattr(body, "conversation_id", None)))
+    metadata.setdefault("thread_id", thread_id)
+    metadata.setdefault("thread_root", not bool(getattr(body, "thread_id", None) or getattr(body, "conversation_id", None)))
     return AnalysisTurnRequest(
         question=body.question,
-        conversation_id=conversation_id,
+        thread_id=thread_id,
         user_id=getattr(body, "user_id", None),
         turn_kind=turn_kind,  # type: ignore[arg-type]
         metadata=metadata,
     )
 
 
-def _new_analysis_conversation_id() -> str:
-    return f"conv_analysis_{uuid4().hex[:12]}"
+def _new_analysis_thread_id() -> str:
+    return f"analysis_thread_{uuid4().hex[:12]}"
 
 
 def _new_analysis_turn_id() -> str:
     return f"analysis_turn_{uuid4().hex[:12]}"
-
-
-def _conversation_metadata(metadata: dict[str, Any] | None, *, conversation_id: str | None, is_root: bool) -> dict[str, Any]:
-    next_metadata = dict(metadata or {})
-    if conversation_id and is_root:
-        next_metadata.setdefault("conversation_root", True)
-    return next_metadata
 
 
 def build_default_analysis_runtime() -> CodexSdkAnalysisRuntime:
@@ -677,6 +795,59 @@ def build_default_analysis_runtime() -> CodexSdkAnalysisRuntime:
     elif analysis_runtime not in {"", "local", "mock"}:
         raise RuntimeError("GENBI_ANALYSIS_RUNTIME only supports codex, local, or mock.")
     return CodexSdkAnalysisRuntime.disabled()
+
+
+def _with_latest_thread_question(thread_store: ThreadStore, thread: dict[str, Any]) -> dict[str, Any]:
+    detail = thread_store.get_thread(str(thread.get("id", "")))
+    turns = list((detail or {}).get("turns") or [])
+    latest_turn = turns[-1] if turns else None
+    latest_question = str(latest_turn.get("question", "")).strip() if isinstance(latest_turn, dict) else ""
+    return {**thread, "title": _repair_text_encoding(thread.get("title")), "latestQuestion": _repair_text_encoding(latest_question) or None}
+
+
+def _repair_thread_detail_text(detail: dict[str, Any]) -> dict[str, Any]:
+    repaired = dict(detail)
+    thread = dict(repaired.get("thread") or {})
+    thread["title"] = _repair_text_encoding(thread.get("title"))
+    repaired["thread"] = thread
+    repaired["turns"] = [
+        {**turn, "question": _repair_text_encoding(turn.get("question"))}
+        for turn in list(repaired.get("turns") or [])
+        if isinstance(turn, dict)
+    ]
+    return repaired
+
+
+def _repair_text_encoding(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    if _is_unreadable_legacy_text(value):
+        return None
+    try:
+        repaired = value.encode("latin1").decode("utf-8")
+    except UnicodeError:
+        return value
+    return repaired if _looks_more_readable(repaired, value) else value
+
+
+def _looks_more_readable(candidate: str, original: str) -> bool:
+    return _cjk_count(candidate) > _cjk_count(original) and _mojibake_marker_count(original) > 0
+
+
+def _cjk_count(value: str) -> int:
+    return sum(1 for char in value if "\u4e00" <= char <= "\u9fff")
+
+
+def _mojibake_marker_count(value: str) -> int:
+    return sum(value.count(marker) for marker in ("Ã", "Â", "ä", "å", "æ", "è", "é", "ç", "ï"))
+
+
+def _is_unreadable_legacy_text(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    question_marks = stripped.count("?")
+    return question_marks >= 3 and question_marks / max(len(stripped), 1) >= 0.25
 
 
 def _build_default_knowledge_store() -> KnowledgeStore:

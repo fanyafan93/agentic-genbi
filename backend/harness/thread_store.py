@@ -113,7 +113,11 @@ class ThreadStore:
             turn_id=turn_id,
             default_codex_thread_id=codex_thread_id,
         )
-        title = _first_payload_value(events, "turn/started", "title") or (existing_thread.title if existing_thread else None)
+        title = (
+            _first_payload_value(events, "turn/started", "title")
+            or (existing_thread.title if existing_thread else None)
+            or _title_from_question(question, input_kind=input_kind)
+        )
         now = completed_at or started_at or ""
 
         thread = ThreadRecord(
@@ -260,6 +264,20 @@ class ThreadStore:
             threads = [item for item in threads if item.productKind == product_kind]
         threads.sort(key=lambda item: item.updatedAt, reverse=True)
         return [asdict(item) for item in threads[:limit]]
+
+    def delete_thread(self, thread_id: str, *, product_kind: ThreadProductKind | None = None) -> bool:
+        state = self._read_state()
+        thread = state["threads"].get(thread_id)
+        if not thread or (product_kind and thread.productKind != product_kind):
+            return False
+        state["threads"].pop(thread_id, None)
+        state["turns"] = {key: turn for key, turn in state["turns"].items() if turn.threadId != thread_id}
+        state["items"] = [item for item in state["items"] if item.threadId != thread_id]
+        state["codex_item_projections"] = [
+            item for item in state["codex_item_projections"] if item.genbiThreadId != thread_id
+        ]
+        self._write_state(state)
+        return True
 
     def clear(self) -> int:
         count = len(self._read_raw())
@@ -448,3 +466,12 @@ def _string_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _title_from_question(question: str, *, input_kind: TurnInputKind) -> str | None:
+    if input_kind != "start":
+        return None
+    text = " ".join(str(question or "").split())
+    if not text:
+        return None
+    return text[:32]

@@ -20,4 +20,5 @@ export const interactiveReportFixture: InteractiveReport = {
   queries: {},
   chartSpecs: {},
   gridSpecs: {},
+  datasets: {},
 };

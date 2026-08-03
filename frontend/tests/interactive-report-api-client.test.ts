@@ -32,6 +32,7 @@ function backendReportPayload(version = 1) {
       queries: interactiveReportFixture.queries,
       chartSpecs: interactiveReportFixture.chartSpecs,
       gridSpecs: interactiveReportFixture.gridSpecs,
+      datasets: { channel_sales: { rows: [{ channel: "direct", salesAmount: 1000 }] } },
       createdAt: "2026-08-01T08:00:00.000Z",
     },
   };
@@ -54,6 +55,7 @@ describe("interactive report backend API client", () => {
       threadId: interactiveReportFixture.source.threadId,
       turnId: interactiveReportFixture.source.turnId,
     });
+    expect(saved.report.datasets?.channel_sales.rows[0].salesAmount).toBe(1000);
   });
 
   test("opens a requested server report version", async () => {

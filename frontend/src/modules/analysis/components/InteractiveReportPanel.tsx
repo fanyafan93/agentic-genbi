@@ -99,7 +99,11 @@ function ReportRuntimeProvider({ report, filters, children }: { report: Interact
   const runtime = useMemo<ReportRuntime>(() => ({
     report,
     filters,
-    getRows: () => [],
+    getRows: (queryRef: string) => {
+      const query = report.queries[queryRef];
+      const datasetId = query?.datasetId ?? queryRef;
+      return report.datasets?.[datasetId]?.rows ?? [];
+    },
   }), [filters, report]);
   return <RuntimeContext.Provider value={runtime}>{children}</RuntimeContext.Provider>;
 }

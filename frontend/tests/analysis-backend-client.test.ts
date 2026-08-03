@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   BackendAnalysisAgentClient,
+  deleteBackendAnalysisThread,
+  flowNodesFromBackendThread,
   getBackendAnalysisRequestTimeoutMs,
+  listBackendAnalysisThreads,
   mapBackendEvents,
   parseAnalysisSse,
   smoothTokenEvent,
@@ -16,10 +19,16 @@ async function collect<T>(items: AsyncIterable<T>): Promise<T[]> {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  delete process.env.NEXT_PUBLIC_GENBI_API_BASE_URL;
   delete process.env.NEXT_PUBLIC_ANALYSIS_AGENT_TIMEOUT_MS;
   delete process.env.NEXT_PUBLIC_ANALYSIS_TOKEN_FLUSH_INTERVAL_MS;
   delete process.env.NEXT_PUBLIC_ANALYSIS_TOKEN_FLUSH_CHARS;
 });
+
+function fetchMockUrl(): string {
+  const fetchMock = vi.mocked(fetch);
+  return String(fetchMock.mock.calls[0][0]);
+}
 
 function sseEvent(event: { type: string; turn_id: string; created_at?: string; payload?: Record<string, unknown> }) {
   const payload = {
@@ -244,6 +253,31 @@ describe("analysis backend client event mapping", () => {
     expect(events.some((event) => event.type === "debug")).toBe(false);
   });
 
+  test("adds expandable detail for non-SQL MCP tool calls", () => {
+    const events = Array.from(mapBackendEvents([
+      {
+        type: "item/completed",
+        turn_id: "turn_mcp_resource",
+        created_at: "2026-08-03T00:00:00Z",
+        payload: {
+          codex_method: "item/completed",
+          codex_item_type: "mcpToolCall",
+          mcp_server: "BI_doris",
+          mcp_tool: "read_mcp_resource",
+          mcp_arguments: { uri: "mysql://dm/dm_channel_mtsg_sale_total" },
+        },
+      },
+    ], "message"));
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "step",
+        label: "工具调用：BI_doris / read_mcp_resource",
+        detail: expect.stringContaining("mysql://dm/dm_channel_mtsg_sale_total"),
+      }),
+    ]);
+  });
+
   test("maps an interactive report artifact as a dedicated result event", () => {
     const events = Array.from(mapBackendEvents([
       {
@@ -262,6 +296,7 @@ describe("analysis backend client event mapping", () => {
           queries: {},
           chartSpecs: {},
           gridSpecs: {},
+          datasets: { channel_sales: { rows: [{ channel: "direct", salesAmount: 1000 }] } },
           source: {
             threadId: "thread_analysis_report",
             turnId: "turn_analysis_report",
@@ -272,7 +307,11 @@ describe("analysis backend client event mapping", () => {
 
     expect(events).toEqual([expect.objectContaining({
       type: "report-artifact",
-      report: expect.objectContaining({ id: "report_turn_analysis_report", title: "channel sales analysis" }),
+      report: expect.objectContaining({
+        id: "report_turn_analysis_report",
+        title: "channel sales analysis",
+        datasets: { channel_sales: { rows: [{ channel: "direct", salesAmount: 1000 }] } },
+      }),
       turnId: "turn_analysis_report",
       threadId: "thread_analysis_report",
     })]);
@@ -358,6 +397,97 @@ describe("analysis backend client event mapping", () => {
     expect(events).toEqual([
       { type: "error", message: "Analysis backend request timed out. Please retry." },
       { type: "done" },
+    ]);
+  });
+
+  test("can send a continuation message to an already opened backend thread", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      sseEvent({
+        type: "turn/started",
+        turn_id: "turn_existing",
+        payload: { conversation_id: "thread_existing", question: "follow up" },
+      }) + sseEvent({
+        type: "turn/completed",
+        turn_id: "turn_existing",
+        payload: {},
+      }),
+      { status: 200, headers: { "Content-Type": "text/event-stream" } },
+    )));
+
+    const client = new BackendAnalysisAgentClient("http://backend.test");
+    await collect(client.send({ kind: "message", content: "follow up", threadId: "thread_existing" }));
+
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads/thread_existing/turns/stream");
+  });
+
+  test("loads backend analysis threads for the real sidebar", async () => {
+    process.env.NEXT_PUBLIC_GENBI_API_BASE_URL = "http://backend.test";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      threads: [{ id: "thread_real", latestQuestion: "real question", updatedAt: "2026-08-03T10:00:00Z" }],
+    }), { status: 200 })));
+
+    await expect(listBackendAnalysisThreads()).resolves.toEqual([
+      { id: "thread_real", latestQuestion: "real question", updatedAt: "2026-08-03T10:00:00Z" },
+    ]);
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads");
+  });
+
+  test("deletes backend analysis threads for sidebar bulk delete", async () => {
+    process.env.NEXT_PUBLIC_GENBI_API_BASE_URL = "http://backend.test";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ deleted: true }), { status: 200 })));
+
+    await expect(deleteBackendAnalysisThread("thread_delete")).resolves.toBeUndefined();
+
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads/thread_delete");
+    expect(vi.mocked(fetch).mock.calls[0][1]).toMatchObject({ method: "DELETE" });
+  });
+
+  test("hydrates a backend thread into user, assistant, and grouped tool nodes", () => {
+    const nodes = flowNodesFromBackendThread({
+      thread: { id: "thread_real" },
+      turns: [{ id: "turn_1", question: "查 dm 表", createdAt: "2026-08-03T10:00:00Z" }],
+      codexItemProjections: [
+        {
+          codexItemId: "msg_1",
+          genbiTurnId: "turn_1",
+          itemType: "agentMessage",
+          status: "completed",
+          payload: { content: "我来查询。" },
+          createdAt: "2026-08-03T10:00:01Z",
+        },
+        {
+          codexItemId: "tool_1",
+          genbiTurnId: "turn_1",
+          itemType: "mcpToolCall",
+          status: "completed",
+          payload: { mcp_server: "BI_doris", mcp_tool: "mysql_query", mcp_arguments: { sql: "SELECT 1" } },
+          createdAt: "2026-08-03T10:00:02Z",
+        },
+        {
+          codexItemId: "tool_2",
+          genbiTurnId: "turn_1",
+          itemType: "mcpToolCall",
+          status: "completed",
+          payload: { mcp_server: "BI_doris", mcp_tool: "mysql_query", mcp_arguments: { sql: "SELECT 2" } },
+          createdAt: "2026-08-03T10:00:03Z",
+        },
+      ],
+    });
+
+    expect(nodes).toMatchObject([
+      { role: "user", content: "查 dm 表" },
+      {
+        role: "agent",
+        content: "我来查询。",
+        activity: [
+          {
+            kind: "tool",
+            label: "工具调用：BI_doris / mysql_query",
+            count: 2,
+            details: ["SELECT 1", "SELECT 2"],
+          },
+        ],
+      },
     ]);
   });
 

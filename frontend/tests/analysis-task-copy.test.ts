@@ -80,6 +80,11 @@ const interactiveReportSource = readFileSync(
   "utf8",
 );
 
+const systemMcpPageSource = readFileSync(
+  resolve(process.cwd(), "src/modules/analysis/components/SystemMcpPage.tsx"),
+  "utf8",
+);
+
 describe("analysis task product language", () => {
   test("frames the primary workspace as a unified analysis workspace", () => {
     expect(workspaceSource).toContain('label: "分析工作台"');
@@ -94,6 +99,7 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain(">分析结果</button>");
     expect(workspaceSource).toContain("新分析");
     expect(workspaceSource).toContain("InteractiveReportPanel");
+    expect(workspaceSource).toContain("SystemMcpPage");
 
     expect(workspaceSource).not.toContain('label: "会话"');
     expect(workspaceSource).not.toContain('label: "KnowledgeBaseLegacy"');
@@ -161,11 +167,22 @@ describe("analysis task product language", () => {
     expect(globalStylesSource).toContain(".finereport-grid { position: relative; display: grid;");
   });
 
-  test("keeps the lower-level interaction event generic for shared conversations", () => {
+  test("keeps the lower-level interaction event generic for shared threads", () => {
     expect(agentTypesSource).not.toContain('"conversation-init"');
-    expect(agentTypesSource).not.toContain("conversationId?: string");
+    expect(agentTypesSource).toContain("threadId?: string | null");
+    expect(agentTypesSource).not.toContain("conversationId?: string | null");
     expect(agentTypesSource).toContain("turnId?: string");
     expect(agentTypesSource).not.toContain('"analysis-task-init"');
+  });
+
+  test("adds a system MCP server management page", () => {
+    expect(systemMcpPageSource).toContain("MCP Servers 管理");
+    expect(systemMcpPageSource).toContain("listBackendMcpServers");
+    expect(systemMcpPageSource).toContain("testBackendMcpServer");
+    expect(systemMcpPageSource).toContain("测试连接");
+    expect(systemMcpPageSource).toContain("server.approval");
+    expect(globalStylesSource).toContain(".system-mcp-page");
+    expect(globalStylesSource).toContain(".mcp-tool-table");
   });
 
   test("keeps analysis task inputs free of removed mode and data-egress controls", () => {
@@ -191,6 +208,14 @@ describe("analysis task product language", () => {
     expect(backendClientSource).toContain("genbi/artifact/updated");
     expect(backendClientSource).toContain("mapBackendEvents");
     expect(backendClientSource).toContain("event.payload.thread_id");
+    expect(backendClientSource).toContain("listBackendAnalysisThreads");
+    expect(backendClientSource).toContain("deleteBackendAnalysisThread");
+    expect(workspaceSource).toContain("optimisticStartNodes(content)");
+    expect(workspaceSource).toContain("optimisticStartNodes(question)");
+    expect(workspaceSource).not.toContain("const analysisTaskGroups = [");
+    expect(workspaceSource).toContain("暂无历史任务");
+    expect(workspaceSource).toContain("多选删除");
+    expect(workspaceSource).toContain("确认删除选中的");
   });
 
   test("keeps the analysis task thread presentation in its own component", () => {
@@ -205,12 +230,13 @@ describe("analysis task product language", () => {
     expect(workspaceSource).not.toContain("lastNodeCountRef");
   });
 
-  test("renders long agent analysis answers as bounded markdown", () => {
+  test("renders long agent analysis answers with thread-level scrolling", () => {
     expect(flowNodeViewSource).toContain('import ReactMarkdown from "react-markdown"');
     expect(flowNodeViewSource).toContain('import remarkGfm from "remark-gfm"');
     expect(flowNodeViewSource).toContain('className="message-body-markdown flow-content"');
     expect(globalStylesSource).toContain(".flow-agent .flow-content");
-    expect(globalStylesSource).toContain("max-height: min(54vh, 680px)");
+    expect(globalStylesSource).toContain(".flow-agent .flow-content { overflow: visible; padding-right: 0; }");
+    expect(globalStylesSource).not.toContain("max-height: min(54vh, 680px)");
   });
 
   test("keeps generated files and Skill markdown as reusable analysis materials", () => {

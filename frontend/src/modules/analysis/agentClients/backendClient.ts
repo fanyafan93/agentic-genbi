@@ -1,5 +1,6 @@
 import type { ArtifactKind } from "@/modules/analysis/types/artifact";
 import type { InteractiveReport } from "@/modules/analysis/types/interactive-report";
+import type { FlowActivity, FlowNode } from "../hooks/use-flow";
 import type { AgentClient, AgentEvent, AgentInput } from "./types";
 
 export type BackendTurnEvent = {
@@ -9,13 +10,63 @@ export type BackendTurnEvent = {
   created_at: string;
 };
 
+export type BackendAnalysisThreadSummary = {
+  id: string;
+  title?: string | null;
+  status?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  latestQuestion?: string | null;
+};
+
+export type BackendAnalysisThreadDetail = {
+  thread: BackendAnalysisThreadSummary;
+  turns: Array<{
+    id: string;
+    question: string;
+    inputKind?: string;
+    status?: string;
+    createdAt?: string;
+    updatedAt?: string;
+  }>;
+  codexItemProjections?: Array<{
+    codexItemId: string;
+    itemType: string;
+    status: string;
+    payload: Record<string, unknown>;
+    createdAt: string;
+    genbiTurnId?: string | null;
+  }>;
+};
+
+export type BackendMcpTool = {
+  name: string;
+  description: string;
+  permission: string;
+  trusted: boolean;
+};
+
+export type BackendMcpServer = {
+  name: string;
+  command: string;
+  args: string[];
+  enabled: boolean;
+  status: string;
+  permission: string;
+  trusted: boolean;
+  approval: string;
+  tools: BackendMcpTool[];
+  envKeys: string[];
+  message: string;
+};
+
 const artifactKinds = new Set<ArtifactKind>(["html", "sql", "python", "csv", "markdown", "json"]);
 const DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS = 95_000;
 const DEFAULT_TOKEN_FLUSH_INTERVAL_MS = 14;
 const DEFAULT_TOKEN_FLUSH_CHARS = 2;
 
 export class BackendAnalysisAgentClient implements AgentClient {
-  private conversationId: string | null = null;
+  private threadId: string | null = null;
   private abortController: AbortController | null = null;
 
   constructor(private readonly apiBaseUrl: string) {}
@@ -23,7 +74,7 @@ export class BackendAnalysisAgentClient implements AgentClient {
   async *send(input: AgentInput): AsyncIterable<AgentEvent> {
     if (input.kind === "reset") {
       this.cancel();
-      this.conversationId = null;
+      this.threadId = null;
       yield { type: "done" };
       return;
     }
@@ -50,8 +101,9 @@ export class BackendAnalysisAgentClient implements AgentClient {
       timeoutId = null;
     };
     try {
-      const threadTurnUrl = this.conversationId && input.kind !== "start"
-        ? `${this.apiBaseUrl}/api/analysis/threads/${encodeURIComponent(this.conversationId)}/turns/stream`
+      const targetThreadId = input.threadId || this.threadId;
+      const threadTurnUrl = targetThreadId && input.kind !== "start"
+        ? `${this.apiBaseUrl}/api/analysis/threads/${encodeURIComponent(targetThreadId)}/turns/stream`
         : `${this.apiBaseUrl}/api/analysis/threads/turns/stream`;
       const response = await fetch(threadTurnUrl, {
         method: "POST",
@@ -71,8 +123,8 @@ export class BackendAnalysisAgentClient implements AgentClient {
       const streamContext: BackendEventMappingContext = {};
       for await (const backendEvent of readAnalysisSse(response)) {
         refreshTimeout();
-        const conversationId = asString(backendEvent.payload.thread_id) || asString(backendEvent.payload.conversation_id);
-        if (conversationId) this.conversationId = conversationId;
+        const threadId = asString(backendEvent.payload.thread_id) || asString(backendEvent.payload.conversation_id);
+        if (threadId) this.threadId = threadId;
         for (const event of mapBackendEvents([backendEvent], input.kind, streamContext)) {
           for await (const displayEvent of smoothTokenEvent(event)) {
             yield displayEvent;
@@ -119,6 +171,66 @@ export function getBackendAnalysisApiBaseUrl(): string | null {
   return process.env.NEXT_PUBLIC_GENBI_API_BASE_URL ?? null;
 }
 
+export async function listBackendAnalysisThreads(): Promise<BackendAnalysisThreadSummary[]> {
+  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
+  if (!apiBaseUrl) return [];
+  const response = await fetch(`${apiBaseUrl}/api/analysis/threads`);
+  if (!response.ok) throw new Error(`Analysis threads API returned ${response.status}`);
+  const payload = await response.json() as { threads?: BackendAnalysisThreadSummary[] };
+  return Array.isArray(payload.threads) ? payload.threads : [];
+}
+
+export async function getBackendAnalysisThread(threadId: string): Promise<BackendAnalysisThreadDetail> {
+  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
+  if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
+  const response = await fetch(`${apiBaseUrl}/api/analysis/threads/${encodeURIComponent(threadId)}`);
+  if (!response.ok) throw new Error(`Analysis thread API returned ${response.status}`);
+  return await response.json() as BackendAnalysisThreadDetail;
+}
+
+export async function deleteBackendAnalysisThread(threadId: string): Promise<void> {
+  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
+  if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
+  const response = await fetch(`${apiBaseUrl}/api/analysis/threads/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+  });
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`Analysis thread delete API returned ${response.status}`);
+  }
+}
+
+export async function listBackendMcpServers(): Promise<BackendMcpServer[]> {
+  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
+  if (!apiBaseUrl) return [];
+  const response = await fetch(`${apiBaseUrl}/api/system/mcp/servers`);
+  if (!response.ok) throw new Error(`MCP servers API returned ${response.status}`);
+  const payload = await response.json() as { servers?: BackendMcpServer[] };
+  return Array.isArray(payload.servers) ? payload.servers : [];
+}
+
+export async function testBackendMcpServer(serverName: string): Promise<{ ok: boolean; status: string; message: string }> {
+  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
+  if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
+  const response = await fetch(`${apiBaseUrl}/api/system/mcp/servers/${encodeURIComponent(serverName)}/test`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error(`MCP server test API returned ${response.status}`);
+  return await response.json() as { ok: boolean; status: string; message: string };
+}
+
+export function flowNodesFromBackendThread(detail: BackendAnalysisThreadDetail): FlowNode[] {
+  const projections = [...(detail.codexItemProjections ?? [])].sort((left, right) => compareIsoText(left.createdAt, right.createdAt));
+  return [...(detail.turns ?? [])]
+    .sort((left, right) => compareIsoText(left.createdAt, right.createdAt))
+    .flatMap((turn) => {
+      const nodes: FlowNode[] = [{ id: `user-${turn.id}`, role: "user", content: turn.question || "历史问题无法恢复" }];
+      const turnProjections = projections.filter((item) => item.genbiTurnId === turn.id);
+      const agentNode = agentNodeFromTurnProjections(turn.id, turnProjections);
+      if (agentNode) nodes.push(agentNode);
+      return nodes;
+    });
+}
+
 export function getBackendAnalysisRequestTimeoutMs(): number {
   const raw = process.env.NEXT_PUBLIC_ANALYSIS_AGENT_TIMEOUT_MS;
   const parsed = raw ? Number(raw) : DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS;
@@ -160,6 +272,70 @@ function splitTextForStreaming(text: string, charsPerChunk: number): string[] {
 
 function sleep(ms: number): Promise<void> {
   return ms > 0 ? new Promise((resolve) => globalThis.setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+function compareIsoText(left?: string, right?: string): number {
+  return (left ?? "").localeCompare(right ?? "");
+}
+
+function agentNodeFromTurnProjections(
+  turnId: string,
+  projections: NonNullable<BackendAnalysisThreadDetail["codexItemProjections"]>,
+): FlowNode | null {
+  let content = "";
+  let activeItemId: string | undefined;
+  const activity: FlowActivity[] = [];
+  for (const item of projections) {
+    if (item.itemType === "agentMessage") {
+      const messageContent = asString(item.payload.content);
+      if (messageContent) {
+        if (content) activity.push({ kind: "message", content, itemId: activeItemId });
+        content = messageContent;
+        activeItemId = item.codexItemId;
+      }
+      continue;
+    }
+    if (["toolCall", "toolResult", "mcpToolCall"].includes(item.itemType)) {
+      appendHistoricalToolActivity(activity, {
+        kind: "tool",
+        label: toolLabelFromPayload(item.payload),
+        state: item.status === "completed" ? "done" : item.status === "running" ? "running" : "queued",
+        detail: toolCallDetail(item.payload),
+        itemId: item.codexItemId,
+      });
+    }
+  }
+  if (!content && activity.length === 0) return null;
+  return {
+    id: `agent-${turnId}`,
+    role: "agent",
+    content,
+    mode: "replace",
+    activity,
+    activeItemId,
+  };
+}
+
+function toolLabelFromPayload(payload: Record<string, unknown>): string {
+  const toolName = asString(payload.mcp_tool) || asString(payload.tool) || asString(payload.name) || "tool";
+  const toolServer = asString(payload.mcp_server);
+  return `工具调用：${toolServer ? `${toolServer} / ` : ""}${toolName}`;
+}
+
+function appendHistoricalToolActivity(activity: FlowActivity[], toolActivity: Extract<FlowActivity, { kind: "tool" }>): void {
+  const previous = activity.at(-1);
+  if (previous?.kind === "tool" && previous.label === toolActivity.label && previous.state === toolActivity.state) {
+    activity[activity.length - 1] = {
+      ...previous,
+      count: (previous.count ?? 1) + 1,
+      details: [
+        ...(previous.details ?? (previous.detail ? [previous.detail] : [])),
+        ...(toolActivity.detail ? [toolActivity.detail] : []),
+      ],
+    };
+    return;
+  }
+  activity.push(toolActivity);
 }
 
 export async function* readAnalysisSse(response: Response): AsyncIterable<BackendTurnEvent> {
@@ -340,7 +516,27 @@ function toolCallDetail(payload: Record<string, unknown>): string | undefined {
   if (sql) return sql;
   const error = asString(payload.mcp_error);
   if (error) return error;
+  if (args && Object.keys(args).length > 0) return formatToolDetail(args);
+  const result = asRecord(payload.mcp_result) || asRecord(payload.result);
+  if (result) return formatToolResult(result);
   return undefined;
+}
+
+function formatToolDetail(value: Record<string, unknown>): string {
+  return truncateToolDetail(JSON.stringify(value, null, 2));
+}
+
+function formatToolResult(value: Record<string, unknown>): string {
+  const contentItems = asRecordArray(value.content)
+    .map((item) => asString(item.text))
+    .filter(Boolean);
+  if (contentItems.length > 0) return truncateToolDetail(contentItems.join("\n\n"));
+  return truncateToolDetail(JSON.stringify(value, null, 2));
+}
+
+function truncateToolDetail(value: string): string {
+  const text = value.trim();
+  return text.length > 2000 ? `${text.slice(0, 2000)}\n...` : text;
 }
 
 function getAgentNodeId(event: BackendTurnEvent): string {
@@ -404,6 +600,7 @@ function asInteractiveReport(payload: Record<string, unknown>): InteractiveRepor
       ...source,
       turnId: asString(source.turnId),
     },
+    datasets: asRecord(payload.datasets) || undefined,
   } as unknown as InteractiveReport;
 }
 

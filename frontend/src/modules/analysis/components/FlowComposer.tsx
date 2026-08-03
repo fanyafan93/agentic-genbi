@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type KeyboardEvent } from "react";
 
 type Props = {
   disabled?: boolean;
@@ -11,12 +11,22 @@ type Props = {
 export function FlowComposer({ disabled, placeholder, onSubmit }: Props) {
   const [value, setValue] = useState("");
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function submitCurrentValue() {
     const text = value.trim();
     if (!text) return;
     onSubmit(text);
     setValue("");
+  }
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    submitCurrentValue();
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    submitCurrentValue();
   }
 
   return (
@@ -24,6 +34,7 @@ export function FlowComposer({ disabled, placeholder, onSubmit }: Props) {
       <textarea
         value={value}
         onChange={(e) => setValue(e.target.value)}
+        onKeyDown={handleKeyDown}
         placeholder={placeholder ?? "有什么问题，或想继续分析什么？"}
         rows={3}
         disabled={disabled}

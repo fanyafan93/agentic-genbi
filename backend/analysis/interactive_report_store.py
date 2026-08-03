@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ class InteractiveReportVersionRecord:
     chartSpecs: dict[str, Any]
     gridSpecs: dict[str, Any]
     createdAt: str
+    datasets: dict[str, Any] = field(default_factory=dict)
 
 
 class InteractiveReportStore:
@@ -86,6 +87,7 @@ class InteractiveReportStore:
             "queries": payload["queries"],
             "chartSpecs": payload["chartSpecs"],
             "gridSpecs": payload["gridSpecs"],
+            "datasets": payload.get("datasets", {}),
             "createdAt": now,
         }
         state["reports"] = [item for item in state["reports"] if item["id"] != report_id]
@@ -156,6 +158,8 @@ def _validate_payload(payload: dict[str, Any]) -> None:
     for name, expected in (("filters", list), ("queries", dict), ("chartSpecs", dict), ("gridSpecs", dict)):
         if not isinstance(payload.get(name), expected):
             raise ValueError(f"{name} has an invalid type.")
+    if "datasets" in payload and not isinstance(payload.get("datasets"), dict):
+        raise ValueError("datasets has an invalid type.")
 
 
 def _report_from_dict(payload: dict[str, Any]) -> InteractiveReportRecord:

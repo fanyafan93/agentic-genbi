@@ -36,6 +36,7 @@ export function AnalysisTaskThread({
   const streamTailRef = useRef<number>(-1);
   const lastTaskKeyRef = useRef<string | null>(taskKey);
   const statusLabel = running ? "分析中" : isNewTask ? "等待提问" : "";
+  const threadBadge = formatTaskId(taskKey);
 
   useEffect(() => {
     const el = threadScrollRef.current;
@@ -65,6 +66,7 @@ export function AnalysisTaskThread({
     <div className={`thread ${mobileHidden ? "mobile-hidden" : ""}`}>
       <header className="thread-header">
         <div>
+          {threadBadge && <span className="thread-id-badge">{threadBadge}</span>}
           <h1>{title}</h1>
           {statusLabel ? <em>{statusLabel}</em> : null}
         </div>
@@ -94,4 +96,11 @@ export function AnalysisTaskThread({
       />
     </div>
   );
+}
+
+function formatTaskId(taskKey: string | null): string {
+  if (!taskKey || taskKey.startsWith("draft_")) return "";
+  const parts = taskKey.split("_");
+  const suffix = parts.at(-1) || taskKey;
+  return suffix.slice(0, 8);
 }

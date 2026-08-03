@@ -37,6 +37,7 @@ export type InteractiveReport = {
   queries: Record<string, { datasetId: string; filterBindings: ReportFilterId[] }>;
   chartSpecs: Record<string, ReportChartSpec>;
   gridSpecs: Record<string, ReportGridSpec>;
+  datasets?: Record<string, { rows: ReportDatasetRow[] }>;
   source: {
     threadId: string;
     turnId: string;

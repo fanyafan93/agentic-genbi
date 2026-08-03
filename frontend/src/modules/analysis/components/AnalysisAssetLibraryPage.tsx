@@ -164,7 +164,7 @@ export function AnalysisAssetLibraryPage({ onContinueFromAsset }: Props) {
           <p>{selectedEntry.description}</p>
           <dl>
             <div><dt>来源任务</dt><dd>{selectedEntry.sourceTaskTitle}</dd></div>
-            <div><dt>来源 Conversation</dt><dd>{selectedEntry.sourceConversationId}</dd></div>
+            <div><dt>来源 Thread</dt><dd>{selectedEntry.sourceConversationId}</dd></div>
             <div><dt>版本</dt><dd>{selectedEntry.latestVersion}</dd></div>
             <div><dt>状态</dt><dd>{selectedEntry.status}</dd></div>
             <div><dt>可见范围</dt><dd>{selectedEntry.visibility}</dd></div>
