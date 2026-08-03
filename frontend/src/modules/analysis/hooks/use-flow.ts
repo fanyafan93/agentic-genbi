@@ -8,6 +8,10 @@ import type { InteractiveReport } from "../types/interactive-report";
 
 export type FlowRole = "user" | "agent" | "ask";
 
+export type FlowActivity =
+  | { kind: "message"; content: string; itemId?: string }
+  | { kind: "tool"; label: string; state: "queued" | "running" | "done"; detail?: string; itemId?: string };
+
 export type FlowNode =
   | { id: string; role: "user"; content: string }
   | {
@@ -15,7 +19,9 @@ export type FlowNode =
       role: "agent";
       content: string;
       mode?: "replace" | "delta";
-      steps?: { label: string; state: "queued" | "running" | "done" }[];
+      steps?: { label: string; state: "queued" | "running" | "done"; detail?: string; itemId?: string }[];
+      activity?: FlowActivity[];
+      activeItemId?: string;
       debug?: { title: string; content: string }[];
     }
   | { id: string; role: "ask"; question: string; options: { id: string; label: string }[]; current?: boolean };
@@ -71,10 +77,30 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
       if (existing >= 0) {
         const target = next[existing];
         if (target.role === "agent") {
-          next[existing] = target.content === event.content ? { ...target, mode: event.mode } : { ...target, content: event.content, mode: event.mode };
+          const itemId = getAgentEventItemId(event);
+          const itemChanged = Boolean(itemId && target.activeItemId && itemId !== target.activeItemId);
+          if (isDuplicateAgentContent(target.content, event.content)) {
+            next[existing] = { ...target, mode: event.mode };
+          } else {
+            const withArchivedMessage = itemChanged ? archiveAgentMessage(target) : target;
+            next[existing] = {
+              ...withArchivedMessage,
+              content: event.content,
+              mode: event.mode,
+              activeItemId: itemId ?? withArchivedMessage.activeItemId,
+            };
+          }
         }
       } else {
-        next.push({ id: event.nodeId, role: "agent", content: event.content, mode: event.mode, steps: [] });
+        next.push({
+          id: event.nodeId,
+          role: "agent",
+          content: event.content,
+          mode: event.mode,
+          steps: [],
+          activity: [],
+          activeItemId: getAgentEventItemId(event),
+        });
       }
       setNodes(next);
       return next;
@@ -89,6 +115,8 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
           content: event.text,
           mode: "delta",
           steps: [],
+          activity: [],
+          activeItemId: getAgentEventItemId(event),
         };
         const next = currentNodes.map((node, index) => (index === pendingIndex ? streamedNode : node));
         setNodes(next);
@@ -100,10 +128,25 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
       if (idx >= 0) {
         const target = next[idx];
         if (target.role === "agent") {
-          next[idx] = { ...target, content: target.content + event.text };
+          const itemId = getAgentEventItemId(event);
+          const itemChanged = Boolean(itemId && target.activeItemId && itemId !== target.activeItemId);
+          const withArchivedMessage = itemChanged ? archiveAgentMessage(target) : target;
+          next[idx] = {
+            ...withArchivedMessage,
+            content: withArchivedMessage.content + event.text,
+            activeItemId: itemId ?? withArchivedMessage.activeItemId,
+          };
         }
       } else {
-        next.push({ id: event.nodeId, role: "agent", content: event.text, mode: "delta", steps: [] });
+        next.push({
+          id: event.nodeId,
+          role: "agent",
+          content: event.text,
+          mode: "delta",
+          steps: [],
+          activity: [],
+          activeItemId: getAgentEventItemId(event),
+        });
       }
       setNodes(next);
       return next;
@@ -111,21 +154,52 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
 
     if (event.type === "step") {
       const next: FlowNode[] = currentNodes.map((node) => ({ ...node }) as FlowNode);
-      const idx = [...next].reverse().findIndex((n) => n.role === "agent");
-      if (idx >= 0) {
-        const target = next[next.length - 1 - idx];
+      const exactIndex = event.nodeId
+        ? next.findIndex((node) => node.id === event.nodeId && node.role === "agent")
+        : -1;
+      const reverseIndex = [...next].reverse().findIndex((node) => node.role === "agent");
+      const targetIndex = exactIndex >= 0 ? exactIndex : reverseIndex >= 0 ? next.length - 1 - reverseIndex : -1;
+      if (targetIndex >= 0) {
+        const target = next[targetIndex];
         if (target.role === "agent") {
+          const withArchivedMessage = target.id === "agent-pending"
+            ? { ...target, content: "", activity: [] }
+            : archiveAgentMessage(target);
           const steps = [...(target.steps ?? [])];
-          const existing = steps.findIndex((s) => s.label === event.label);
+          const existing = steps.findIndex((s) => (
+            event.itemId
+              ? s.itemId === event.itemId
+              : s.label === event.label && s.detail === event.detail
+          ));
           if (existing >= 0) {
-            steps[existing] = { label: event.label, state: event.state };
+            steps[existing] = { label: event.label, state: event.state, detail: event.detail, itemId: event.itemId };
           } else {
-            steps.push({ label: event.label, state: event.state });
+            steps.push({ label: event.label, state: event.state, detail: event.detail, itemId: event.itemId });
           }
-          next[next.length - 1 - idx] = { ...target, steps, content: target.content };
+          const activity = [...(withArchivedMessage.activity ?? [])];
+          const activityIndex = activity.findIndex((item) => item.kind === "tool" && (
+            event.itemId ? item.itemId === event.itemId : item.label === event.label && item.detail === event.detail
+          ));
+          const toolActivity: FlowActivity = {
+            kind: "tool",
+            label: event.label,
+            state: event.state,
+            detail: event.detail,
+            itemId: event.itemId,
+          };
+          if (activityIndex >= 0) activity[activityIndex] = toolActivity;
+          else activity.push(toolActivity);
+          next[targetIndex] = { ...withArchivedMessage, id: event.nodeId ?? target.id, steps, activity };
         }
       } else if (event.nodeId) {
-        next.push({ id: event.nodeId, role: "agent", content: "", mode: "delta", steps: [{ label: event.label, state: event.state }] });
+        next.push({
+          id: event.nodeId,
+          role: "agent",
+          content: "",
+          mode: "delta",
+          steps: [{ label: event.label, state: event.state, detail: event.detail, itemId: event.itemId }],
+          activity: [{ kind: "tool", label: event.label, state: event.state, detail: event.detail, itemId: event.itemId }],
+        });
       }
       setNodes(next);
       return next;
@@ -212,6 +286,10 @@ export function useFlow(conversationKey: string | null, initial: FlowNode[] = []
 
 let cancelled = false;
 
+function isDuplicateAgentContent(currentContent: string, nextContent: string): boolean {
+  return Boolean(currentContent && nextContent && currentContent.includes(nextContent));
+}
+
 function withOptimisticTurn(nodes: FlowNode[], input: AgentInput): FlowNode[] {
   const content = input.kind === "start" ? input.question : input.kind === "message" ? input.content : "";
   if (!content || nodes.some((node) => node.id === "user-pending" || node.id === "agent-pending")) return nodes;
@@ -220,6 +298,20 @@ function withOptimisticTurn(nodes: FlowNode[], input: AgentInput): FlowNode[] {
     { id: "user-pending", role: "user", content },
     { id: "agent-pending", role: "agent", content: "正在思考...", mode: "replace", steps: [] },
   ];
+}
+
+function getAgentEventItemId(event: AgentEvent): string | undefined {
+  return event.codexItemId ?? event.itemId;
+}
+
+function archiveAgentMessage(node: Extract<FlowNode, { role: "agent" }>): Extract<FlowNode, { role: "agent" }> {
+  if (!node.content.trim()) return node;
+  const activity = [...(node.activity ?? [])];
+  const existing = activity.findIndex((item) => item.kind === "message" && node.activeItemId && item.itemId === node.activeItemId);
+  const message: FlowActivity = { kind: "message", content: node.content, itemId: node.activeItemId };
+  if (existing >= 0) activity[existing] = message;
+  else activity.push(message);
+  return { ...node, content: "", activity };
 }
 
 function updateCodexLineage(

@@ -12,7 +12,6 @@ import { useFlow } from "../hooks/use-flow";
 import { AnalysisTaskThread } from "./AnalysisTaskThread";
 import { InteractiveReportPanel } from "./InteractiveReportPanel";
 import { MyAnalysisPage } from "./MyAnalysisPage";
-import { findAnalysisTaskByTitle } from "../agentClients/scripts/analysis-tasks";
 import {
   getInteractiveReportFromBackend,
   listInteractiveReportsFromBackend,
@@ -75,24 +74,17 @@ export function AnalysisWorkspace() {
   const { data: session } = useSession();
   const [activeTool, setActiveTool] = useState<ActiveTool>("analysis-workspace");
   const [collapsed, setCollapsed] = useState(false);
-  const [selectedAnalysisTask, setSelectedAnalysisTask] = useState<string | null>("渠道销售占比分析");
-  const initialScript = findAnalysisTaskByTitle("渠道销售占比分析");
-  const initialMessages = initialScript?.messages ?? [];
+  const [selectedAnalysisTask, setSelectedAnalysisTask] = useState<string | null>(null);
   const [splitPercent, setSplitPercent] = useState(40);
   const [mobilePane, setMobilePane] = useState<"analysisTask" | "assetLibrary">("analysisTask");
-  const [currentAnalysisTaskId, setCurrentAnalysisTaskId] = useState<string | null>("channel");
+  const [currentAnalysisTaskId, setCurrentAnalysisTaskId] = useState<string | null>(null);
   const [businessSemanticSection, setBusinessSemanticSection] = useState<BusinessSemanticSection>("structured");
   const [structuredKnowledgeSource, setStructuredKnowledgeSource] = useState<StructuredKnowledgeSource>("finereport");
   const [savedReports, setSavedReports] = useState<SavedInteractiveReport[]>([]);
   const [openedReportId, setOpenedReportId] = useState<string | null>(null);
   const [pendingStartQuestion, setPendingStartQuestion] = useState<string | null>(null);
   const reportOwnerId = session?.user?.id ?? "local-user";
-  const analysisTaskScriptDef = selectedAnalysisTask ? findAnalysisTaskByTitle(selectedAnalysisTask) : undefined;
-  const initialFlowMessages = useMemo(() => {
-    if (selectedAnalysisTask === null) return [];
-    if (selectedAnalysisTask === "渠道销售占比分析") return initialMessages;
-    return analysisTaskScriptDef?.messages ?? [];
-  }, [selectedAnalysisTask, analysisTaskScriptDef, initialMessages]);
+  const initialFlowMessages = useMemo(() => [], []);
   const flow = useFlow(currentAnalysisTaskId, initialFlowMessages);
   useEffect(() => {
     let cancelled = false;
@@ -119,9 +111,7 @@ export function AnalysisWorkspace() {
 
   function selectExistingAnalysisTask(title: string) {
     setSelectedAnalysisTask(title);
-    const target = findAnalysisTaskByTitle(title);
-    if (!target) return;
-    setCurrentAnalysisTaskId(target.id);
+    setCurrentAnalysisTaskId(`task_${title}`);
     setOpenedReportId(null);
   }
 

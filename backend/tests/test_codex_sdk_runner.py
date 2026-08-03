@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
+from backend.harness.codex_sdk_runner import CODEX_ANALYSIS_INSTRUCTIONS, CodexSdkAnalysisRuntime
 
 
 class _FakeAsyncCodex:
@@ -69,6 +69,16 @@ class _FakeTurn:
 
 
 class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
+    def test_analysis_instructions_do_not_duplicate_codex_identity_or_mcp_catalog(self) -> None:
+        self.assertNotIn("openai-codex", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertNotIn("BI_doris", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertNotIn("mysql_query", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertNotIn("8.134.63.30", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertNotIn("dm.dm_channel_mtsg_sale_total", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertIn("涉及真实业务数据时，必须先查证", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertIn("不能编造表、字段、指标、金额、占比或增长结论", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertIn("输出中文", CODEX_ANALYSIS_INSTRUCTIONS)
+
     def test_stream_maps_codex_notifications_to_agent_events(self) -> None:
         runtime = CodexSdkAnalysisRuntime(
             model="codex-test-model",
@@ -135,6 +145,7 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
                 "GENBI_ANALYSIS_MODEL": "MiniMax-M3",
                 "GENBI_LLM_BASE_URL": "https://api.minimaxi.com/v1",
                 "MINIMAX_API_KEY": "minimax-test-key",
+                "GENBI_CODEX_MINIMAX_ADAPTER_ENABLED": "false",
             },
             clear=True,
         ):
@@ -146,6 +157,42 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime._codex_env(), {"MINIMAX_API_KEY": "minimax-test-key"})
         self.assertIn('model_providers.minimax.wire_api="responses"', runtime._config_overrides())
         self.assertIn('model_providers.minimax.base_url="https://api.minimaxi.com/v1"', runtime._config_overrides())
+
+    def test_minimax_provider_uses_local_adapter_by_default(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "GENBI_ENV_FILE": "missing-test.env",
+                "GENBI_LLM_PROVIDER": "minimax",
+                "GENBI_ANALYSIS_MODEL": "MiniMax-M3",
+                "MINIMAX_API_KEY": "minimax-test-key",
+            },
+            clear=True,
+        ):
+            runtime = CodexSdkAnalysisRuntime()
+
+        self.assertEqual(runtime.provider, "minimax")
+        self.assertEqual(runtime.base_url, "http://127.0.0.1:8000/api/codex-minimax/v1")
+        self.assertIn(
+            'model_providers.minimax.base_url="http://127.0.0.1:8000/api/codex-minimax/v1"',
+            runtime._config_overrides(),
+        )
+
+    def test_missing_codex_bin_env_falls_back_to_path_resolution(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "GENBI_ENV_FILE": "missing-test.env",
+                "GENBI_CODEX_BIN": "/usr/local/bin/codex",
+            },
+            clear=True,
+        ), patch("backend.harness.codex_sdk_runner.shutil.which", side_effect=["C:/Codex/codex.exe", None]):
+            runtime = CodexSdkAnalysisRuntime(
+                codex_factory=lambda: None,
+                async_codex_factory=lambda: None,
+            )
+
+        self.assertEqual(runtime.codex_bin, "C:/Codex/codex.exe")
 
 
 if __name__ == "__main__":

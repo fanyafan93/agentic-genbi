@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { BackendAnalysisAgentClient, getBackendAnalysisRequestTimeoutMs, mapBackendEvents, parseAnalysisSse } from "../src/modules/analysis/agentClients/backendClient";
+import {
+  BackendAnalysisAgentClient,
+  getBackendAnalysisRequestTimeoutMs,
+  mapBackendEvents,
+  parseAnalysisSse,
+  smoothTokenEvent,
+} from "../src/modules/analysis/agentClients/backendClient";
 
 async function collect<T>(items: AsyncIterable<T>): Promise<T[]> {
   const collected: T[] = [];
@@ -11,6 +17,8 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   delete process.env.NEXT_PUBLIC_ANALYSIS_AGENT_TIMEOUT_MS;
+  delete process.env.NEXT_PUBLIC_ANALYSIS_TOKEN_FLUSH_INTERVAL_MS;
+  delete process.env.NEXT_PUBLIC_ANALYSIS_TOKEN_FLUSH_CHARS;
 });
 
 function sseEvent(event: { type: string; turn_id: string; created_at?: string; payload?: Record<string, unknown> }) {
@@ -59,12 +67,7 @@ describe("analysis backend client event mapping", () => {
       nodeId: "user-turn_analysis_123",
       content: "first purchase 30d repurchase definition",
     });
-    expect(events[1]).toMatchObject({
-      type: "step",
-      nodeId: "agent-turn_analysis_123",
-      label: "模型响应",
-      state: "running",
-    });
+    expect(events).toHaveLength(1);
   });
 
   test("parses analysis SSE data blocks", () => {
@@ -212,7 +215,7 @@ describe("analysis backend client event mapping", () => {
     expect(events).toEqual([]);
   });
 
-  test("maps real tool events for debugging", () => {
+  test("maps real tool events as compact visible steps", () => {
     const events = Array.from(mapBackendEvents([
       {
         type: "local/prompt/payload",
@@ -236,10 +239,9 @@ describe("analysis backend client event mapping", () => {
 
     expect(events).toEqual([
       expect.objectContaining({ type: "step", state: "running" }),
-      expect.objectContaining({ type: "debug" }),
       expect.objectContaining({ type: "step", state: "done" }),
-      expect.objectContaining({ type: "debug" }),
     ]);
+    expect(events.some((event) => event.type === "debug")).toBe(false);
   });
 
   test("maps an interactive report artifact as a dedicated result event", () => {
@@ -356,6 +358,78 @@ describe("analysis backend client event mapping", () => {
     expect(events).toEqual([
       { type: "error", message: "Analysis backend request timed out. Please retry." },
       { type: "done" },
+    ]);
+  });
+
+  test("refreshes the backend request timeout when SSE events arrive", async () => {
+    vi.useFakeTimers();
+    process.env.NEXT_PUBLIC_ANALYSIS_AGENT_TIMEOUT_MS = "50";
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'event: item/agentMessage/delta\ndata: {"type":"item/agentMessage/delta","turn_id":"turn_1","payload":{"turn_id":"turn_1","delta":"hello"}}\n\n',
+        ));
+        globalThis.setTimeout(() => {
+          controller.enqueue(new TextEncoder().encode(
+            'event: turn/completed\ndata: {"type":"turn/completed","turn_id":"turn_1","payload":{"turn_id":"turn_1","status":"completed"}}\n\n',
+          ));
+          controller.close();
+        }, 40);
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(stream, { status: 200 }))));
+
+    const client = new BackendAnalysisAgentClient("http://backend.test");
+    const eventsPromise = collect(client.send({ kind: "start", question: "slow but active" }));
+    await vi.advanceTimersByTimeAsync(40);
+    const events = await eventsPromise;
+
+    expect(events.filter((event) => event.type === "tokens").map((event) => event.text).join("")).toBe("hello");
+    expect(events.at(-1)).toEqual(expect.objectContaining({ type: "done" }));
+    expect(events.some((event) => event.type === "error")).toBe(false);
+  });
+
+  test("maps mcp tool calls to visible tool steps", () => {
+    const events = Array.from(mapBackendEvents([
+      {
+        type: "item/completed",
+        turn_id: "turn_mcp",
+        created_at: "2026-08-03T00:00:00Z",
+        payload: {
+          codex_method: "item/completed",
+          codex_item_type: "mcpToolCall",
+          mcp_server: "BI_doris",
+          mcp_tool: "mysql_query",
+          mcp_status: "completed",
+          mcp_arguments: { sql: "SELECT 1 AS one" },
+          turn_id: "turn_mcp",
+        },
+      },
+    ], "start"));
+
+    expect(events[0]).toMatchObject({
+      type: "step",
+      label: "工具调用：BI_doris / mysql_query",
+      state: "done",
+      detail: "SELECT 1 AS one",
+      itemId: undefined,
+    });
+  });
+
+  test("splits large token chunks for smoother display", async () => {
+    process.env.NEXT_PUBLIC_ANALYSIS_TOKEN_FLUSH_INTERVAL_MS = "0";
+    process.env.NEXT_PUBLIC_ANALYSIS_TOKEN_FLUSH_CHARS = "2";
+
+    const events = await collect(smoothTokenEvent({
+      type: "tokens",
+      nodeId: "agent-1",
+      text: "渠道销售占比",
+    }));
+
+    expect(events).toEqual([
+      expect.objectContaining({ type: "tokens", text: "渠道" }),
+      expect.objectContaining({ type: "tokens", text: "销售" }),
+      expect.objectContaining({ type: "tokens", text: "占比" }),
     ]);
   });
 });

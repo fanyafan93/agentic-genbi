@@ -3,10 +3,11 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install codex CLI so CodexSdkAnalysisRuntime can launch Codex subprocesses inside the container.
+# Install Codex CLI so CodexSdkAnalysisRuntime can launch Codex subprocesses inside the container.
 # We fetch the official Node.js 20.x linux-x64 tarball directly so we do not depend on any
 # third-party apt repository. Then install the @openai/codex npm package globally.
 ARG NODE_VERSION=20.18.0
+ARG CODEX_CLI_VERSION=0.146.0
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" -o /tmp/node.tar.gz \
@@ -15,7 +16,7 @@ RUN apt-get update \
     && ln -s /usr/local/lib/nodejs/bin/node /usr/local/bin/node \
     && ln -s /usr/local/lib/nodejs/bin/npm /usr/local/bin/npm \
     && ln -s /usr/local/lib/nodejs/bin/npx /usr/local/bin/npx \
-    && npm install -g @openai/codex@latest \
+    && npm install -g "@openai/codex@${CODEX_CLI_VERSION}" \
     && npm install -g @benborla29/mcp-server-mysql@latest \
     && ln -s /usr/local/lib/nodejs/bin/codex /usr/local/bin/codex \
     && apt-get purge -y curl \

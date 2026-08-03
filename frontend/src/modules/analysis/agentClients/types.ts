@@ -13,7 +13,7 @@ export type AgentEvent =
   | ({ type: "user"; nodeId: string; content: string } & AgentEventSystemContext)
   | ({ type: "agent"; nodeId: string; content: string; mode?: "delta" | "replace" } & AgentEventSystemContext)
   | ({ type: "debug"; nodeId: string; title: string; content: string } & AgentEventSystemContext)
-  | ({ type: "step"; label: string; state: "queued" | "running" | "done"; nodeId?: string } & AgentEventSystemContext)
+  | ({ type: "step"; label: string; state: "queued" | "running" | "done"; nodeId?: string; detail?: string } & AgentEventSystemContext)
   | ({ type: "ask"; nodeId: string; question: string; options: { id: string; label: string }[] } & AgentEventSystemContext)
   | ({ type: "tokens"; nodeId: string; text: string } & AgentEventSystemContext)
   | ({ type: "report-artifact"; report: InteractiveReport } & AgentEventSystemContext)

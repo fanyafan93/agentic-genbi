@@ -2,34 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterable
 
 from backend.config import load_project_env
 from backend.harness.codex_mcp_config import (
-    apply_genbi_alias_wrapping,
     load_codex_mcp_servers_from_env,
     to_codex_config_overrides,
 )
 from backend.harness.events import AgentEvent
+from backend.harness.minimax_codex_adapter import adapter_base_url, adapter_enabled
 
 
 CODEX_ANALYSIS_INSTRUCTIONS = """
-你是 Agentic GenBI 的分析任务 Agent，名字是 openai-codex。
 围绕用户提出的业务问题推进分析。
 
-可用工具：
-- BI_doris MCP 服务暴露的工具名为 `mysql_query`（不带任何前缀），参数是一个 `sql` 字符串。直接传 SQL：
-  {"sql": "SELECT ..."}
-  它连的是 8.134.63.30:9030 的 Doris 数据库（只读账号 readonly_user），支持的表：
-  - 销售/订单/退款/库存：`dm.dm_channel_mtsg_sale_total`（字段：vmonth_code=YYYY-MM、vchannel_name、nsales_amt、nsales_qty 等）。
-  - 财务管报：`dm.dm_fina_sales_profit_sum`、`dm.dm_fina_operation_mgmt_rpt`（字段：vsubject 字符串、vplatform、nvalues 等）。
-
-行为约束：
-- 涉及真实业务数据时，必须先用 `mysql_query` 查证，不能编造表、字段、指标、金额、占比或增长结论。
-- 调用 `mysql_query` 时只传一个 `sql` 字段，不要加 `mcp__BI_doris__` 之类的前缀。
-- 给出数字前必须列出对应 SQL。
+- 涉及真实业务数据时，必须先查证，不能编造表、字段、指标、金额、占比或增长结论。
 - 报告里只输出有据可查的数据和明确的下一步建议。
 - 输出中文。
 """.strip()
@@ -63,19 +54,25 @@ class CodexSdkAnalysisRuntime:
         self.cwd = cwd or os.getenv("GENBI_CODEX_CWD", "").strip() or str(Path.cwd())
         self.api_key = _codex_api_key_from_env(self.provider)
         self.base_url = _codex_base_url_from_env(self.provider)
-        self.codex_bin = codex_bin or os.getenv("GENBI_CODEX_BIN", "").strip() or None
+        self.codex_bin = (
+            codex_bin
+            if codex_bin is not None
+            else _resolve_configured_codex_bin(os.getenv("GENBI_CODEX_BIN", "").strip())
+        )
         # Codex CLI reads config from $CODEX_HOME/config.toml at startup. Render
         # provider + MCP config into a runtime-only directory so deploys that
         # lack a baked-in ~/.codex/config.toml still pick up our overrides.
+        raw_mcp_servers = load_codex_mcp_servers_from_env()
         self.codex_home = os.getenv("GENBI_CODEX_HOME", "").strip() or None
+        if not self.codex_home and (self.provider != "openai" or raw_mcp_servers):
+            self.codex_home = tempfile.mkdtemp(prefix="genbi-codex-home-")
         if self.codex_home:
-            raw_mcp_servers = load_codex_mcp_servers_from_env()
             _render_codex_home_config(
                 self.codex_home,
                 provider=self.provider,
                 base_url=self.base_url,
                 api_key_env=_provider_env_key(self.provider),
-                mcp_servers=apply_genbi_alias_wrapping(raw_mcp_servers),
+                mcp_servers=raw_mcp_servers,
             )
         self._codex_factory = codex_factory
         self._async_codex_factory = async_codex_factory
@@ -189,7 +186,7 @@ class CodexSdkAnalysisRuntime:
         from openai_codex import ApprovalMode, Sandbox
 
         kwargs: dict[str, Any] = {
-            "approval_mode": ApprovalMode.deny_all,
+            "approval_mode": ApprovalMode.auto_review,
             "developer_instructions": CODEX_ANALYSIS_INSTRUCTIONS,
             "cwd": context.cwd,
             "sandbox": Sandbox.read_only,
@@ -204,7 +201,7 @@ class CodexSdkAnalysisRuntime:
         from openai_codex import ApprovalMode, Sandbox
 
         kwargs: dict[str, Any] = {
-            "approval_mode": ApprovalMode.deny_all,
+            "approval_mode": ApprovalMode.auto_review,
             "cwd": context.cwd,
             "sandbox": Sandbox.read_only,
         }
@@ -225,7 +222,7 @@ class CodexSdkAnalysisRuntime:
                 ]
             )
         raw_mcp_servers = load_codex_mcp_servers_from_env()
-        overrides.extend(to_codex_config_overrides(apply_genbi_alias_wrapping(raw_mcp_servers)))
+        overrides.extend(to_codex_config_overrides(raw_mcp_servers))
         return overrides
 
     def _codex_env(self) -> dict[str, str]:
@@ -300,6 +297,7 @@ class CodexSdkAnalysisRuntime:
                     "codex_turn_id": _payload_turn_id(payload),
                     "codex_item_id": codex_item_id,
                     "codex_item_type": root_type,
+                    **_mcp_tool_call_payload(root),
                 },
             )
         if method == "turn/completed":
@@ -394,6 +392,22 @@ def _item_id(root: Any) -> str | None:
     return _string_or_none(getattr(root, "id", None) or getattr(root, "item_id", None) or getattr(root, "itemId", None))
 
 
+def _mcp_tool_call_payload(root: Any) -> dict[str, Any]:
+    if _item_type(root) != "mcpToolCall":
+        return {}
+    error = getattr(root, "error", None)
+    error_message = _string_or_none(getattr(error, "message", None) or error)
+    out: dict[str, Any] = {
+        "mcp_server": _string_or_none(getattr(root, "server", None)),
+        "mcp_tool": _string_or_none(getattr(root, "tool", None)),
+        "mcp_status": _string_or_none(getattr(getattr(root, "status", None), "value", None) or getattr(root, "status", None)),
+        "mcp_arguments": getattr(root, "arguments", None),
+    }
+    if error_message:
+        out["mcp_error"] = error_message
+    return out
+
+
 def _is_agent_message(root: Any) -> bool:
     root_type = _item_type(root)
     return root_type == "agentMessage" or "AgentMessage" in root_type
@@ -455,6 +469,8 @@ def _codex_api_key_from_env(provider: str) -> str | None:
 
 def _codex_base_url_from_env(provider: str) -> str:
     if provider == "minimax":
+        if adapter_enabled():
+            return adapter_base_url()
         return (
             os.getenv("GENBI_CODEX_BASE_URL", "").strip()
             or os.getenv("GENBI_LLM_BASE_URL", "").strip()
@@ -462,6 +478,17 @@ def _codex_base_url_from_env(provider: str) -> str:
             or "https://api.minimaxi.com/v1"
         )
     return os.getenv("GENBI_CODEX_BASE_URL", "").strip() or "https://api.openai.com/v1"
+
+
+def _resolve_configured_codex_bin(value: str | None) -> str | None:
+    if value:
+        path = Path(value)
+        if path.exists():
+            return value
+    for candidate in (shutil.which("codex.exe"), shutil.which("codex")):
+        if candidate and "WindowsApps" not in candidate:
+            return candidate
+    return None
 
 
 def _provider_env_key(provider: str) -> str:

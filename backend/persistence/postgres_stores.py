@@ -138,6 +138,21 @@ class PostgresThreadStore(ThreadStore):
             )
             conn.execute(
                 f"""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = '{POSTGRES_ITEM_TABLE}'
+                          AND column_name = 'run_id'
+                    ) THEN
+                        ALTER TABLE {POSTGRES_ITEM_TABLE} ALTER COLUMN run_id DROP NOT NULL;
+                    END IF;
+                END $$;
+                """
+            )
+            conn.execute(
+                f"""
                 CREATE TABLE IF NOT EXISTS {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
                     codex_item_id TEXT PRIMARY KEY,
                     codex_thread_id TEXT,

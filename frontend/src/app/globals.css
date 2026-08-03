@@ -186,11 +186,28 @@ img.user-chip-avatar { object-fit: cover; }
 .timeline-step strong { font-weight: 600; min-width: 0; flex: 1; }
 .timeline-step em { font-style: normal; font-size: .62rem; color: var(--text-tertiary); }
 .timeline-step .timeline-index { display: none; }
+.tool-step-detail { min-width: 0; flex: 1; }
+.tool-step-detail summary { cursor: pointer; list-style-position: outside; }
+.tool-step-detail pre { margin: 6px 0 2px; max-width: 100%; overflow-x: auto; white-space: pre; font-size: .68rem; line-height: 1.45; color: var(--text-secondary); background: rgba(30,58,95,.05); border: 1px solid rgba(30,58,95,.08); border-radius: 5px; padding: 7px 8px; }
 .timeline-step.done .timeline-dot { background: var(--accent-moss); }
 .timeline-step.done em { color: var(--accent-moss); }
 .timeline-step.running .timeline-dot { background: var(--accent-coral); box-shadow: 0 0 0 3px rgba(232,104,90,.14); animation: marker-pulse 1.6s ease-in-out infinite; }
 .timeline-step.running em { color: var(--accent-coral); }
 .timeline-step.queued .timeline-dot { background: transparent; border: 1.5px solid rgba(30,58,95,.32); }
+.agent-activity { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.agent-activity-item { min-width: 0; }
+.agent-activity-item.activity-message { padding: 2px 0; color: var(--text-secondary); }
+.activity-message-content p { margin: 0; }
+.agent-activity-item.activity-tool { display: flex; align-items: center; gap: 7px; padding: 5px 6px; border-radius: 5px; background: rgba(30,58,95,.035); font-size: .74rem; }
+.agent-activity-item.activity-tool .timeline-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; background: var(--text-tertiary); }
+.agent-activity-item.activity-tool .timeline-dot.done { background: var(--accent-moss); }
+.agent-activity-item.activity-tool .timeline-dot.running { background: var(--accent-coral); box-shadow: 0 0 0 3px rgba(232,104,90,.14); animation: marker-pulse 1.6s ease-in-out infinite; }
+.agent-activity-item.activity-tool .timeline-dot.queued { background: transparent; border: 1.5px solid rgba(30,58,95,.32); }
+.agent-activity-item.activity-tool > strong { min-width: 0; flex: 1; font-weight: 600; }
+.agent-activity-item.activity-tool > em { flex: 0 0 auto; font-style: normal; font-size: .62rem; color: var(--text-tertiary); }
+.agent-activity-item.activity-tool .timeline-dot.done ~ em { color: var(--accent-moss); }
+.agent-activity-item.activity-tool .timeline-dot.running ~ em { color: var(--accent-coral); }
+.agent-activity + .flow-content { margin-top: 3px; padding-top: 9px; border-top: 1px solid rgba(30,58,95,.08); }
 .debug-events { display: grid; gap: 6px; margin-top: 8px; }
 .debug-event { border: 1px solid var(--line-subtle); border-radius: 6px; background: rgba(246,248,250,.72); overflow: hidden; }
 .debug-event summary { cursor: pointer; padding: 7px 9px; font-size: .72rem; font-weight: 700; color: var(--text-secondary); letter-spacing: 0; }

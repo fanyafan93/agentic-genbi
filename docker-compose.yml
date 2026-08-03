@@ -36,12 +36,14 @@ services:
       GENBI_DATABASE_URL: ${GENBI_DATABASE_URL:-postgresql://agentic_genbi:agentic_genbi_dev_password@postgres:5432/agentic_genbi?schema=public}
       AUTH_DATABASE_URL: ${AUTH_DATABASE_URL:-postgresql://agentic_genbi:agentic_genbi_dev_password@postgres:5432/agentic_genbi?schema=public}
       GENBI_PERSISTENCE: ${GENBI_PERSISTENCE:-postgres}
+      GENBI_CODEX_HOME: ${GENBI_CODEX_HOME:-/app/.codex-home}
     ports:
       - "8000:8000"
     volumes:
       - ./backend:/app/backend
       - ./资源库:/app/资源库:ro
       - ./.resource-index:/app/.resource-index
+      - backend-codex-home:/app/.codex-home
 
   frontend:
     build:
@@ -74,3 +76,4 @@ services:
 
 volumes:
   auth-postgres-data:
+  backend-codex-home:

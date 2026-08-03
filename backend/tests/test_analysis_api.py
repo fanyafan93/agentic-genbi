@@ -188,6 +188,26 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["events"][0]["type"], "turn/completed")
             self.assertEqual(thread_store.get_thread("thread_async_create")["thread"]["codexThreadId"], "codex_thread_async")  # type: ignore[index]
 
+    def test_enrich_analysis_event_adds_question_to_user_message_items(self) -> None:
+        event = AgentEvent(
+            type="item/completed",
+            turn_id="codex_turn_user",
+            payload={
+                "eventSource": "codex",
+                "codex_item_type": "userMessage",
+                "codex_item_id": "codex_user_item",
+            },
+        )
+
+        enriched = analysis_api._enrich_analysis_event(
+            event,
+            thread_id="thread_1",
+            turn_id="turn_1",
+            question="follow-up question",
+        )
+
+        self.assertEqual(enriched.payload["content"], "follow-up question")
+
     def test_analysis_thread_turn_stream_api_preserves_codex_thread_for_followup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
@@ -213,6 +233,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(second.status_code, 200)
             self.assertIn("event: item/agentMessage/delta", first.text)
             self.assertIn("event: turn/completed", second.text)
+            self.assertEqual(_event_payload_value(second.text, "question"), "continue analysis")
             self.assertEqual(runtime.contexts[1]["codex_thread_id"], "codex_thread_created")
 
     def test_disabled_runtime_fails_explicitly_without_fabricated_content(self) -> None:

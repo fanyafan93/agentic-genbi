@@ -11,6 +11,8 @@ export type BackendTurnEvent = {
 
 const artifactKinds = new Set<ArtifactKind>(["html", "sql", "python", "csv", "markdown", "json"]);
 const DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS = 95_000;
+const DEFAULT_TOKEN_FLUSH_INTERVAL_MS = 14;
+const DEFAULT_TOKEN_FLUSH_CHARS = 2;
 
 export class BackendAnalysisAgentClient implements AgentClient {
   private conversationId: string | null = null;
@@ -34,10 +36,19 @@ export class BackendAnalysisAgentClient implements AgentClient {
 
     this.abortController = new AbortController();
     let timedOut = false;
-    const timeoutId = globalThis.setTimeout(() => {
-      timedOut = true;
-      this.abortController?.abort();
-    }, getBackendAnalysisRequestTimeoutMs());
+    let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
+    const refreshTimeout = () => {
+      if (timeoutId) globalThis.clearTimeout(timeoutId);
+      timeoutId = globalThis.setTimeout(() => {
+        timedOut = true;
+        this.abortController?.abort();
+      }, getBackendAnalysisRequestTimeoutMs());
+    };
+    refreshTimeout();
+    const clearRequestTimeout = () => {
+      if (timeoutId) globalThis.clearTimeout(timeoutId);
+      timeoutId = null;
+    };
     try {
       const threadTurnUrl = this.conversationId && input.kind !== "start"
         ? `${this.apiBaseUrl}/api/analysis/threads/${encodeURIComponent(this.conversationId)}/turns/stream`
@@ -57,20 +68,24 @@ export class BackendAnalysisAgentClient implements AgentClient {
       if (!response.ok) {
         throw new Error(`Analysis SSE API returned ${response.status}`);
       }
+      const streamContext: BackendEventMappingContext = {};
       for await (const backendEvent of readAnalysisSse(response)) {
+        refreshTimeout();
         const conversationId = asString(backendEvent.payload.thread_id) || asString(backendEvent.payload.conversation_id);
         if (conversationId) this.conversationId = conversationId;
-        for (const event of mapBackendEvents([backendEvent], input.kind)) {
-          yield event;
+        for (const event of mapBackendEvents([backendEvent], input.kind, streamContext)) {
+          for await (const displayEvent of smoothTokenEvent(event)) {
+            yield displayEvent;
+          }
         }
       }
-      globalThis.clearTimeout(timeoutId);
+      clearRequestTimeout();
     } catch (error) {
       if ((error as Error).name === "AbortError" && !timedOut) {
-        globalThis.clearTimeout(timeoutId);
+        clearRequestTimeout();
         return;
       }
-      globalThis.clearTimeout(timeoutId);
+      clearRequestTimeout();
       if (timedOut) {
         yield {
           type: "error",
@@ -108,6 +123,43 @@ export function getBackendAnalysisRequestTimeoutMs(): number {
   const raw = process.env.NEXT_PUBLIC_ANALYSIS_AGENT_TIMEOUT_MS;
   const parsed = raw ? Number(raw) : DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ANALYSIS_REQUEST_TIMEOUT_MS;
+}
+
+export function getTokenFlushIntervalMs(): number {
+  const raw = process.env.NEXT_PUBLIC_ANALYSIS_TOKEN_FLUSH_INTERVAL_MS;
+  const parsed = raw ? Number(raw) : DEFAULT_TOKEN_FLUSH_INTERVAL_MS;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_TOKEN_FLUSH_INTERVAL_MS;
+}
+
+export function getTokenFlushChars(): number {
+  const raw = process.env.NEXT_PUBLIC_ANALYSIS_TOKEN_FLUSH_CHARS;
+  const parsed = raw ? Number(raw) : DEFAULT_TOKEN_FLUSH_CHARS;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_TOKEN_FLUSH_CHARS;
+}
+
+export async function* smoothTokenEvent(event: AgentEvent): AsyncIterable<AgentEvent> {
+  if (event.type !== "tokens" || event.text.length <= getTokenFlushChars()) {
+    yield event;
+    return;
+  }
+  const chunks = splitTextForStreaming(event.text, getTokenFlushChars());
+  for (let index = 0; index < chunks.length; index += 1) {
+    if (index > 0) await sleep(getTokenFlushIntervalMs());
+    yield { ...event, text: chunks[index] };
+  }
+}
+
+function splitTextForStreaming(text: string, charsPerChunk: number): string[] {
+  const chars = Array.from(text);
+  const chunks: string[] = [];
+  for (let index = 0; index < chars.length; index += charsPerChunk) {
+    chunks.push(chars.slice(index, index + charsPerChunk).join(""));
+  }
+  return chunks;
+}
+
+function sleep(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((resolve) => globalThis.setTimeout(resolve, ms)) : Promise.resolve();
 }
 
 export async function* readAnalysisSse(response: Response): AsyncIterable<BackendTurnEvent> {
@@ -148,8 +200,15 @@ function getInputQuestion(input: AgentInput): string {
   return "";
 }
 
-export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentInput["kind"]): Iterable<AgentEvent> {
-  let currentAgentNodeId: string | null = null;
+type BackendEventMappingContext = {
+  currentAgentNodeId?: string;
+};
+
+export function* mapBackendEvents(
+  events: BackendTurnEvent[],
+  inputKind: AgentInput["kind"],
+  mappingContext: BackendEventMappingContext = {},
+): Iterable<AgentEvent> {
   for (const event of events) {
     const context = getSystemContext(event);
     const method = asString(event.payload.codex_method) || event.type;
@@ -165,37 +224,25 @@ export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentIn
           ...context,
         };
       }
-      yield {
-        type: "step",
-        label: "模型响应",
-        state: "running",
-        nodeId: getAgentNodeId(event),
-        ...context,
-      };
       continue;
     }
 
     const isToolItemEvent = (
       (event.type === "item/started" || event.type === "item/completed" || method === "item/started" || method === "item/completed")
-      && ["toolCall", "toolResult"].includes(codexItemType)
+      && ["toolCall", "toolResult", "mcpToolCall"].includes(codexItemType)
     );
     if (isToolItemEvent) {
-      currentAgentNodeId ||= `agent-${event.turn_id}`;
-      const toolName = asString(event.payload.tool) || asString(event.payload.name) || "tool";
+      const toolNodeId = mappingContext.currentAgentNodeId || getAgentNodeId(event);
+      const toolName = asString(event.payload.mcp_tool) || asString(event.payload.tool) || asString(event.payload.name) || "tool";
+      const toolServer = asString(event.payload.mcp_server);
+      const itemId = asString(event.payload.item_id) || asString(event.payload.codex_item_id) || undefined;
       yield {
         type: "step",
-        label: `工具调用：${toolName}`,
+        label: `工具调用：${toolServer ? `${toolServer} / ` : ""}${toolName}`,
         state: event.type === "item/started" ? "running" : "done",
-        nodeId: currentAgentNodeId,
-        itemId: asString(event.payload.item_id) || undefined,
-        ...context,
-      };
-      yield {
-        type: "debug",
-        title: `工具事件：${event.type}`,
-        content: JSON.stringify(event.payload, null, 2),
-        nodeId: currentAgentNodeId,
-        itemId: asString(event.payload.item_id) || undefined,
+        nodeId: toolNodeId,
+        detail: toolCallDetail(event.payload),
+        itemId,
         ...context,
       };
       continue;
@@ -203,6 +250,7 @@ export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentIn
 
     if (event.type === "item/completed" && method === "item/completed" && codexItemType === "agentMessage") {
       const agentNodeId = getAgentNodeId(event);
+      mappingContext.currentAgentNodeId = agentNodeId;
       const content = asString(event.payload.content);
       yield {
         type: "agent",
@@ -216,9 +264,11 @@ export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentIn
     }
 
     if (event.type === "item/agentMessage/delta" || method === "item/agentMessage/delta") {
+      const agentNodeId = getAgentNodeId(event);
+      mappingContext.currentAgentNodeId = agentNodeId;
       yield {
         type: "tokens",
-        nodeId: getAgentNodeId(event),
+        nodeId: agentNodeId,
         text: asString(event.payload.delta),
         itemId: asString(event.payload.item_id) || undefined,
         ...context,
@@ -282,6 +332,15 @@ export function* mapBackendEvents(events: BackendTurnEvent[], inputKind: AgentIn
       continue;
     }
   }
+}
+
+function toolCallDetail(payload: Record<string, unknown>): string | undefined {
+  const args = asRecord(payload.mcp_arguments) || asRecord(payload.arguments);
+  const sql = args ? asString(args.sql) : "";
+  if (sql) return sql;
+  const error = asString(payload.mcp_error);
+  if (error) return error;
+  return undefined;
 }
 
 function getAgentNodeId(event: BackendTurnEvent): string {

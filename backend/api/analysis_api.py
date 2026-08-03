@@ -10,6 +10,7 @@ from backend.analysis.interactive_report_store import InteractiveReportStore, In
 from backend.business_semantics.finereport_reports import FineReportReportRepository
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
 from backend.harness.events import AgentEvent
+from backend.harness.minimax_codex_adapter import proxy_minimax_response
 from backend.harness.thread_store import ThreadStore
 from backend.persistence.postgres_stores import (
     build_postgres_analysis_asset_store,
@@ -41,7 +42,7 @@ def create_app(
     try:
         from fastapi import Body, FastAPI, HTTPException, Query
         from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import StreamingResponse
+        from fastapi.responses import Response, StreamingResponse
         from pydantic import BaseModel, Field
     except ImportError as exc:
         raise RuntimeError("Install FastAPI dependencies from backend/requirements.txt to start the API.") from exc
@@ -191,6 +192,22 @@ def create_app(
     @app.get("/api/runtime/status")
     def runtime_status() -> dict[str, Any]:
         return check_runtime_env()
+
+    @app.post("/api/codex-minimax/v1/responses")
+    async def codex_minimax_responses(body: dict[str, Any] = Body(...)) -> Any:
+        raw_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        status, headers, payload = proxy_minimax_response(
+            raw_body,
+            stream=bool(body.get("stream")),
+        )
+        media_type = headers.get("content-type", "application/json")
+        if bool(body.get("stream")) and not isinstance(payload, bytes):
+            return StreamingResponse(payload, status_code=status, media_type=media_type)
+        return Response(
+            content=payload if isinstance(payload, bytes) else b"".join(payload),
+            status_code=status,
+            media_type=media_type,
+        )
 
     @app.get("/api/business-semantics/finereport/reports")
     def list_finereport_reports() -> dict[str, Any]:
@@ -531,10 +548,13 @@ def _stream_analysis_turn_response(
 
     async def event_stream() -> Any:
         events: list[AgentEvent] = []
-        async for event in _astream_runtime_events(analysis_runtime, thread_store, request, thread_id=thread_id, turn_id=turn_id):
-            events.append(event)
-            yield event.to_sse()
-        _save_analysis_turn(thread_store, request, thread_id=thread_id, turn_id=turn_id, events=events)
+        try:
+            async for event in _astream_runtime_events(analysis_runtime, thread_store, request, thread_id=thread_id, turn_id=turn_id):
+                events.append(event)
+                yield event.to_sse()
+        finally:
+            if events:
+                _save_analysis_turn(thread_store, request, thread_id=thread_id, turn_id=turn_id, events=events)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -551,14 +571,18 @@ async def _astream_runtime_events(
         request.question.strip(),
         context=_runtime_context(thread_store, request, thread_id=thread_id, turn_id=turn_id),
     ):
-        yield _enrich_analysis_event(event, thread_id=thread_id, turn_id=turn_id)
+        yield _enrich_analysis_event(event, thread_id=thread_id, turn_id=turn_id, question=request.question.strip())
 
 
-def _enrich_analysis_event(event: AgentEvent, *, thread_id: str, turn_id: str) -> AgentEvent:
+def _enrich_analysis_event(event: AgentEvent, *, thread_id: str, turn_id: str, question: str | None = None) -> AgentEvent:
     payload = dict(event.payload)
     payload.setdefault("thread_id", thread_id)
     payload.setdefault("conversation_id", thread_id)
     payload.setdefault("turn_id", turn_id)
+    if event.type == "turn/started" and question:
+        payload.setdefault("question", question)
+    if payload.get("codex_item_type") == "userMessage" and question:
+        payload.setdefault("content", question)
     return AgentEvent(type=event.type, turn_id=turn_id, payload=payload, created_at=event.created_at)
 
 

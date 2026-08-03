@@ -53,7 +53,8 @@ export function FlowNodeView({ node, onReply }: Props) {
   }
 
   if (node.role === "agent") {
-    const steps = node.steps ?? [];
+    const activity = node.activity ?? [];
+    const steps = activity.length > 0 ? [] : node.steps ?? [];
     return (
       <li className="flow-node flow-agent">
         <div className="flow-marker" aria-hidden="true">
@@ -62,15 +63,50 @@ export function FlowNodeView({ node, onReply }: Props) {
           </div>
         </div>
         <div className="flow-card">
-          <div className="message-body-markdown flow-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{node.content || "\u00A0"}</ReactMarkdown>
-          </div>
+          {activity.length > 0 && (
+            <ol className="agent-activity" aria-label="本轮执行过程">
+              {activity.map((item, index) => (
+                <li className={`agent-activity-item activity-${item.kind}`} key={`${item.itemId ?? item.kind}-${index}`}>
+                  {item.kind === "message" ? (
+                    <div className="message-body-markdown activity-message-content">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
+                    </div>
+                  ) : (
+                    <>
+                      <span className={`timeline-dot ${item.state}`} aria-hidden="true" />
+                      {item.detail ? (
+                        <details className="tool-step-detail">
+                          <summary><strong>{item.label}</strong></summary>
+                          <pre>{item.detail}</pre>
+                        </details>
+                      ) : (
+                        <strong>{item.label}</strong>
+                      )}
+                      <em>{item.state === "done" ? "已完成" : item.state === "running" ? "进行中" : "等待中"}</em>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ol>
+          )}
+          {(node.content || activity.length === 0) && (
+            <div className="message-body-markdown flow-content">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{node.content || "\u00A0"}</ReactMarkdown>
+            </div>
+          )}
           {steps.length > 0 && (
             <ol className="timeline" role="list">
               {steps.map((step, index) => (
-                <li className={`timeline-step ${step.state}`} key={`${step.label}-${index}`}>
+                <li className={`timeline-step ${step.state}`} key={`${step.itemId ?? step.label}-${index}`}>
                   <span className="timeline-dot" aria-hidden="true" />
-                  <strong>{step.label}</strong>
+                  {step.detail ? (
+                    <details className="tool-step-detail">
+                      <summary><strong>{step.label}</strong></summary>
+                      <pre>{step.detail}</pre>
+                    </details>
+                  ) : (
+                    <strong>{step.label}</strong>
+                  )}
                   <em>
                     {step.state === "done"
                       ? "已完成"
