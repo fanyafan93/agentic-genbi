@@ -162,8 +162,8 @@ describe("analysis task product language", () => {
   });
 
   test("keeps the lower-level interaction event generic for shared conversations", () => {
-    expect(agentTypesSource).toContain('"conversation-init"');
-    expect(agentTypesSource).toContain("conversationId?: string");
+    expect(agentTypesSource).not.toContain('"conversation-init"');
+    expect(agentTypesSource).not.toContain("conversationId?: string");
     expect(agentTypesSource).toContain("turnId?: string");
     expect(agentTypesSource).not.toContain('"analysis-task-init"');
   });
@@ -190,7 +190,7 @@ describe("analysis task product language", () => {
     expect(backendClientSource).toContain("genbi/artifact/created");
     expect(backendClientSource).toContain("genbi/artifact/updated");
     expect(backendClientSource).toContain("mapBackendEvents");
-    expect(backendClientSource).toContain("event.payload.conversation_id");
+    expect(backendClientSource).toContain("event.payload.thread_id");
   });
 
   test("keeps the analysis task thread presentation in its own component", () => {

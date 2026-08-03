@@ -22,8 +22,7 @@ afterEach(() => {
 describe("analysis flow streaming", () => {
   test("keeps the user message before the thinking placeholder", async () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
-      yield { type: "conversation-init", turnId: "turn-1", conversationId: "thread-1" };
-      yield { type: "user", nodeId: "user-1", content: "分析渠道销售" };
+      yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };
       yield { type: "done" };
     });
 
@@ -40,8 +39,7 @@ describe("analysis flow streaming", () => {
 
   test("replaces the thinking placeholder when the first answer delta arrives", async () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
-      yield { type: "conversation-init", turnId: "turn-1", conversationId: "thread-1" };
-      yield { type: "user", nodeId: "user-1", content: "分析渠道销售" };
+      yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };
       yield { type: "step", nodeId: "agent-1", label: "模型响应", state: "running" };
       yield { type: "tokens", nodeId: "agent-1", text: "开始分析" };
       yield { type: "done" };
@@ -61,8 +59,7 @@ describe("analysis flow streaming", () => {
 
   test("replaces the thinking placeholder when the turn fails", async () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
-      yield { type: "conversation-init", turnId: "turn-1", conversationId: "thread-1" };
-      yield { type: "user", nodeId: "user-1", content: "分析渠道销售" };
+      yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };
       yield { type: "error", message: "连接中断" };
     });
 

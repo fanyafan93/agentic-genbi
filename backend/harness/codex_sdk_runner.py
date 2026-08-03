@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterable
 
-from backend.analysis.runner_contracts import AnalysisAgentResult, AnalysisAgentRunnerEvent
 from backend.config import load_project_env
+from backend.harness.events import AgentEvent
 
 
 CODEX_ANALYSIS_INSTRUCTIONS = """
@@ -26,8 +26,8 @@ class CodexSdkRunnerContext:
     cwd: str | None = None
 
 
-class CodexSdkAnalysisRunner:
-    """Thin adapter from the official openai-codex SDK to the existing analysis runner protocol."""
+class CodexSdkAnalysisRuntime:
+    """Thin adapter from the official openai-codex SDK to GenBI persistence."""
 
     runtime_name = "openai-codex"
 
@@ -47,68 +47,66 @@ class CodexSdkAnalysisRunner:
         self.base_url = _codex_base_url_from_env(self.provider)
         self._codex_factory = codex_factory
         self._async_codex_factory = async_codex_factory
+        self.enabled = True
 
     @classmethod
-    def from_env(cls) -> "CodexSdkAnalysisRunner":
+    def from_env(cls) -> "CodexSdkAnalysisRuntime":
         load_project_env()
         return cls()
 
-    def run(self, prompt: str, *, context: dict[str, Any] | CodexSdkRunnerContext | None = None) -> AnalysisAgentResult:
-        return asyncio.run(self._run(prompt, context=context))
+    @classmethod
+    def disabled(cls) -> "CodexSdkAnalysisRuntime":
+        runtime = cls(codex_factory=lambda: None, async_codex_factory=lambda: None)
+        runtime.enabled = False
+        return runtime
 
     def stream(
         self,
-        prompt: str,
+        question: str,
         *,
         context: dict[str, Any] | CodexSdkRunnerContext | None = None,
-    ) -> Iterable[AnalysisAgentRunnerEvent | AnalysisAgentResult]:
-        return asyncio.run(self._collect_stream(prompt, context=context))
+    ) -> Iterable[AgentEvent]:
+        return asyncio.run(self._collect_stream(question, context=context))
 
     async def async_stream(
         self,
-        prompt: str,
+        question: str,
         *,
         context: dict[str, Any] | CodexSdkRunnerContext | None = None,
-    ) -> AsyncIterator[AnalysisAgentRunnerEvent | AnalysisAgentResult]:
-        async for item in self._iter_streamed(prompt, context=context):
+    ) -> AsyncIterator[AgentEvent]:
+        async for item in self._iter_streamed(question, context=context):
             yield item
 
     async def _collect_stream(
         self,
-        prompt: str,
+        question: str,
         *,
         context: dict[str, Any] | CodexSdkRunnerContext | None = None,
-    ) -> list[AnalysisAgentRunnerEvent | AnalysisAgentResult]:
-        items: list[AnalysisAgentRunnerEvent | AnalysisAgentResult] = []
-        async for item in self._iter_streamed(prompt, context=context):
+    ) -> list[AgentEvent]:
+        items: list[AgentEvent] = []
+        async for item in self._iter_streamed(question, context=context):
             items.append(item)
         return items
 
-    async def _run(
-        self,
-        prompt: str,
-        *,
-        context: dict[str, Any] | CodexSdkRunnerContext | None = None,
-    ) -> AnalysisAgentResult:
-        final_result: AnalysisAgentResult | None = None
-        async for item in self._iter_streamed(prompt, context=context):
-            if isinstance(item, AnalysisAgentResult):
-                final_result = item
-        if final_result is None:
-            raise RuntimeError("openai-codex SDK run did not return a final result.")
-        return final_result
-
     async def _iter_streamed(
         self,
-        prompt: str,
+        question: str,
         *,
         context: dict[str, Any] | CodexSdkRunnerContext | None = None,
-    ) -> AsyncIterator[AnalysisAgentRunnerEvent | AnalysisAgentResult]:
+    ) -> AsyncIterator[AgentEvent]:
+        if not self.enabled:
+            yield AgentEvent(
+                type="turn/completed",
+                turn_id=_context_turn_id(context),
+                payload={
+                    "eventSource": "codex",
+                    "status": "failed",
+                    "error": "codex_runtime_not_configured",
+                },
+            )
+            return
         runner_context = _normalize_context(context, default_cwd=self.cwd)
-        final_text_parts: list[str] = []
         codex_thread_id: str | None = runner_context.codex_thread_id
-        completed_items: list[Any] = []
-        completed_payload: Any | None = None
 
         try:
             async with self._make_async_codex() as codex:
@@ -116,40 +114,13 @@ class CodexSdkAnalysisRunner:
                 thread = await self._open_thread(codex, runner_context)
                 codex_thread_id = str(getattr(thread, "id", codex_thread_id or ""))
 
-                turn = await thread.turn(prompt, **self._turn_kwargs(runner_context))
+                turn = await thread.turn(question, **self._turn_kwargs(runner_context))
                 async for notification in turn.stream():
-                    if str(getattr(notification, "method", "") or "") == "item/completed":
-                        item = _payload_item(getattr(notification, "payload", None))
-                        if item is not None:
-                            completed_items.append(item)
-                    if str(getattr(notification, "method", "") or "") == "turn/completed":
-                        completed_payload = getattr(notification, "payload", None)
                     event = self._notification_to_event(notification, codex_thread_id=codex_thread_id)
                     if event:
-                        if event.type == "item/agentMessage/delta":
-                            final_text_parts.append(str(event.payload.get("delta") or ""))
                         yield event
         except ImportError as exc:
             raise RuntimeError("Install the `openai-codex` Python package to use GENBI_ANALYSIS_RUNTIME=codex.") from exc
-
-        turn_status = _turn_status(completed_payload)
-        if turn_status == "failed":
-            yield AnalysisAgentResult(
-                final_output="",
-                raw_result_type=type(completed_payload).__name__ if completed_payload is not None else "CodexStream",
-                events=[],
-            )
-            return
-
-        final_response = _collect_agent_text(completed_items)
-        if not final_response:
-            final_response = "".join(final_text_parts).strip()
-
-        yield AnalysisAgentResult(
-            final_output=final_response or "Codex completed the turn without returning final text.",
-            raw_result_type=type(completed_payload).__name__ if completed_payload is not None else "CodexStream",
-            events=[],
-        )
 
     def _make_async_codex(self) -> Any:
         if self._async_codex_factory:
@@ -221,12 +192,14 @@ class CodexSdkAnalysisRunner:
             return {}
         return {_provider_env_key(self.provider): self.api_key}
 
-    def _notification_to_event(self, notification: Any, *, codex_thread_id: str | None) -> AnalysisAgentRunnerEvent | None:
+    def _notification_to_event(self, notification: Any, *, codex_thread_id: str | None) -> AgentEvent | None:
         method = str(getattr(notification, "method", "") or "")
         payload = getattr(notification, "payload", None)
+        turn_id = _payload_turn_id(payload) or "codex_turn_pending"
         if method == "turn/started":
-            return AnalysisAgentRunnerEvent(
+            return AgentEvent(
                 type="turn/started",
+                turn_id=turn_id,
                 payload={
                     "runtime": "openai-codex",
                     "eventSource": "codex",
@@ -239,8 +212,9 @@ class CodexSdkAnalysisRunner:
             delta = str(getattr(payload, "delta", "") or "")
             if not delta:
                 return None
-            return AnalysisAgentRunnerEvent(
+            return AgentEvent(
                 type="item/agentMessage/delta",
+                turn_id=turn_id,
                 payload={
                     "role": "assistant",
                     "eventSource": "codex",
@@ -259,8 +233,9 @@ class CodexSdkAnalysisRunner:
             if _is_agent_message(root):
                 text = _item_text(root)
                 if text:
-                    return AnalysisAgentRunnerEvent(
+                    return AgentEvent(
                         type="item/completed",
+                        turn_id=turn_id,
                         payload={
                             "runtime": "openai-codex",
                             "eventSource": "codex",
@@ -273,8 +248,9 @@ class CodexSdkAnalysisRunner:
                             "codex_item_type": root_type,
                         },
                 )
-            return AnalysisAgentRunnerEvent(
+            return AgentEvent(
                 type="item/completed",
+                turn_id=turn_id,
                 payload={
                     "runtime": "openai-codex",
                     "eventSource": "codex",
@@ -298,8 +274,9 @@ class CodexSdkAnalysisRunner:
             }
             if error:
                 completed_payload["error"] = error
-            return AnalysisAgentRunnerEvent(
+            return AgentEvent(
                 type="turn/completed",
+                turn_id=turn_id,
                 payload=completed_payload,
             )
         return None
@@ -326,6 +303,13 @@ def _string_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _context_turn_id(context: dict[str, Any] | CodexSdkRunnerContext | None) -> str:
+    if isinstance(context, CodexSdkRunnerContext):
+        return context.genbi_turn_id or "codex_turn_unavailable"
+    data = dict(context or {})
+    return _string_or_none(data.get("genbi_turn_id") or data.get("turn_id")) or "codex_turn_unavailable"
 
 
 def _collect_agent_text(items: Iterable[Any]) -> str:

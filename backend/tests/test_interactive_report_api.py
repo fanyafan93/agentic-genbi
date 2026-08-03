@@ -10,8 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 
 from backend.analysis.interactive_report_store import InteractiveReportStore
-from backend.analysis.turn_service import AnalysisTurnService
 from backend.api.analysis_api import create_app
+from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
 
 
 def _report_payload(
@@ -45,7 +45,7 @@ class InteractiveReportApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.jsonl")
             app = create_app(
-                analysis_service=AnalysisTurnService(),
+                analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
                 interactive_report_store=report_store,
             )
             client = TestClient(app)
@@ -75,7 +75,7 @@ class InteractiveReportApiTest(unittest.TestCase):
     def test_saves_report_with_turn_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.jsonl")
-            app = create_app(analysis_service=AnalysisTurnService(), interactive_report_store=report_store)
+            app = create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled(), interactive_report_store=report_store)
             client = TestClient(app)
 
             created = client.post("/api/analysis/reports", json=_report_payload(source_turn_id="turn_report_only"))
@@ -86,7 +86,7 @@ class InteractiveReportApiTest(unittest.TestCase):
     def test_rejects_stale_report_version_saves(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.jsonl")
-            app = create_app(analysis_service=AnalysisTurnService(), interactive_report_store=report_store)
+            app = create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled(), interactive_report_store=report_store)
             client = TestClient(app)
 
             client.post("/api/analysis/reports", json=_report_payload())

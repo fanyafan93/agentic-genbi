@@ -53,16 +53,13 @@ describe("analysis backend client event mapping", () => {
     ], "start"));
 
     expect(events[0]).toMatchObject({
-      type: "conversation-init",
-      turnId: "turn_analysis_123",
-      conversationId: "thread_analysis_456",
-    });
-    expect(events[1]).toMatchObject({
       type: "user",
+      turnId: "turn_analysis_123",
+      threadId: "thread_analysis_456",
       nodeId: "user-turn_analysis_123",
       content: "first purchase 30d repurchase definition",
     });
-    expect(events[2]).toMatchObject({
+    expect(events[1]).toMatchObject({
       type: "step",
       nodeId: "agent-turn_analysis_123",
       label: "模型响应",
