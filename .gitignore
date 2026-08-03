@@ -15,3 +15,5 @@ frontend/next-env.d.ts
 frontend/.local.html
 frontend/.ssr.html
 frontend/.v4.html
+# Local scratch outputs (probe scripts, queries, etc.) — never commit.
+outputs/
