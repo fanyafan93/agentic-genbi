@@ -7,7 +7,7 @@
 ## 当前分支
 
 - 分支：`Agentic-GenBI`。
-- 工作区：有未提交改动；本轮新增本地服务启动脚本和 README 启动说明，另有此前未提交的前端/report 相关改动未处理。
+- 工作区：有未提交改动；本轮准备提交此前未提交的前端/report 元数据查看改动。
 
 ## 本轮完成
 
@@ -31,6 +31,9 @@
 - 新增 `scripts/start-services.ps1`：Windows 下统一启动 Docker Desktop、等待 Docker daemon、执行 `docker compose up -d`，并检查 backend `/health` 与 frontend 首页。
 - README 本地运行说明改为优先使用 `scripts/start-services.ps1`，保留原始 `docker compose up -d --build` 作为直接方式。
 - 修复 frontend compose 启动方式：容器内 `next dev` 在后台服务场景会显示 `Ready` 后退出，改为 `npm install && prisma migrate deploy && NODE_ENV=production next build && next start`。
+- 右侧 Report 面板增加“显示元数据”入口，使用 JSON tree 查看当前 `InteractiveReport` 原始 JSON。
+- 新增报告元数据弹窗滚动隔离样式，降低大 JSON 查看时影响外层布局和滚动的风险。
+- 新增 `report-metadata-scroll.test.tsx`，覆盖元数据 JSON 渲染、状态切换后容器稳定、滚动容器样式。
 
 ## 已运行验证
 
@@ -56,6 +59,7 @@
 - `GET http://127.0.0.1:8000/health`：返回 `{"status":"ok"}`。
 - `GET http://127.0.0.1:3000`：返回 200。
 - `docker compose ps`：postgres healthy，backend 和 frontend 均为 `Up`。
+- `npm.cmd test -- report-metadata-scroll.test.tsx`：1 个前端测试文件、3 个测试通过。
 
 ## 风险或未完成
 
@@ -64,10 +68,10 @@
 - 历史任务 `analysis_thread_422345f87652` 已经被旧前端状态切换中止，不会自动恢复；需要用新任务验证修复后的链路。
 - 历史任务 `analysis_thread_f24cdc662d89` 已经因前端超时断流被标记为 `interrupted`，不会自动恢复；新超时配置只影响后续任务。
 - 当前 Docker/WSL 已恢复到可运行状态；PowerShell 启动时仍会输出 `starship` 未安装提示，不影响服务运行。
-- 工作区存在本轮之前的未提交改动，本轮未回滚。
+- `frontend/pnpm-lock.yaml` 与 `frontend/pnpm-workspace.yaml` 是未跟踪的 pnpm 元数据；当前仓库使用 npm/package-lock，本轮不纳入提交。
 
 ## 下一步
 
-1. 用 `scripts/start-services.ps1` 再跑一次完整启动脚本，确认脚本在 production frontend 模式下端到端通过。
-2. 验证分析工作台 SSE。
-3. 再回到右侧 ReportArtifact 通用协议和 GenBI_report 工具完善。
+1. 专门设计 ReportArtifact 通用协议，明确查询、数据集、组件、Puck 布局、筛选、交互、版本和血缘。
+2. 基于协议完善 `GenBI_report` 工具契约与校验路径。
+3. 验证右侧报表渲染不再依赖渠道销售字段硬编码。

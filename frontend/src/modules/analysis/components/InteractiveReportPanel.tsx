@@ -1,10 +1,12 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Puck, Render, type Config, type Data } from "@puckeditor/core";
 import { AgGridReact } from "ag-grid-react";
 import { AllCommunityModule, ModuleRegistry, themeQuartz, type ColDef } from "ag-grid-community";
 import { EChartRenderer } from "@/shared/charts/EChartRenderer";
+import JsonView from "@uiw/react-json-view";
+import { nordTheme } from "@uiw/react-json-view/nord";
 import type { SavedInteractiveReport } from "../api/interactive-report-service";
 import type { InteractiveReportVersionSummary } from "../api/interactive-report-service";
 import type { InteractiveReport, ReportDatasetRow, ReportRuntimeFilters } from "../types/interactive-report";
@@ -146,13 +148,14 @@ function InteractiveReportContent({ taskTitle, running, initialReport, initialVe
   const [editorOpen, setEditorOpen] = useState(false);
   const [notice, setNotice] = useState("Agent 已生成一份可继续编辑的分析结果。");
   const [version, setVersion] = useState(initialVersion);
-  const [versionHistory, setVersionHistory] = useState<InteractiveReportVersionSummary[] | null>(null);
+  const [metadataOpen, setMetadataOpen] = useState(false);
+  // 引用稳定即可：JsonView 直接消费对象，避免父组件 re-render 触发子组件重渲。
+  const metadataValue = useMemo(() => report, [report]);
 
   useEffect(() => {
     setReport(normalizedInitialReport);
     setVersion(initialVersion);
     setFilters(createDefaultReportFilters(normalizedInitialReport));
-    setVersionHistory(null);
     setNotice("已加载本轮分析结果；当前筛选是新的运行时视图。");
   }, [normalizedInitialReport, initialVersion]);
 
@@ -182,18 +185,6 @@ function InteractiveReportContent({ taskTitle, running, initialReport, initialVe
       setNotice(error instanceof Error ? error.message : "分析结果保存失败。");
     }
   };
-  const toggleVersionHistory = async () => {
-    if (!onListVersions) return;
-    if (versionHistory) {
-      setVersionHistory(null);
-      return;
-    }
-    try {
-      setVersionHistory(await onListVersions(report.id));
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "历史版本读取失败。");
-    }
-  };
   const loadVersion = async (targetVersion: number) => {
     if (!onLoadVersion || targetVersion === version) return;
     try {
@@ -217,7 +208,7 @@ function InteractiveReportContent({ taskTitle, running, initialReport, initialVe
         </div>
         <div className="result-actions">
           <button type="button" onClick={save}>保存</button>
-          {onListVersions && onLoadVersion ? <button type="button" onClick={toggleVersionHistory}>历史版本</button> : null}
+          <button type="button" onClick={() => setMetadataOpen(true)}>显示元数据</button>
           <button type="button" onClick={() => setNotice("已创建团队内只读分享链接（Mock）。")}>分享</button>
           <button type="button" onClick={() => setNotice("已从本次对话、查询和结果提炼出分析模板草稿（Mock）。")}>提炼为模板</button>
           <button type="button" onClick={() => setNotice("导出队列已创建：交互式报告 PDF 与渠道明细 XLSX（Mock）。")}>导出</button>
@@ -229,10 +220,32 @@ function InteractiveReportContent({ taskTitle, running, initialReport, initialVe
         <span className={`report-runtime-status ${running ? "running" : ""}`}>{running ? "Agent 正在更新结果" : "运行时筛选不会创建版本"}</span>
       </div>
       <p className="report-notice" role="status">{notice}</p>
-      {versionHistory ? <section className="report-version-history" aria-label="报告历史版本">
-        <strong>历史版本</strong>
-        <div>{versionHistory.map((item) => <button key={item.version} type="button" className={item.version === version ? "active" : ""} onClick={() => void loadVersion(item.version)}>v{item.version} · {new Date(item.createdAt).toLocaleString("zh-CN")}</button>)}</div>
-      </section> : null}
+      {metadataOpen ? (
+        <div className="report-editor-backdrop" role="dialog" aria-modal="true" aria-label="报告元数据">
+          <div className="report-editor-shell report-metadata-shell">
+            <header>
+              <div>
+                <span>REPORT METADATA</span>
+                <h2>报告元数据（原始 JSON）</h2>
+              </div>
+              <button type="button" onClick={() => setMetadataOpen(false)} aria-label="关闭元数据">×</button>
+            </header>
+            <div className="report-metadata-json" data-testid="report-metadata-json">
+              <JsonView
+                value={metadataValue}
+                keyName="report"
+                collapsed={2}
+                enableClipboard
+                displayObjectSize
+                displayDataTypes={false}
+                shortenTextAfterLength={120}
+                highlightUpdates={false}
+                style={{ ...nordTheme, background: "transparent", fontSize: "0.78rem", lineHeight: 1.55 } as CSSProperties}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="report-canvas">
         <ReportRuntimeProvider report={report} filters={filters}><Render config={interactiveReportPuckConfig} data={report.document} /></ReportRuntimeProvider>
       </div>

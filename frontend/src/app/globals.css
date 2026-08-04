@@ -322,6 +322,9 @@ img.user-chip-avatar { object-fit: cover; }
 .report-editor-shell > header h2 { margin: 2px 0 0; color: var(--accent-navy); font-size: 1rem; }
 .report-editor-shell > header button { width: 28px; height: 28px; border: 0; border-radius: 50%; background: rgba(30,58,95,.08); color: var(--text-secondary); font-size: 1.25rem; cursor: pointer; }
 .report-editor-shell .Puck { min-height: 0; }
+.report-metadata-shell { place-self: center; width: min(960px, 92vw); height: min(720px, 86vh); border: 1px solid rgba(30,58,95,.12); border-radius: 8px; box-shadow: 0 18px 48px rgba(15,25,35,.18); }
+.report-metadata-json { min-height: 0; overflow: auto; padding: 14px 16px; background: #2e3440; color: #d8dee9; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; line-height: 1.55; contain: strict; overscroll-behavior: contain; will-change: scroll-position; }
+.report-metadata-json > div { font-family: inherit !important; }
 
 .my-analysis-page { display: grid; align-content: start; gap: 18px; min-width: 0; min-height: 0; height: 100%; overflow: auto; padding: 34px clamp(28px, 5vw, 72px); background: linear-gradient(135deg, rgba(255,255,255,.82), rgba(244,248,247,.92)); }
 .my-analysis-page > header > span, .my-analysis-section-head span { color: var(--accent-coral); font-size: .62rem; font-weight: 900; letter-spacing: .13em; }
