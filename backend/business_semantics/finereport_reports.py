@@ -19,7 +19,7 @@ SENSITIVE_SEMANTIC_TOKEN_PATTERN = re.compile(
 
 class FineReportReportRepository:
     def __init__(self, root: Path | None = None) -> None:
-        configured_root = Path(os.getenv("GENBI_FINEREPORT_ROOT", "资源库/finereport/解析"))
+        configured_root = Path(os.getenv("GENBI_FINEREPORT_ROOT", "资源库/finereport/报表画像"))
         self.root = root or configured_root
 
     def list_reports(self) -> list[dict[str, Any]]:
@@ -82,10 +82,11 @@ class FineReportReportRepository:
             return groups
         for path in sorted(self.root.rglob("*.json"), key=lambda item: str(item.relative_to(self.root))):
             match = MERGED_PATTERN.match(path.name)
-            if not match:
-                continue
             relative_stem = path.relative_to(self.root).with_suffix("")
-            name = str(relative_stem).removesuffix(".原始解析").replace("\\", "/")
+            if match:
+                name = str(relative_stem).removesuffix(".原始解析").replace("\\", "/")
+            else:
+                name = str(relative_stem).replace("\\", "/")
             groups[name] = {"merged": path}
         return groups
 
@@ -179,6 +180,7 @@ class FineReportReportRepository:
         parameters = _list(interactions.get("parameters"))
         parameter_widgets = _list(interactions.get("parameter_widgets"))
         conditional_rules = _list(interactions.get("conditional_rules"))
+        report_usage = _first_mapping(payload.get("report_usage"))
         sheets = [_normalize_sheet(sheet) for sheet in _list(structure.get("sheets"))]
         status = "complete" if not errors else "incomplete"
         sheet_names = report_metadata.get("sheet_names") or [sheet["name"] for sheet in sheets]
@@ -203,6 +205,7 @@ class FineReportReportRepository:
             "missingParts": [],
             "errors": errors,
             "counts": counts,
+            "usage": _normalize_report_usage(report_usage),
         }
         return {
             "report": summary,
@@ -210,6 +213,7 @@ class FineReportReportRepository:
             "parameters": parameters,
             "parameterWidgets": parameter_widgets,
             "conditionalRules": conditional_rules,
+            "reportUsage": _normalize_report_usage(report_usage),
             "sheets": sheets,
         }
 
@@ -265,6 +269,23 @@ def _normalize_sheet(sheet: dict[str, Any]) -> dict[str, Any]:
         "rowCount": row_count,
         "columnCount": column_count,
         "cells": cells,
+    }
+
+
+def _normalize_report_usage(value: dict[str, Any]) -> dict[str, Any]:
+    users = []
+    for item in _list(value.get("users")):
+        users.append(
+            {
+                "userName": str(item.get("user_name") or item.get("userName") or ""),
+                "position": str(item.get("position") or ""),
+                "department": str(item.get("department") or ""),
+                "usageCount": _positive_int(item.get("usage_count") or item.get("usageCount"), 0),
+            }
+        )
+    return {
+        "totalUsageCount": _positive_int(value.get("total_usage_count") or value.get("totalUsageCount"), 0),
+        "users": users,
     }
 
 

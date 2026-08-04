@@ -20,6 +20,7 @@ export type FineReportReportSummary = {
   missingParts: string[];
   errors: string[];
   counts: FineReportCounts;
+  usage?: FineReportUsage;
 };
 
 export type FineReportDataset = {
@@ -52,12 +53,23 @@ export type FineReportSheet = {
   cells: FineReportCell[];
 };
 
+export type FineReportUsage = {
+  totalUsageCount: number;
+  users: Array<{
+    userName: string;
+    position?: string;
+    department?: string;
+    usageCount: number;
+  }>;
+};
+
 export type FineReportReportDetail = {
   report: FineReportReportSummary;
   datasets: FineReportDataset[];
   parameters: Array<Record<string, unknown>>;
   parameterWidgets: Array<Record<string, unknown>>;
   conditionalRules: Array<Record<string, unknown>>;
+  reportUsage?: FineReportUsage;
   sheets: FineReportSheet[];
 };
 

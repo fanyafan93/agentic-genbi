@@ -10,13 +10,14 @@ import {
 } from "../api/finereport-reports";
 import { FineReportSheetGrid } from "./FineReportSheetGrid";
 
-type DetailTab = "preview" | "overview" | "datasets" | "interactions" | "structure";
+type DetailTab = "preview" | "overview" | "datasets" | "interactions" | "usage" | "structure";
 
 const detailTabs: Array<{ id: DetailTab; label: string }> = [
   { id: "preview", label: "报表预览" },
   { id: "overview", label: "概览" },
   { id: "datasets", label: "数据集与 SQL" },
   { id: "interactions", label: "参数与交互" },
+  { id: "usage", label: "使用情况" },
   { id: "structure", label: "结构详情" },
 ];
 
@@ -45,12 +46,14 @@ export function FineReportReportBrowser() {
       })
       .catch((reason: unknown) => {
         if (!active) return;
-        setError(reason instanceof Error ? reason.message : "无法读取 FineReport 解析结果");
+        setError(reason instanceof Error ? reason.message : "无法读取 FineReport 报表画像");
       })
       .finally(() => {
         if (active) setLoading(false);
       });
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -70,12 +73,14 @@ export function FineReportReportBrowser() {
       .catch((reason: unknown) => {
         if (!active) return;
         setDetail(null);
-        setError(reason instanceof Error ? reason.message : "无法读取报表详情");
+        setError(reason instanceof Error ? reason.message : "无法读取报表画像详情");
       })
       .finally(() => {
         if (active) setLoading(false);
       });
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, [selectedReportId]);
 
   const activeSheet = detail?.sheets.find((sheet) => sheet.name === activeSheetName) ?? detail?.sheets[0];
@@ -96,12 +101,12 @@ export function FineReportReportBrowser() {
   }, [activeSheet, structureQuery]);
 
   return (
-    <section className="finereport-browser" aria-label="FineReport 报表解析">
+    <section className="finereport-browser" aria-label="FineReport 报表画像">
       <header className="finereport-browser-header">
         <div>
-          <span>FINEREPORT PARSED REPORTS</span>
-          <h1>报表解析</h1>
-          <p>浏览解析后的报表结构、数据集、参数、交互规则和字段绑定。</p>
+          <span>FINEREPORT PROFILE</span>
+          <h1>报表画像</h1>
+          <p>浏览 FineReport 报表结构、数据集、参数、交互规则、使用情况和字段绑定。</p>
         </div>
         <strong>{reports.length} 张报表</strong>
       </header>
@@ -129,8 +134,8 @@ export function FineReportReportBrowser() {
                 onClick={() => setSelectedReportId(report.id)}
               >
                 <strong>{report.name}</strong>
-                <small>{report.counts.sheets} Sheet · {report.counts.datasets} 数据集 · {report.counts.cells} 单元格</small>
-                {report.status === "incomplete" && <em>解析不完整</em>}
+                <small>{report.counts.sheets} Sheet / {report.counts.datasets} 数据集 / {report.counts.cells} 单元格</small>
+                {report.status === "incomplete" && <em>画像不完整</em>}
               </button>
             ))}
             {filteredReports.length === 0 && <p className="finereport-catalog-empty">没有匹配的报表。</p>}
@@ -139,14 +144,14 @@ export function FineReportReportBrowser() {
 
         <section className="finereport-report-detail" aria-label="FineReport 报表详情">
           {loading && !detail ? (
-            <div className="finereport-state">正在读取解析结果...</div>
+            <div className="finereport-state">正在读取报表画像...</div>
           ) : error ? (
             <div className="finereport-state error">{error}</div>
           ) : detail ? (
             <>
               <header className="finereport-detail-header">
                 <div>
-                  <span>{detail.report.status === "complete" ? "解析完整" : "解析不完整"}</span>
+                  <span>{detail.report.status === "complete" ? "画像完整" : "画像不完整"}</span>
                   <h2>{detail.report.name}</h2>
                   <p>{detail.report.sourceCptPath || "未记录 CPT 来源路径"}</p>
                 </div>
@@ -185,6 +190,7 @@ export function FineReportReportBrowser() {
                   />
                 )}
                 {activeTab === "interactions" && <InteractionPanel detail={detail} />}
+                {activeTab === "usage" && <UsagePanel detail={detail} />}
                 {activeTab === "structure" && activeSheet && (
                   <StructurePanel
                     detail={detail}
@@ -198,7 +204,7 @@ export function FineReportReportBrowser() {
               </div>
             </>
           ) : (
-            <div className="finereport-state">解析目录中还没有报表。</div>
+            <div className="finereport-state">报表画像目录中还没有报表。</div>
           )}
         </section>
       </div>
@@ -231,7 +237,7 @@ function ReportPreview({
           ))}
         </div>
         <div className="finereport-zoom" aria-label="报表缩放">
-          <button type="button" title="缩小" aria-label="缩小" onClick={() => onZoomChange(Math.max(60, zoom - 10))}>−</button>
+          <button type="button" title="缩小" aria-label="缩小" onClick={() => onZoomChange(Math.max(60, zoom - 10))}>-</button>
           <button type="button" title="恢复 100%" onClick={() => onZoomChange(100)}>{zoom}%</button>
           <button type="button" title="放大" aria-label="放大" onClick={() => onZoomChange(Math.min(160, zoom + 10))}>+</button>
         </div>
@@ -251,6 +257,7 @@ function ReportOverview({ report }: { report: FineReportReportSummary }) {
     ["单元格", report.counts.cells],
     ["公式", report.counts.formulas],
     ["字段绑定", report.counts.bindings],
+    ["使用次数", report.usage?.totalUsageCount ?? 0],
   ];
   return (
     <div className="finereport-overview-grid">
@@ -313,6 +320,36 @@ function InteractionPanel({ detail }: { detail: FineReportReportDetail }) {
   );
 }
 
+function UsagePanel({ detail }: { detail: FineReportReportDetail }) {
+  const usage = detail.reportUsage ?? detail.report.usage;
+  return (
+    <div className="finereport-interaction-grid">
+      <section>
+        <header><h3>使用概览</h3><span>{usage?.totalUsageCount ?? 0}</span></header>
+        <div className="finereport-record-list">
+          <article>
+            <strong>累计使用次数</strong>
+            <p>{usage?.totalUsageCount ?? 0} 次</p>
+          </article>
+        </div>
+      </section>
+      <section>
+        <header><h3>使用用户</h3><span>{usage?.users.length ?? 0}</span></header>
+        <div className="finereport-record-list">
+          {(usage?.users ?? []).map((item, index) => (
+            <article key={`${item.userName}-${index}`}>
+              <strong>{item.userName || "未知用户"}</strong>
+              <p>{[item.department, item.position].filter(Boolean).join(" / ") || "未记录部门职位"}</p>
+              <code>{item.usageCount} 次</code>
+            </article>
+          ))}
+          {(!usage || usage.users.length === 0) && <article><strong>暂无使用记录</strong><p>report_usage 中没有用户明细。</p></article>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function StructurePanel({
   detail,
   activeSheetName,
@@ -339,8 +376,8 @@ function StructurePanel({
       </div>
       <div className="finereport-cell-table" role="table" aria-label="报表单元格结构">
         <div className="finereport-cell-table-row head" role="row"><strong>单元格</strong><strong>值</strong><strong>公式</strong><strong>绑定</strong></div>
-        {cells.slice(0, 300).map((cell) => (
-          <div className="finereport-cell-table-row" role="row" key={cell.cell}>
+        {cells.slice(0, 300).map((cell, index) => (
+          <div className="finereport-cell-table-row" role="row" key={`${cell.cell}-${index}`}>
             <strong>{cell.cell}</strong>
             <span>{cell.value === undefined || cell.value === null ? "" : String(cell.value)}</span>
             <code>{cell.formula || ""}</code>

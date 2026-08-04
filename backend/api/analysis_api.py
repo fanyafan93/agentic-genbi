@@ -282,6 +282,19 @@ def create_app(
         )
         return {"thread": _with_latest_thread_question(configured_thread_store, thread["thread"])}
 
+    @app.post("/api/analysis/tasks")
+    def create_analysis_task(body: AnalysisThreadBody = Body(...)) -> dict[str, Any]:
+        """Compatibility endpoint for task-first frontend bundles.
+
+        The canonical domain object is still an analysis thread. Older
+        frontend builds call this endpoint and expect a ``task`` envelope.
+        Keep the behavior aligned with ``POST /api/analysis/threads`` so
+        restoring or rebuilding either side does not break task creation.
+        """
+
+        created = create_waiting_analysis_thread(body)
+        return {"task": created["thread"]}
+
     @app.post("/api/analysis/threads/turns")
     async def create_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
         thread_id = body.thread_id or body.conversation_id or _new_analysis_thread_id()
