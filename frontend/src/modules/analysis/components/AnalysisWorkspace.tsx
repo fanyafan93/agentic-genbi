@@ -46,7 +46,7 @@ const structuredKnowledgeNav: Array<{
   label: string;
   description: string;
 }> = [
-  { id: "finereport", label: "FineReport", description: "报表解析" },
+  { id: "finereport", label: "FineReport", description: "报表画像" },
   { id: "hop", label: "Apache Hop", description: "ETL 血缘解析" },
   { id: "database", label: "数据库", description: "MySQL / Doris 元数据" },
   { id: "kingdee", label: "金蝶", description: "业务数据字典" },
@@ -96,13 +96,6 @@ function usefulThreadTitle(value: string | null | undefined): string {
 function taskTitleFromQuestion(question: string): string {
   const text = question.trim().replace(/\s+/g, " ");
   return text.slice(0, 32) || "未命名分析任务";
-}
-
-function optimisticStartNodes(question: string): FlowNode[] {
-  return [
-    { id: "user-pending", role: "user", content: question },
-    { id: "agent-pending", role: "agent", content: "", mode: "replace", thinking: true, steps: [] },
-  ];
 }
 
 function analysisThreadTime(thread: BackendAnalysisThreadSummary): string {
@@ -162,7 +155,7 @@ export function AnalysisWorkspace() {
   const [openedReportId, setOpenedReportId] = useState<string | null>(null);
   const [openedReportThreadId, setOpenedReportThreadId] = useState<string | null>(null);
   const [openedReportLoadingThreadId, setOpenedReportLoadingThreadId] = useState<string | null>(null);
-  const [pendingStartQuestion, setPendingStartQuestion] = useState<string | null>(null);
+  const [analysisTaskNotice, setAnalysisTaskNotice] = useState("");
   const hadLocalRunningFlowRef = useRef(false);
   const reportLoadRequestRef = useRef(0);
   const reportOwnerId = session?.user?.id ?? "local-user";
@@ -203,13 +196,9 @@ export function AnalysisWorkspace() {
     return () => { cancelled = true; };
   }, []);
   useEffect(() => {
-    if (!pendingStartQuestion) return;
-    flow.start(pendingStartQuestion);
-    setPendingStartQuestion(null);
-  }, [flow, pendingStartQuestion]);
-  useEffect(() => {
     if (!flow.threadId || !selectedAnalysisTask) return;
     const threadId = flow.threadId;
+    if (currentAnalysisTaskId && threadId !== currentAnalysisTaskId) return;
     const hadLocalRunningFlow = hadLocalRunningFlowRef.current;
     if (flow.running) hadLocalRunningFlowRef.current = true;
     setAnalysisThreads((threads) => {
@@ -277,6 +266,11 @@ export function AnalysisWorkspace() {
       toggleSelectedThread(thread.id);
       return;
     }
+    if (flow.running && thread.id !== currentAnalysisTaskId) {
+      setAnalysisTaskNotice("当前任务正在分析，停止回答后再切换任务。");
+      return;
+    }
+    setAnalysisTaskNotice("");
     setSelectedAnalysisTask(analysisThreadTitle(thread));
     setCurrentAnalysisTaskId(thread.id);
     setInitialFlowMessages([]);
@@ -362,6 +356,11 @@ export function AnalysisWorkspace() {
   }
 
   async function handleCreateBlankAnalysis() {
+    if (flow.running) {
+      setAnalysisTaskNotice("当前任务正在分析，停止回答后再新建分析。");
+      return;
+    }
+    setAnalysisTaskNotice("");
     if (!shouldUseBackendAnalysisClient()) {
       setSelectedAnalysisTask(null);
       setCurrentAnalysisTaskId(null);
@@ -385,15 +384,15 @@ export function AnalysisWorkspace() {
       const thread = await createWaitingThread(taskTitleFromQuestion(content));
       setSelectedAnalysisTask(analysisThreadTitle(thread));
       setCurrentAnalysisTaskId(thread.id);
-      setInitialFlowMessages(optimisticStartNodes(content));
+      setInitialFlowMessages([]);
       setOpenedReportId(null);
       setOpenedReportThreadId(null);
       setMobilePane("analysisTask");
-      setPendingStartQuestion(content);
+      void flow.start(content, thread.id);
     } else {
       if (isWaitingForFirstQuestion) {
         markCurrentThreadAsStarted(content);
-        flow.start(content);
+        void flow.start(content, currentAnalysisTaskId);
       } else {
         flow.send(content);
       }
@@ -407,17 +406,17 @@ export function AnalysisWorkspace() {
       setOpenedReportId(null);
       setOpenedReportThreadId(null);
       setMobilePane("analysisTask");
-      flow.start(question);
+      void flow.start(question, currentAnalysisTaskId);
       return;
     }
     const thread = await createWaitingThread(taskTitleFromQuestion(title));
     setSelectedAnalysisTask(analysisThreadTitle(thread));
     setCurrentAnalysisTaskId(thread.id);
-    setInitialFlowMessages(optimisticStartNodes(question));
+    setInitialFlowMessages([]);
     setOpenedReportId(null);
     setOpenedReportThreadId(null);
     setMobilePane("analysisTask");
-    setPendingStartQuestion(question);
+    void flow.start(question, thread.id);
   }
 
   async function handleSaveReport(saved: SavedInteractiveReport): Promise<SavedInteractiveReport> {
@@ -429,6 +428,11 @@ export function AnalysisWorkspace() {
   }
 
   async function handleOpenReport(saved: SavedInteractiveReport) {
+    if (flow.running) {
+      setAnalysisTaskNotice("当前任务正在分析，停止回答后再切换报表。");
+      return;
+    }
+    setAnalysisTaskNotice("");
     const sourceThreadId = saved.report.source.threadId;
     setOpenedReportId(saved.report.id);
     setOpenedReportThreadId(null);
@@ -458,6 +462,11 @@ export function AnalysisWorkspace() {
   }
 
   async function handleCreateAnalysisFromReport(saved: SavedInteractiveReport) {
+    if (flow.running) {
+      setAnalysisTaskNotice("当前任务正在分析，停止回答后再新建分析。");
+      return;
+    }
+    setAnalysisTaskNotice("");
     if (!shouldUseBackendInteractiveReports()) return;
     const title = `${saved.report.title} 新分析`;
     const created = await createAnalysisThreadFromReportBackend(saved.report.id, title, reportOwnerId);
@@ -679,7 +688,7 @@ export function AnalysisWorkspace() {
                   isNewTask={isWaitingForFirstQuestion}
                   running={flow.running}
                   nodes={flow.nodes}
-                  assetNotice=""
+                  assetNotice={analysisTaskNotice}
                   mobileHidden={mobilePane !== "analysisTask"}
                   taskKey={currentAnalysisTaskId}
                   onReply={(optionId) => { flow.reply(optionId); }}

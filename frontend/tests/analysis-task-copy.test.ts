@@ -130,7 +130,7 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain("语义");
     expect(workspaceSource).toContain("业务解释和使用规则");
     expect(workspaceSource).toContain("FineReport");
-    expect(workspaceSource).toContain("报表解析");
+    expect(workspaceSource).toContain("报表画像");
     expect(workspaceSource).toContain("Apache Hop");
     expect(workspaceSource).toContain("ETL 血缘解析");
     expect(workspaceSource).toContain("MySQL / Doris 元数据");
@@ -212,8 +212,8 @@ describe("analysis task product language", () => {
     expect(backendClientSource).toContain("event.payload.thread_id");
     expect(backendClientSource).toContain("listBackendAnalysisThreads");
     expect(backendClientSource).toContain("deleteBackendAnalysisThread");
-    expect(workspaceSource).toContain("optimisticStartNodes(content)");
-    expect(workspaceSource).toContain("optimisticStartNodes(question)");
+    expect(workspaceSource).toContain("flow.start(content, thread.id)");
+    expect(workspaceSource).toContain("flow.start(question, thread.id)");
     expect(workspaceSource).toContain("createWaitingThread");
     expect(workspaceSource).toContain("const isWaitingForFirstQuestion = Boolean(");
     expect(workspaceSource).toContain('currentAnalysisThread?.status === "waiting_for_question"');
@@ -375,6 +375,8 @@ describe("analysis task product language", () => {
   test("keeps the history list stable when opening an existing task", () => {
     expect(workspaceSource).toContain("}, []);");
     expect(workspaceSource).toContain("if (!flow.threadId || !selectedAnalysisTask) return;");
+    expect(workspaceSource).toContain("threadId !== currentAnalysisTaskId");
+    expect(workspaceSource).toContain("当前任务正在分析，停止回答后再切换任务。");
     expect(workspaceSource).toContain("const shouldSyncThread = flow.running || hadLocalRunningFlow;");
     expect(workspaceSource).toContain("if (!shouldSyncThread) return threads;");
     expect(workspaceSource).not.toContain("setCurrentAnalysisTaskId(threadId);");
