@@ -75,6 +75,21 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
     if (event.threadId) setThreadId(event.threadId);
     updateCodexLineage(event, setCodexLineage);
 
+    if (event.type === "session/created") {
+      // Informational event from the sessionless flow. Adopt the
+      // Codex-issued id as the active thread id immediately so that
+      // downstream turn events resolve to the same session.
+      const codexSessionId = event.codexThreadId || event.sessionId;
+      if (codexSessionId) {
+        setThreadId(codexSessionId);
+        setCodexLineage((lineage) => ({
+          ...lineage,
+          sourceCodexThreadId: codexSessionId,
+        }));
+      }
+      return currentNodes;
+    }
+
     if (event.type === "user") {
       const userNode: FlowNode = { id: event.nodeId, role: "user", content: cleanDisplayText(event.content) };
       const pendingIndex = currentNodes.findIndex((node) => node.id === "user-pending");

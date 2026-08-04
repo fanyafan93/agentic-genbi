@@ -212,9 +212,16 @@ describe("analysis task product language", () => {
     expect(backendClientSource).toContain("event.payload.thread_id");
     expect(backendClientSource).toContain("listBackendAnalysisThreads");
     expect(backendClientSource).toContain("deleteBackendAnalysisThread");
-    expect(workspaceSource).toContain("flow.start(content, thread.id)");
-    expect(workspaceSource).toContain("flow.start(question, thread.id)");
-    expect(workspaceSource).toContain("createWaitingThread");
+    expect(backendClientSource).toContain("/api/analysis/sessions/turns/stream");
+    expect(backendClientSource).toContain("session/created");
+    // New-session contract: "click new" never pre-allocates a backend
+    // thread; the first message drives the sessionless flow.
+    expect(workspaceSource).toContain("flow.start(content, null)");
+    expect(workspaceSource).toContain("setLocalNewSession(true)");
+    expect(workspaceSource).toContain("window.history.pushState");
+    expect(workspaceSource).toContain("/analysis/new");
+    expect(workspaceSource).not.toContain("createWaitingThread");
+    expect(workspaceSource).not.toContain("createBackendAnalysisThread");
     expect(workspaceSource).toContain("const isWaitingForFirstQuestion = Boolean(");
     expect(workspaceSource).toContain('currentAnalysisThread?.status === "waiting_for_question"');
     expect(workspaceSource).toContain("markCurrentThreadAsStarted");

@@ -42,12 +42,25 @@
 
 ## 当前分支
 
-- 分支：`Agentic-GenBI`
-- 工作区：本轮修复待提交。
-- 分支状态：本地从回滚中恢复到 `29c0e0f`，远端仍停在回滚后的 `82db24b`，提交后需要用一次非强推合并把远端历史纳入。
+- 分支：`feature/session-management`（新增会话入口切片）
+- 工作区：本轮含 backend 新增 `POST /api/analysis/sessions/turns[ /stream]`、前端取消 waiting_for_question 预创建。
 
 ## 本轮完成
 
+- **取消空白任务**（用户规范）：前端"点击新建"不再调用 `POST /api/analysis/threads` 或 `POST /api/analysis/tasks`，不写数据库；后端接口暂时保留以兼容。
+  - 新增唯一首轮入口：`POST /api/analysis/sessions/turns`（以及流式变体 `POST /api/analysis/sessions/turns/stream`）。请求体 `{ "message": "..." }`；后端 lazy 调用 Codex `thread_start`，首个 SSE 业务事件为：
+    ```json
+    { "type": "session/created", "payload": { "sessionId": "<codex_thread_id>", "codexThreadId": "<codex_thread_id>", "codexTurnId": "<turn_id>" } }
+    ```
+    客户端收到 `session/created` 后用 `window.history.pushState` 把 URL 从 `/analysis/new` 切换到 `/analysis/{codex_thread_id}`。
+  - 后端实现要点：`CodexSdkAnalysisRuntime` 已在拿到 Codex thread 后 yield `genbi/thread/provisioned`、拿到 turn 后 yield `genbi/turn/provisioned`；新端点捕获这两个事件，从 `genbi/thread/provisioned.payload.codex_thread_id` 抽出 `sessionId`，在首个业务事件前插入 `session/created`；internal markers（`genbi/thread/provisioned`、`genbi/turn/provisioned`）不外发到客户端。
+  - 前端实现要点：`BackendAnalysisAgentClient.send` 检测到 `input.kind === "start" && !input.threadId` 时改走 `/api/analysis/sessions/turns/stream`，请求体改为 `{ message, metadata }`；流到 `session/created` 时把它翻译为 `AgentEvent`；`AnalysisWorkspace` 维护 `localNewSession` 状态，记录"页面处于 new 模式"，待 `flow.threadId` 拿到后 `setCurrentAnalysisTaskId(flow.threadId)` 并切路由。
+  - 验收：
+    - 点击"新建"后数据库行数不变。
+    - 输入第一句话后才出现 Session。
+    - 不再产生空会话。
+    - 不再需要 `waiting_for_question`。
+  - 测试：`backend/tests/test_analysis_api.py` 新增 `SessionlessStartTest`（3 个用例）锁住契约；`backend/tests/test_analysis_api.py` / `frontend/tests/analysis-task-copy.test.ts` / `frontend/tests/analysis-backend-client.test.ts` 各自更新断言以匹配新会话入口与 URL 切换。
 - 恢复主开发分支到 `29c0e0f merge: feature/report-artifact-design → Agentic-GenBI`。
 - 确认 `119e4c5 fix(frontend): align flow.start/send/reply signature with AgentInput threadId` 内容已包含在恢复点中，cherry-pick 为空补丁。
 - 修复 FineReport 报表画像加载：
@@ -78,6 +91,16 @@
     - `GET /api/analysis/threads/{id}` 返回的 `thread.codexThreadId == thread.id`、`turns[0].codexTurnId == turns[0].id`
   - `disabled` 运行时端点契约：`POST /api/analysis/threads/turns` 未传 `metadata.codex_thread_id` 时返回 `503 codex_runtime_not_configured`（不再偷偷生成本地 `analysis_thread_xxx`）。
   - `python -m py_compile backend/api/analysis_api.py backend/harness/codex_sdk_runner.py backend/harness/thread_store.py`：语法检查通过。
+- **取消空白任务（本轮）：**
+  - `python -m unittest discover -s backend/tests -v`：**106 个后端测试全部通过**（在 103 基础上新增 3 个 `SessionlessStartTest`）。
+  - `cd frontend && npx.cmd tsc --noEmit`：TypeScript 编译通过。
+  - `cd frontend && npx.cmd vitest run`：**91 个前端测试全部通过**（含更新后的 `analysis-task-copy.test.ts` 与 `analysis-backend-client.test.ts`）。
+  - 契约断言示例（`backend/tests/test_analysis_api.py::SessionlessStartTest`）：
+    - 点击新建前 `thread_store.list_threads(product_kind="analysis_task")` 为空；调 `POST /api/analysis/sessions/turns` 后 `analysis_threads` 才出现一行。
+    - 响应 `events` 第一项是 `session/created`，payload 包含 `sessionId == codex_thread_id == thread_id`。
+    - 响应 `events` 不包含 `genbi/thread/provisioned` / `genbi/turn/provisioned`（internal markers 已过滤）。
+    - `POST /api/analysis/sessions/turns/stream` SSE 同样以 `event: session/created` 开头，body 中不再含 `event: genbi/thread/provisioned`。
+    - `message: ""` 端点返回 `422`，`analysis_threads` 仍为空。
 
 ## 风险或未完成
 

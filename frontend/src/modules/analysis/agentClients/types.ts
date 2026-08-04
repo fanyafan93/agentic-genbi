@@ -20,6 +20,7 @@ export type AgentEvent =
   | ({ type: "report-artifact"; report: InteractiveReport } & AgentEventSystemContext)
   | ({ type: "artifact"; path: string; kind: "html" | "sql" | "python" | "csv" | "markdown" | "json" } & AgentEventSystemContext)
   | ({ type: "error"; message: string } & AgentEventSystemContext)
+  | ({ type: "session/created"; sessionId: string } & AgentEventSystemContext)
   | ({ type: "done" } & AgentEventSystemContext);
 
 export type AgentInput =

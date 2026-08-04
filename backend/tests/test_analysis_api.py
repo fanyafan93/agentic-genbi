@@ -893,6 +893,99 @@ def _thread_id_from_store(thread_store: ThreadStore) -> str:
     return str(threads[0]["id"])
 
 
+class SessionlessStartTest(unittest.IsolatedAsyncioTestCase):
+    """Locks the sessionless contract for the new analysis session entry point.
+
+    The frontend must never call ``POST /api/analysis/threads`` to create a
+    blank waiting thread. The new ``POST /api/analysis/sessions/turns`` is
+    the single entry point: it lazily opens a Codex thread, returns the
+    Codex-issued id as the first ``session/created`` event, and persists
+    the analysis thread row only after the first user message.
+    """
+
+    def test_sessions_turns_does_not_persist_thread_until_codex_provisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            # Before the call: no analysis thread rows.
+            self.assertEqual(thread_store.list_threads(product_kind="analysis_task"), [])
+
+            response = client.post(
+                "/api/analysis/sessions/turns",
+                json={"message": "analyze channel sales"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["thread_id"], "codex_thread_created")
+            self.assertEqual(payload["turn_id"], "codex_turn_created")
+            event_types = [event["type"] for event in payload["events"]]
+            self.assertIn("session/created", event_types)
+            session_event = next(event for event in payload["events"] if event["type"] == "session/created")
+            self.assertEqual(session_event["payload"]["sessionId"], "codex_thread_created")
+            self.assertEqual(session_event["payload"]["codexThreadId"], "codex_thread_created")
+            # Internal markers must never leak to the client.
+            self.assertNotIn("genbi/thread/provisioned", event_types)
+            self.assertNotIn("genbi/turn/provisioned", event_types)
+            # The sessionless contract: thread.id == thread.codex_thread_id.
+            thread = thread_store.get_thread("codex_thread_created")
+            assert thread is not None
+            self.assertEqual(thread["thread"]["id"], "codex_thread_created")
+            self.assertEqual(thread["thread"]["codexThreadId"], "codex_thread_created")
+            self.assertEqual(thread["turns"][0]["id"], "codex_turn_created")
+
+    def test_sessions_turns_stream_emits_session_created_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            self.assertEqual(thread_store.list_threads(product_kind="analysis_task"), [])
+
+            response = client.post(
+                "/api/analysis/sessions/turns/stream",
+                json={"message": "analyze channel sales"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            body = response.text
+            self.assertIn("event: session/created", body)
+            self.assertIn("sessionId", body)
+            self.assertIn("codex_thread_created", body)
+            # Internal markers must be filtered out of the stream.
+            self.assertNotIn("event: genbi/thread/provisioned", body)
+            self.assertNotIn("event: genbi/turn/provisioned", body)
+            # The sessionless contract still holds on the stream path.
+            thread = thread_store.get_thread("codex_thread_created")
+            assert thread is not None
+            self.assertEqual(thread["thread"]["codexThreadId"], "codex_thread_created")
+
+    def test_sessions_turns_rejects_blank_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/analysis/sessions/turns",
+                json={"message": ""},
+            )
+
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(thread_store.list_threads(product_kind="analysis_task"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

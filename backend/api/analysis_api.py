@@ -131,6 +131,18 @@ def create_app(
         title: str | None = None
         metadata: dict[str, Any] = Field(default_factory=dict)
 
+    class AnalysisSessionStartBody(BaseModel):
+        """Request body for ``POST /api/analysis/sessions/turns``.
+
+        The frontend must POST exactly this shape (instead of calling
+        ``POST /api/analysis/threads`` first). The endpoint lazily opens
+        a Codex thread and returns the Codex-issued id as part of the
+        first ``session/created`` event.
+        """
+        message: str = Field(min_length=1)
+        user_id: str | None = None
+        metadata: dict[str, Any] = Field(default_factory=dict)
+
     class KnowledgeBody(BaseModel):
         title: str = Field(min_length=1)
         question: str = Field(min_length=1)
@@ -300,6 +312,63 @@ def create_app(
 
         created = create_waiting_analysis_thread(body)
         return {"task": created["thread"]}
+
+    @app.post("/api/analysis/sessions/turns")
+    async def start_session_first_turn(body: AnalysisSessionStartBody = Body(...)) -> dict[str, Any]:
+        """The single entry point for starting a new analysis session.
+
+        Cancels the legacy ``waiting_for_question`` flow: this endpoint must
+        be the *only* way a frontend can begin a new session. It drives
+        Codex ``thread_start`` lazily (no pre-allocated analysis thread row)
+        and returns the Codex-issued session id once the runtime emits
+        ``genbi/thread/provisioned``. The frontend then routes from
+        ``/analysis/new`` to ``/analysis/{sessionId}`` and continues the
+        same stream for the first turn.
+        """
+        metadata = dict(body.metadata or {})
+        metadata.setdefault("domain", "analysis_task")
+        metadata.setdefault("thread_root", True)
+        turn_request = AnalysisTurnRequest(
+            question=body.message.strip(),
+            thread_id=None,
+            user_id=body.user_id,
+            turn_kind="start",
+            metadata=metadata,
+        )
+        return await _create_analysis_turn_payload(
+            configured_analysis_runtime,
+            configured_thread_store,
+            configured_interactive_report_store,
+            turn_request,
+            thread_id="",
+            emit_session_created=True,
+        )
+
+    @app.post("/api/analysis/sessions/turns/stream")
+    async def stream_session_first_turn(body: AnalysisSessionStartBody = Body(...)) -> StreamingResponse:
+        """Streaming variant of ``POST /api/analysis/sessions/turns``.
+
+        Emits a ``session/created`` event with the Codex-issued id as the
+        first business event so the frontend can immediately navigate to
+        ``/analysis/{sessionId}`` while the rest of the turn keeps
+        streaming.
+        """
+        metadata = dict(body.metadata or {})
+        metadata.setdefault("domain", "analysis_task")
+        metadata.setdefault("thread_root", True)
+        turn_request = AnalysisTurnRequest(
+            question=body.message.strip(),
+            thread_id=None,
+            user_id=body.user_id,
+            turn_kind="start",
+            metadata=metadata,
+        )
+        return _stream_session_first_turn_response(
+            configured_analysis_runtime,
+            configured_thread_store,
+            configured_interactive_report_store,
+            turn_request,
+        )
 
     @app.post("/api/analysis/threads/turns")
     async def create_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
@@ -701,6 +770,7 @@ async def _create_analysis_turn_payload(
     body: Any,
     *,
     thread_id: str,
+    emit_session_created: bool = False,
 ) -> dict[str, Any]:
     request = _analysis_request_from_body(body, thread_id=thread_id)
     # ``turn_id`` and ``thread_id`` are assigned dynamically from the
@@ -726,12 +796,52 @@ async def _create_analysis_turn_payload(
             "codex_runtime_did_not_emit_turn_id: cannot persist turn without Codex-issued turn id."
         )
     request = _analysis_request_from_body(body, thread_id=thread_id)
-    _save_analysis_turn(thread_store, request, thread_id=thread_id, turn_id=turn_id, events=events)
+    resolved_thread_id = thread_id or _first_event_codex_thread_id(events)
+    _save_analysis_turn(
+        thread_store,
+        request,
+        thread_id=resolved_thread_id,
+        turn_id=turn_id,
+        events=events,
+    )
+    response_events: list[dict[str, Any]] = []
+    if emit_session_created:
+        # Prepend a synthetic ``session/created`` event so the frontend can
+        # learn the Codex-issued id without waiting for ``turn/completed``.
+        if resolved_thread_id:
+            response_events.append(
+                asdict(
+                    AgentEvent(
+                        type="session/created",
+                        turn_id=turn_id,
+                        payload={
+                            "eventSource": "genbi",
+                            "runtime": "openai-codex",
+                            "sessionId": resolved_thread_id,
+                            "codexThreadId": resolved_thread_id,
+                            "codexTurnId": turn_id,
+                            "threadId": resolved_thread_id,
+                            "turnId": turn_id,
+                        },
+                    )
+                )
+            )
+    if emit_session_created:
+        # Internal marker events. Never forward them to the client; the
+        # sessionless flow only exposes ``session/created`` plus the
+        # downstream business events. The legacy turn endpoints keep the
+        # markers in the response because older clients still parse them.
+        for event in events:
+            if event.type in {"genbi/thread/provisioned", "genbi/turn/provisioned"}:
+                continue
+            response_events.append(asdict(event))
+    else:
+        response_events.extend(asdict(event) for event in events)
     return {
-        "thread_id": thread_id,
+        "thread_id": resolved_thread_id,
         "turn_id": turn_id,
-        "events_url": f"/api/analysis/threads/{thread_id}/turns/{turn_id}",
-        "events": [asdict(event) for event in events],
+        "events_url": f"/api/analysis/threads/{resolved_thread_id or ''}/turns/{turn_id}",
+        "events": response_events,
     }
 
 
@@ -741,6 +851,117 @@ def _first_event_payload_value(events: list[Any], key: str) -> str | None:
         if isinstance(payload, dict) and payload.get(key):
             return str(payload[key])
     return None
+
+
+def _first_event_codex_thread_id(events: list[Any]) -> str:
+    """Return the Codex-issued thread id from the first provisioned event.
+
+    The new sessionless flow always yields ``genbi/thread/provisioned`` as
+    the first business event before any turn work begins. This helper
+    pulls the id out so we can synthesise a ``session/created`` envelope
+    and resolve the eventual ``thread_id`` for the response.
+    """
+    for event in events:
+        if getattr(event, "type", None) != "genbi/thread/provisioned":
+            continue
+        payload = getattr(event, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        codex_thread_id = _string_or_none(payload.get("codex_thread_id")) or _string_or_none(payload.get("thread_id"))
+        if codex_thread_id:
+            return codex_thread_id
+    return ""
+
+
+def _stream_session_first_turn_response(
+    analysis_runtime: CodexSdkAnalysisRuntime,
+    thread_store: ThreadStore,
+    interactive_report_store: Any,
+    request: AnalysisTurnRequest,
+) -> Any:
+    """Stream the very first turn of a brand-new analysis session.
+
+    The first business event emitted to the client is ``session/created``
+    with ``sessionId == codex_thread_id`` so the frontend can navigate
+    from ``/analysis/new`` to ``/analysis/{codex_thread_id}`` while the
+    rest of the turn keeps streaming. No pre-allocated analysis thread
+    row exists before the call returns; the thread row is created from
+    the first ``genbi/thread/provisioned`` event inside the stream.
+    """
+    from fastapi.responses import StreamingResponse
+
+    async def event_stream() -> Any:
+        events: list[AgentEvent] = []
+        resolved_turn_id = ""
+        resolved_thread_id = ""
+        session_event_emitted = False
+        try:
+            async for event in _astream_runtime_events(
+                analysis_runtime,
+                thread_store,
+                interactive_report_store,
+                request,
+                thread_id="",
+                turn_id=resolved_turn_id,
+            ):
+                if event.type == "genbi/thread/provisioned":
+                    codex_thread_id = (
+                        _string_or_none(event.payload.get("codex_thread_id"))
+                        or _string_or_none(event.payload.get("thread_id"))
+                        or ""
+                    )
+                    if codex_thread_id:
+                        resolved_thread_id = codex_thread_id
+                if not resolved_turn_id and event.type == "genbi/turn/provisioned":
+                    resolved_turn_id = (
+                        _string_or_none(event.payload.get("codex_turn_id"))
+                        or _string_or_none(event.payload.get("turn_id"))
+                        or ""
+                    )
+                if event.type in {"genbi/thread/provisioned", "genbi/turn/provisioned"}:
+                    # Internal marker events. Never forward them to the
+                    # client; we only use them to resolve session/turn ids.
+                    continue
+                if not session_event_emitted and resolved_thread_id and resolved_turn_id:
+                    session_event = AgentEvent(
+                        type="session/created",
+                        turn_id=resolved_turn_id,
+                        payload={
+                            "eventSource": "genbi",
+                            "runtime": "openai-codex",
+                            "sessionId": resolved_thread_id,
+                            "codexThreadId": resolved_thread_id,
+                            "codexTurnId": resolved_turn_id,
+                            "threadId": resolved_thread_id,
+                            "turnId": resolved_turn_id,
+                        },
+                    )
+                    events.append(session_event)
+                    yield session_event.to_sse()
+                    session_event_emitted = True
+                events.append(event)
+                yield event.to_sse()
+        except asyncio.CancelledError:
+            if not _has_terminal_turn_event(events):
+                fallback_turn_id = resolved_turn_id or resolved_thread_id
+                events.append(
+                    _interrupted_terminal_event(
+                        thread_id=resolved_thread_id or "codex_session_pending",
+                        turn_id=fallback_turn_id,
+                    )
+                )
+            raise
+        finally:
+            if events and resolved_turn_id and resolved_thread_id:
+                _save_analysis_turn(
+                    thread_store,
+                    request,
+                    thread_id=resolved_thread_id,
+                    turn_id=resolved_turn_id,
+                    events=events,
+                )
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 def _stream_analysis_turn_response(

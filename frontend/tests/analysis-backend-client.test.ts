@@ -321,6 +321,14 @@ describe("analysis backend client event mapping", () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(
         sseEvent({
+          type: "session/created",
+          turn_id: "turn_analysis_123",
+          payload: {
+            sessionId: "thread_analysis_456",
+            codexThreadId: "thread_analysis_456",
+            codexTurnId: "turn_analysis_123",
+          },
+        }) + sseEvent({
           type: "turn/started",
           turn_id: "turn_analysis_123",
           payload: { conversation_id: "thread_analysis_456", question: "start question" },
@@ -349,19 +357,29 @@ describe("analysis backend client event mapping", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    await collect(client.send({ kind: "start", question: "start question" }));
+    const startEvents = await collect(client.send({ kind: "start", question: "start question" }));
     const messageEvents = await collect(client.send({ kind: "message", content: "continue question" }));
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const startBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     const messageBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://backend.test/api/analysis/threads/turns/stream");
+    // New-session contract: the very first turn goes through the
+    // sessionless entry point (``POST /api/analysis/sessions/turns/stream``)
+    // with ``message`` instead of ``question``.
+    expect(fetchMock.mock.calls[0][0]).toBe("http://backend.test/api/analysis/sessions/turns/stream");
     expect(fetchMock.mock.calls[1][0]).toBe("http://backend.test/api/analysis/threads/thread_analysis_456/turns/stream");
-    expect(startBody.conversation_id).toBeUndefined();
+    expect(startBody.message).toBe("start question");
+    expect(startBody.question).toBeUndefined();
     expect(startBody.metadata).toMatchObject({ frontend_client: "analysis_task" });
-    expect(startBody.metadata).toEqual({ frontend_client: "analysis_task" });
     expect(messageBody.conversation_id).toBeUndefined();
     expect(messageBody.turn_kind).toBe("message");
+    // The sessionless endpoint resolves the client thread id from the
+    // ``session/created`` event payload.
+    expect(startEvents[0]).toMatchObject({
+      type: "session/created",
+      sessionId: "thread_analysis_456",
+      codexThreadId: "thread_analysis_456",
+    });
     expect(messageEvents[0]).toMatchObject({
       type: "user",
       turnId: "turn_analysis_789",
