@@ -1,8 +1,31 @@
 # 当前任务
 
-更新时间：2026-08-04 Asia/Shanghai
+更新时间：2026-08-05 Asia/Shanghai
 
 本页只记录当前可验证状态。历史过程交给 Git。
+
+## 全局数据契约（新会话必读）
+
+**适用于所有新写入的数据。**
+
+- `analysis_threads.id` == `analysis_threads.codex_thread_id`（同一值）
+  - 旧字段 `codex_thread_id` 保留以兼容旧代码读取，**值与 `id` 相同**，不再单独生成。
+- `analysis_turns.id` == `analysis_turns.codex_turn_id`（同一值）
+- `analysis_codex_item_projections.codex_item_id` == Codex 原始 Item ID
+
+**不做的范围（本切片明确不做）：**
+
+- 不生成 `analysis_thread_xxx` / `analysis_turn_xxx` / `genbi_item_xxx` 形式的新 ID。
+- 不改任何表名。
+- 不删除旧字段。
+- 不迁移旧历史数据。
+- 不改前端页面。
+- 不接 ChatKit。
+
+**验收**（创建一条新分析后，数据库必须满足）：
+
+- `thread.id == thread.codex_thread_id`
+- `turn.id == turn.codex_turn_id`
 
 ## 当前分支
 
