@@ -69,6 +69,7 @@ describe("report metadata json", () => {
     // 这里通过 setNotice 没有公开 hook，模拟一次"保存"按钮 click 来触发
     // 父组件的 persist / setVersion 等会触发 setReport，验证在 report 不变时
     // 文本节点仍然稳定。
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     const preAfter = screen.getByTestId("report-metadata-json");

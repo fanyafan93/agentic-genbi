@@ -97,7 +97,10 @@ export function FlowNodeView({ node, onReply }: Props) {
               ))}
             </ol>
           )}
-          {(node.content || activity.length === 0) && (
+          {node.thinking && (
+            <div className="message-body-markdown flow-content flow-thinking">思考中...</div>
+          )}
+          {(node.content || (!node.thinking && activity.length === 0)) && (
             <div className="message-body-markdown flow-content">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{node.content || "\u00A0"}</ReactMarkdown>
             </div>

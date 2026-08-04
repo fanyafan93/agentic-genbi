@@ -135,6 +135,134 @@ class GenbiReportMcpServerTest(unittest.TestCase):
         self.assertIn("\"xField\": \"vchannel_name\"", text)
         self.assertIn("\"field\": \"sales_amt\"", text)
 
+    def test_create_interactive_report_unwraps_mcp_item_rows(self) -> None:
+        response = _handle({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "create_interactive_report",
+                "arguments": {
+                    "title": "渠道销售",
+                    "summary": "基于聚合结果。",
+                    "rows": {"item": [{"vchannel_name": "屈臣氏", "sales_amt": 100}, {"vchannel_name": "松鼠单体加盟", "sales_amt": 80}]},
+                    "threadId": "thread_1",
+                    "turnId": "turn_1",
+                },
+            },
+        })
+
+        text = response["result"]["content"][0]["text"]
+        self.assertIn("\"ok\": true", text)
+        payload = json.loads(text)
+        rows = payload["interactive_report"]["datasets"]["channel_sales"]["rows"]
+        self.assertEqual(rows[0]["vchannel_name"], "屈臣氏")
+        self.assertEqual(rows[1]["sales_amt"], 80)
+
+    def test_validate_interactive_report_unwraps_nested_item_specs(self) -> None:
+        response = _handle({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "validate_interactive_report",
+                "arguments": {
+                    "artifact": {
+                        "id": "report_wrapped",
+                        "title": "渠道销售",
+                        "subtitle": "Top 渠道",
+                        "artifactType": "interactive_report",
+                        "renderer": "puck",
+                        "ownerId": "codex-agent",
+                        "source": {"threadId": "thread_1", "turnId": "turn_1"},
+                        "document": {"root": {"props": {"title": "渠道销售"}}, "content": []},
+                        "filters": [],
+                        "queries": {"q1": {"datasetId": "d1", "filterBindings": []}},
+                        "datasets": {"d1": {"rows": {"item": {"item": [{"channel": "A", "sales": 1}]}}}},
+                        "chartSpecs": {"c1": {"id": "c1", "datasetId": "d1", "type": "bar", "xField": "channel", "series": {"item": [{"field": "sales", "label": "销售额"}]}}},
+                        "gridSpecs": {"g1": {"id": "g1", "datasetId": "d1", "columns": {"item": [{"field": "channel", "label": "渠道"}]}, "pageSize": 10}},
+                    }
+                },
+            },
+        })
+
+        text = response["result"]["content"][0]["text"]
+        self.assertIn("\"ok\": true", text)
+
+    def test_create_interactive_report_parses_powershell_row_strings(self) -> None:
+        response = _handle({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "create_interactive_report",
+                "arguments": {
+                    "title": "渠道销售",
+                    "summary": "基于聚合结果。",
+                    "rows": {"item": ["@{vchannel_name=PriceTag; sales_amt=45.0; sales_share=0.2978}"]},
+                    "threadId": "thread_1",
+                    "turnId": "turn_1",
+                },
+            },
+        })
+
+        text = response["result"]["content"][0]["text"]
+        self.assertIn("\"ok\": true", text)
+        payload = json.loads(text)
+        row = payload["interactive_report"]["datasets"]["channel_sales"]["rows"][0]
+        self.assertEqual(row["vchannel_name"], "PriceTag")
+        self.assertEqual(row["sales_amt"], 45.0)
+
+    def test_validate_interactive_report_recovers_wrapped_series_json_strings(self) -> None:
+        response = _handle({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "validate_interactive_report",
+                "arguments": {
+                    "artifact": {
+                        "id": "report_series_wrapped",
+                        "title": "渠道销售",
+                        "subtitle": "Top 渠道",
+                        "artifactType": "interactive_report",
+                        "schemaVersion": "1.0",
+                        "renderer": "puck",
+                        "ownerId": "codex-agent",
+                        "source": {"threadId": "thread_1", "turnId": "turn_1"},
+                        "document": {
+                            "root": {"props": {"title": "渠道销售"}},
+                            "zones": "",
+                            "content": {"item": {"type": "ChartBlock", "props": {"id": "chart_1", "queryRef": "q1", "chartSpecRef": "c1"}}},
+                        },
+                        "filters": "",
+                        "queries": {"q1": {"datasetId": "d1", "filterBindings": ""}},
+                        "datasets": {"d1": {"rows": {"item": {"item": [{"sale_date": "a", "sales_amt": 1}, {"sale_date": "b", "sales_amt": 2}]}}}},
+                        "chartSpecs": {
+                            "c1": {
+                                "id": "c1",
+                                "datasetId": "d1",
+                                "type": "bar",
+                                "xField": "sale_date",
+                                "series": {"item": {"item": ['{"field":"sales_amt","label":"销售额"}']}},
+                            }
+                        },
+                        "gridSpecs": {
+                            "g1": {
+                                "id": "g1",
+                                "datasetId": "d1",
+                                "columns": {"item": {"item": ['{"field":"sale_date","label":"日期"}', '{"field":"sales_amt","label":"销售额"}']}},
+                                "pageSize": "10",
+                            }
+                        },
+                    }
+                },
+            },
+        })
+
+        text = response["result"]["content"][0]["text"]
+        self.assertIn("\"ok\": true", text)
+
 
 if __name__ == "__main__":
     unittest.main()

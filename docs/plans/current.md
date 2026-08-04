@@ -6,72 +6,67 @@
 
 ## 当前分支
 
-- 分支：`Agentic-GenBI`。
-- 工作区：有未提交改动；本轮准备提交此前未提交的前端/report 元数据查看改动。
+- 分支：`feature/report-artifact-design`
+- 工作区：有未提交改动，包含报表资产设计切片、报表中心入口、真实 Thread 新建链路和相关验证。
 
 ## 本轮完成
 
-- 分析 Codex runtime 启动时改用 `load_runtime_codex_mcp_servers_from_env()`，只注册 enabled 且在 `GENBI_CODEX_ALLOWED_MCP_SERVERS` 里的 MCP server。
-- 新增 `GENBI_CODEX_DEFAULT_TOOLS_ENABLED=false` 配置，并同时写入 Codex `thread_start(config=...)`、`config_overrides` 和 runtime `CODEX_HOME/config.toml`，用于关闭默认/内置工具入口。
-- `.env.example` 增加分析 runtime 工具收紧配置说明；本地 `.env` 增加 `GENBI_CODEX_ALLOWED_MCP_SERVERS=BI_doris GenBI_report` 和 `GENBI_CODEX_DEFAULT_TOOLS_ENABLED=false`。
-- MCP 管理页的 Doris 已知工具列表收敛为 GenBI 允许的 `mysql_query`，不再把 resource 类能力作为 GenBI 认可工具展示。
-- 定位任务 `analysis_thread_8e9dd9a8a78a`：后端已创建 thread/turn，但没有保存 item 或 report，状态停在 `running`。
-- 修复 SSE 被前端停止、切换任务或连接断开打断时的持久化问题：如果还没有 `turn/completed`，后端会补 `turn/completed(status=interrupted, error=client_disconnected)` 再保存。
-- 已给历史任务 `analysis_thread_8e9dd9a8a78a` 补写 `interrupted` 终态事件，避免继续显示为运行中。
-- 定位任务 `analysis_thread_422345f87652`：新建任务从 `draft_*` 收到真实 `analysis_thread_*` 后，前端把 `currentAnalysisTaskId` 改成真实 thread id，导致 `useFlow(threadKey)` 重新初始化并触发 `agent.cancel()`，SSE 被前端自己中止。
-- 修复新建任务的 draft id 到真实 thread id 同步逻辑：真实 thread id 只用于更新左侧任务列表，不再切换当前 `useFlow` 的 key，避免 in-flight turn 被前端重挂载取消。
-- 定位任务 `analysis_thread_f24cdc662d89`：Doris 工具已多次成功返回真实聚合数据，但最终停在 Codex `reasoning` 后没有收到最终回复或 report 工具调用，前端显示 `Analysis backend request timed out. Please retry.`。
-- 前端新增 Codex `reasoning` 可见状态：收到 reasoning item 时在当前 assistant 节点显示 `思考中...`，避免长时间无正文时看起来像卡死。
-- 分析 SSE 前端空闲超时默认从 95 秒调整为 300 秒；收到任意 SSE 事件仍会刷新计时。
-- 使用 Chrome DevTools MCP 从上往下点击左侧任务，定位到历史任务点击会错误刷新 `updatedAt` 并把任务移动到列表顶部；旧 `running` 残留任务也会触发同样问题。
-- 修复左侧任务列表同步条件：只有本页面正在执行或刚执行过的 flow、以及新建 `draft_*` 落地为真实 thread 时，才更新任务时间和排序；普通打开历史任务不再改写列表顺序。
-- 定位任务 `analysis_thread_c033299e5733`：该任务绑定两个 interactive_report，点击历史任务时右侧先清空为无报告状态，再异步加载最新 report，造成柱/折线图看起来刷新两次。
-- 修复右侧报告面板的任务绑定：只展示属于当前 thread 的 `flow.reportArtifact` 或 `openedReport`，历史任务加载 report 时显示稳定的“报告加载中”，并用请求序号避免快速切换任务后旧请求回写。
-- 修复 `InteractiveReportPanel` 中 Puck document `content/zones` 的类型收窄，避免 `next build` 把稳定 ID 处理后的数组推断为 `unknown[]`。
-- 新增 `scripts/start-services.ps1`：Windows 下统一启动 Docker Desktop、等待 Docker daemon、执行 `docker compose up -d`，并检查 backend `/health` 与 frontend 首页。
-- README 本地运行说明改为优先使用 `scripts/start-services.ps1`，保留原始 `docker compose up -d --build` 作为直接方式。
-- 修复 frontend compose 启动方式：容器内 `next dev` 在后台服务场景会显示 `Ready` 后退出，改为 `npm install && prisma migrate deploy && NODE_ENV=production next build && next start`。
-- 右侧 Report 面板增加“显示元数据”入口，使用 JSON tree 查看当前 `InteractiveReport` 原始 JSON。
-- 新增报告元数据弹窗滚动隔离样式，降低大 JSON 查看时影响外层布局和滚动的风险。
-- 新增 `report-metadata-scroll.test.tsx`，覆盖元数据 JSON 渲染、状态切换后容器稳定、滚动容器样式。
+- 报表中心入口已从“我的分析”收敛为“报表中心”，只展示“我的报表”和“分享给我”。
+- 报表中心卡片保留主标题和四个操作：`预览`、`删除`、`回到原任务`、`新建分析`。
+- `预览` 使用真实 `InteractiveReportPanel` 只读渲染，不再用伪缩略图。
+- 右侧 Report 面板保存成功后显示“已保存到报表中心”。
+- 后端新增 `POST /api/analysis/threads`，用于创建真实空分析 Thread，状态为 `waiting_for_question`。
+- 后端新增 `POST /api/analysis/reports/{report_id}/analysis-thread`，用于从已保存报表创建新的真实分析 Thread。
+- 从报表创建的新 Thread 会在 metadata 中记录 `source_report_id`、`initial_report_version` 和 `initial_report_artifact`，用于恢复右侧报表快照。
+- 前端移除分析工作台主路径里的 `draft_*` / `draft_report_*` 特判；未提问任务也是真实 `analysis_thread_*`。
+- 报表中心点击“新建分析”后，已验证会创建真实 Thread，左侧显示“待提问”，中间只显示等待提问空态，右侧带入原报表。
+- 分析工作台点击“新建分析”创建真实空 Thread 后，中间面板继续显示建议问题页；用户输入首问或点击建议后，才在该 Thread 内开始分析并更新任务标题。
+- 修复空 Thread 首问错误创建第二个 Thread 的问题：前端 backend client 现在只要有 `threadId` 就调用 `/api/analysis/threads/{thread_id}/turns/stream`，不再因 `turn_kind=start` 走新建 Thread 入口。
+- 报表中心点击“回到原任务”现在会加载来源 Thread 的历史 turns/items，恢复原分析过程；不再只切换 thread id 后显示“等待提问”空态。
+- 回到原任务加载 Thread 详情时只原地替换左侧列表中的对应任务，不再把旧时间任务强行移动到顶部。
+- `useFlow` 重置逻辑改为跟随 `threadKey`，避免因为空数组引用变化导致反复重置或闪烁。
+- 后端创建空分析 Thread 时会复用同用户、同标题、同来源报表且尚未提问的 `waiting_for_question` Thread，避免重复点击或验证脚本堆出一批“等待提问”任务。
+- 已清理本轮验证产生的 3 条空 `waiting_for_question` Thread；接口检查确认当前列表没有无问题的空等待任务残留。
+- 修复 `backend/tests/test_analysis_api.py` 的编码问题，并补充空 Thread 复用测试。
+- 修复历史任务点击后中间面板显示“等待提问”的问题：`useFlow` 现在会在非运行状态下接收异步加载回来的历史节点。
+- 分析任务列表过滤旧 `draft_*` 任务，避免 legacy 草稿继续混入真实 Thread 列表。
+- 诊断 `analysis_thread_c41e0fb05b8c`：数据查询已执行，但 `GenBI_report` 多次收到被 Codex/MCP 适配层包成 `{item: ...}` 或 PowerShell 对象字符串的 rows/specs，导致校验认为数据集为空，最终没有 report artifact 入库。
+- `GenBI_report` 工具入口增加参数归一化：递归展开单字段 `item` 包装，解析 `@{field=value; ...}` 形态的行数据，恢复被包装的 `rows`、`series`、`columns`、`content`、`filterBindings`，再进入 `create_interactive_report` / `validate_interactive_report` 校验。
+- `MiniMax Codex Adapter` 的上游 SSE 读取超时不再抛出 ASGI 异常，改为返回 `response.failed` 事件，避免后端日志刷 traceback 且前端长期卡住。
 
 ## 已运行验证
 
-- `npm.cmd test`：15 个前端测试文件、72 个测试通过。
-- `python -m unittest backend.tests.test_codex_mcp_config backend.tests.test_codex_sdk_runner -v`：30 个后端测试通过。
-- `python -m unittest backend.tests.test_analysis_api -v`：17 个后端测试通过。
-- `npm.cmd test -- analysis-flow-streaming.test.ts analysis-backend-client.test.ts analysis-task-copy.test.ts`：3 个前端测试文件、45 个测试通过。
-- `npm.cmd test -- analysis-backend-client.test.ts analysis-flow-streaming.test.ts`：2 个前端测试文件、31 个测试通过。
-- `npm.cmd test -- analysis-task-copy.test.ts analysis-flow-streaming.test.ts analysis-backend-client.test.ts`：3 个前端测试文件、47 个测试通过。
-- `npm.cmd test -- analysis-task-copy.test.ts interactive-report-empty-state.test.ts interactive-report-puck-ids.test.ts`：3 个前端测试文件、18 个测试通过。
-- `npm.cmd run build`：前端生产构建通过。
-- `docker compose up -d --force-recreate --no-deps backend`：后端容器已重建并启动。
-- `GET http://127.0.0.1:8000/health`：返回 `{"status":"ok"}`。
-- 容器内确认 `GENBI_CODEX_DEFAULT_TOOLS_ENABLED=false`，`GENBI_CODEX_ALLOWED_MCP_SERVERS=BI_doris GenBI_report`，runtime MCP server 解析结果为 `["BI_doris", "GenBI_report"]`。
-- `GET http://127.0.0.1:8000/api/analysis/threads/analysis_thread_8e9dd9a8a78a`：确认 thread 和 turn 状态均为 `interrupted`。
-- `docker compose up -d --force-recreate --no-deps frontend`：前端容器已重建并启动，Next.js 日志显示 `Ready`。
-- `docker compose ps frontend`：确认 `agentic-genbi-frontend-1` 运行中并监听 `3000`。
-- Chrome DevTools MCP 自动点击左侧前 12 个任务：修复前多个任务时间被刷新到当前时间并重排；修复后 `initialLabels` 与 `finalLabels` 一致，点击过程未再重排。
-- Chrome DevTools MCP 复测任务 `c033299e`（页面显示 23:03）：右侧从“报告加载中”进入 `各渠道销售趋势折线图`，canvas 数量从 0 到 1 后保持稳定。
-- `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-services.ps1 -TimeoutSeconds 20 -SkipDockerDesktop`：脚本可运行，并在 Docker daemon 不可用时明确失败。
-- `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-services.ps1 -TimeoutSeconds 60`：尝试启动 Docker Desktop 后仍无法等到 Docker daemon ready，错误为 `Docker daemon is not ready`。
-- `docker compose up -d --force-recreate --no-deps frontend`：frontend 已按 production build/start 重建并运行。
-- `GET http://127.0.0.1:8000/health`：返回 `{"status":"ok"}`。
+- `python -m unittest backend.tests.test_thread_store backend.tests.test_analysis_api -v`：27 个后端测试通过。
+- `python -m unittest backend.tests.test_analysis_api -v`：23 个后端 API 测试通过。
+- `python -m unittest backend.tests.test_analysis_api -v`：24 个后端 API 测试通过。
+- `python -m unittest backend.tests.test_genbi_report_mcp_server -v`：9 个 GenBI_report MCP 测试通过。
+- `python -m unittest backend.tests.test_minimax_codex_adapter -v`：10 个 MiniMax Codex Adapter 测试通过。
+- `python -m unittest backend.tests.test_analysis_api -v`：24 个后端 API 测试通过。
+- `python -m unittest backend.tests.test_thread_store -v`：6 个 ThreadStore 测试通过。
+- `npm.cmd test -- interactive-report-api-client.test.ts analysis-task-copy.test.ts report-center-card-actions.test.tsx`：25 个前端测试通过。
+- `npm.cmd test -- analysis-flow-streaming.test.ts`：13 个前端 flow 测试通过。
+- `npm.cmd test -- analysis-task-copy.test.ts analysis-flow-streaming.test.ts`：30 个前端测试通过。
+- `npm.cmd test -- analysis-task-copy.test.ts report-center-card-actions.test.tsx`：19 个前端测试通过。
+- `npm.cmd test -- analysis-backend-client.test.ts analysis-task-copy.test.ts`：39 个前端测试通过。
+- `npx.cmd tsc --noEmit`：前端 TypeScript 校验通过。
+- `docker compose up -d --build --force-recreate frontend`：frontend/backend 镜像重建并启动成功。
+- `docker compose up -d --build --force-recreate backend`：backend 镜像重建并启动成功。
 - `GET http://127.0.0.1:3000`：返回 200。
-- `docker compose ps`：postgres healthy，backend 和 frontend 均为 `Up`。
-- `npm.cmd test -- report-metadata-scroll.test.tsx`：1 个前端测试文件、3 个测试通过。
+- Chrome DevTools MCP 验证 `http://192.168.101.12:3000/`：报表中心“新建分析”创建 `analysis_thread_d776e1cab5a7`，状态 `waiting_for_question`，页面显示任务号 `d776e1ca`、等待提问空态，并在右侧渲染报表。
+- Chrome DevTools MCP 复测 `analysis_thread_c033299e5733`：刷新页面后点击已完成历史任务，中间面板恢复用户消息、工具调用和 agent 回复，不再显示“等待提问”空态。
+- `GET /api/analysis/threads`：确认返回列表 `draftCount=0`。
+- `GET http://127.0.0.1:8000/health`：返回 `{"status":"ok"}`。
 
 ## 风险或未完成
 
-- `openai-codex` 当前 Python SDK 暴露的是原生 config 透传，不提供已验证的按 MCP tool 粒度 allowlist 参数；本轮先做到分析 runtime 只注册允许的 MCP server，并关闭默认工具。
-- 若直连的 `@benborla29/mcp-server-mysql` 自身仍向 Codex 暴露 resource/resource_template 能力，是否能被 Codex 原生配置逐项隐藏仍是待验证假设；本轮未新增 MCP 代理或自研工具调度层。
-- 历史任务 `analysis_thread_422345f87652` 已经被旧前端状态切换中止，不会自动恢复；需要用新任务验证修复后的链路。
-- 历史任务 `analysis_thread_f24cdc662d89` 已经因前端超时断流被标记为 `interrupted`，不会自动恢复；新超时配置只影响后续任务。
-- 当前 Docker/WSL 已恢复到可运行状态；PowerShell 启动时仍会输出 `starship` 未安装提示，不影响服务运行。
-- `frontend/pnpm-lock.yaml` 与 `frontend/pnpm-workspace.yaml` 是未跟踪的 pnpm 元数据；当前仓库使用 npm/package-lock，本轮不纳入提交。
+- 报表中心“删除”按钮仍是前端提示，尚未接后端删除动作。
+- “刷新数据”“修改报表”“另存为新报表”的完整产品链路尚未实现。
+- 当前 `ReportArtifact` 协议仍需继续通用化，查询、数据集、组件、布局、筛选、交互和血缘需要进一步收敛。
+- 历史任务 `c41e0fb0` 后续重试被上游 MiniMax 流读取超时中断；修复只保证后续同类工具参数更稳、超时可控失败，不会自动补写该历史任务的 artifact。
+- 本机直接运行 `npm.cmd run build` 曾遇到 `.next/node_modules/@prisma/client-*` unlink `EPERM`，当前以 Docker 容器内 build/start 和 `tsc --noEmit` 作为验证口径。
 
 ## 下一步
 
-1. 专门设计 ReportArtifact 通用协议，明确查询、数据集、组件、Puck 布局、筛选、交互、版本和血缘。
-2. 基于协议完善 `GenBI_report` 工具契约与校验路径。
-3. 验证右侧报表渲染不再依赖渠道销售字段硬编码。
+1. 继续设计并收敛通用 `ReportArtifact` JSON 协议。
+2. 继续完善 `GenBI_report` 工具契约和后端校验路径，减少模型反复试错。
+3. 实现报表中心删除、刷新数据、修改报表和另存为新报表的最小闭环。

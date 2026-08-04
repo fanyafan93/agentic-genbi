@@ -2,14 +2,14 @@
 import asyncio
 import os
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from backend.config import check_runtime_env, load_project_env
 from backend.analysis.report_artifact import normalize_report_artifact, validate_report_artifact
 from backend.analysis.report_compiler import compile_interactive_report
 from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
-from backend.analysis.interactive_report_store import InteractiveReportStore, InteractiveReportVersionConflict
+from backend.analysis.interactive_report_store import InteractiveReportStore, InteractiveReportVersionConflict, asdict_report
 from backend.business_semantics.finereport_reports import FineReportReportRepository
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
 from backend.harness.codex_mcp_config import codex_mcp_server_status_payload, test_codex_mcp_server
@@ -57,6 +57,11 @@ def create_app(
         conversation_id: str | None = None
         user_id: str | None = None
         turn_kind: str = "start"
+        metadata: dict[str, Any] = Field(default_factory=dict)
+
+    class AnalysisThreadBody(BaseModel):
+        title: str | None = None
+        user_id: str | None = None
         metadata: dict[str, Any] = Field(default_factory=dict)
 
     class AnalysisAssetReopenContextBody(BaseModel):
@@ -108,6 +113,21 @@ def create_app(
         source: InteractiveReportSourceBody
         ownerId: str = Field(min_length=1)
         expectedVersion: int | None = Field(default=None, ge=0)
+        dataUpdatedAt: str | None = None
+        derivedFromReportId: str | None = None
+
+    class InteractiveReportRenameBody(BaseModel):
+        ownerId: str = Field(min_length=1)
+        title: str = Field(min_length=1)
+
+    class ReportShareBody(BaseModel):
+        ownerId: str = Field(default="local-user", min_length=1)
+        recipientUserId: str = Field(min_length=1)
+        permission: Literal["view", "view_and_reuse"]
+
+    class ReportAnalysisThreadBody(BaseModel):
+        userId: str | None = None
+        title: str | None = None
 
     class KnowledgeBody(BaseModel):
         title: str = Field(min_length=1)
@@ -237,7 +257,30 @@ def create_app(
     @app.get("/api/analysis/threads")
     def list_analysis_threads(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
         threads = configured_thread_store.list_threads(limit=limit, product_kind="analysis_task")
+        threads = [thread for thread in threads if not str(thread.get("id", "")).startswith("draft_")]
         return {"threads": [_with_latest_thread_question(configured_thread_store, item) for item in threads]}
+
+    @app.post("/api/analysis/threads")
+    def create_waiting_analysis_thread(body: AnalysisThreadBody = Body(...)) -> dict[str, Any]:
+        title = str(body.title or "新分析").strip() or "新分析"
+        existing = _find_waiting_analysis_thread(
+            configured_thread_store,
+            title=title,
+            user_id=body.user_id,
+            metadata_match={"source_report_id": None},
+        )
+        if existing:
+            return {"thread": _with_latest_thread_question(configured_thread_store, existing)}
+        thread_id = _new_analysis_thread_id()
+        thread = configured_thread_store.create_thread(
+            thread_id=thread_id,
+            product_kind="analysis_task",
+            title=title,
+            user_id=body.user_id,
+            status="waiting_for_question",
+            metadata={**body.metadata, "domain": "analysis_task", "thread_id": thread_id},
+        )
+        return {"thread": _with_latest_thread_question(configured_thread_store, thread["thread"])}
 
     @app.post("/api/analysis/threads/turns")
     async def create_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
@@ -383,7 +426,14 @@ def create_app(
         reports = configured_interactive_report_store.list_reports(owner_id=owner_id, limit=limit)
         if source_thread_id:
             reports = [report for report in reports if report.sourceThreadId == source_thread_id]
-        return {"reports": [asdict(report) for report in reports]}
+        return {"reports": [asdict_report(report) for report in reports]}
+
+    @app.get("/api/analysis/report-center")
+    def list_report_center(
+        user_id: str = Query(min_length=1),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        return configured_interactive_report_store.list_report_center(user_id=user_id, limit=limit)
 
     @app.post("/api/analysis/reports")
     def save_interactive_report(body: InteractiveReportBody = Body(...)) -> dict[str, Any]:
@@ -393,7 +443,7 @@ def create_app(
             raise HTTPException(status_code=409, detail="interactive_report_version_conflict") from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"report": asdict(report), "version": asdict(version)}
+        return {"report": asdict_report(report), "version": asdict(version)}
 
     @app.get("/api/analysis/reports/{report_id}")
     def get_interactive_report(report_id: str) -> dict[str, Any]:
@@ -401,7 +451,93 @@ def create_app(
         if not result:
             raise HTTPException(status_code=404, detail="interactive_report_not_found")
         report, version = result
-        return {"report": asdict(report), "version": asdict(version)}
+        return {"report": asdict_report(report), "version": asdict(version)}
+
+    @app.post("/api/analysis/reports/{report_id}/analysis-thread")
+    def create_analysis_thread_from_report(report_id: str, body: ReportAnalysisThreadBody = Body(default_factory=ReportAnalysisThreadBody)) -> dict[str, Any]:
+        result = configured_interactive_report_store.get_report(report_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="interactive_report_not_found")
+        report, version = result
+        title = (body.title or f"{report.title} 新分析").strip()
+        existing = _find_waiting_analysis_thread(
+            configured_thread_store,
+            title=title,
+            user_id=body.userId,
+            metadata_match={"source_report_id": report.id},
+        )
+        report_payload = _interactive_report_payload(report, version)
+        if existing:
+            return {
+                "thread": _with_latest_thread_question(configured_thread_store, existing),
+                "report": {
+                    "report": asdict_report(report),
+                    "version": asdict(version),
+                },
+            }
+        thread_id = _new_analysis_thread_id()
+        thread = configured_thread_store.create_thread(
+            thread_id=thread_id,
+            product_kind="analysis_task",
+            title=title,
+            user_id=body.userId,
+            status="waiting_for_question",
+            metadata={
+                "domain": "analysis_task",
+                "source_report_id": report.id,
+                "initial_report_id": report.id,
+                "initial_report_version": version.version,
+                "initial_report_artifact": report_payload,
+            },
+        )
+        return {
+            "thread": _with_latest_thread_question(configured_thread_store, thread["thread"]),
+            "report": {
+                "report": asdict_report(report),
+                "version": asdict(version),
+            },
+        }
+
+    @app.patch("/api/analysis/reports/{report_id}")
+    def rename_interactive_report(report_id: str, body: InteractiveReportRenameBody = Body(...)) -> dict[str, Any]:
+        report = configured_interactive_report_store.rename_report(report_id, owner_id=body.ownerId, title=body.title)
+        if not report:
+            raise HTTPException(status_code=404, detail="interactive_report_not_found")
+        return {"report": asdict_report(report)}
+
+    @app.delete("/api/analysis/reports/{report_id}")
+    def delete_interactive_report(report_id: str, owner_id: str = Query(min_length=1)) -> dict[str, Any]:
+        deleted = configured_interactive_report_store.delete_report(report_id, owner_id=owner_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="interactive_report_not_found")
+        return {"deleted": True, "report_id": report_id}
+
+    @app.post("/api/analysis/reports/{report_id}/shares")
+    def share_interactive_report(report_id: str, body: ReportShareBody = Body(...)) -> dict[str, Any]:
+        share = configured_interactive_report_store.share_report(
+            report_id,
+            owner_id=body.ownerId,
+            recipient_user_id=body.recipientUserId,
+            permission=body.permission,
+        )
+        if not share:
+            raise HTTPException(status_code=404, detail="interactive_report_not_found")
+        return {"share": asdict(share)}
+
+    @app.delete("/api/analysis/reports/{report_id}/shares/{recipient_user_id}")
+    def revoke_interactive_report_share(
+        report_id: str,
+        recipient_user_id: str,
+        owner_id: str = Query(min_length=1),
+    ) -> dict[str, Any]:
+        revoked = configured_interactive_report_store.revoke_report_share(
+            report_id,
+            owner_id=owner_id,
+            recipient_user_id=recipient_user_id,
+        )
+        if not revoked:
+            raise HTTPException(status_code=404, detail="report_share_not_found")
+        return {"revoked": True, "report_id": report_id, "recipient_user_id": recipient_user_id}
 
     @app.get("/api/analysis/reports/{report_id}/versions")
     def list_interactive_report_versions(report_id: str) -> dict[str, Any]:
@@ -833,6 +969,51 @@ def _with_latest_thread_question(thread_store: ThreadStore, thread: dict[str, An
     latest_turn = turns[-1] if turns else None
     latest_question = str(latest_turn.get("question", "")).strip() if isinstance(latest_turn, dict) else ""
     return {**thread, "title": _repair_text_encoding(thread.get("title")), "latestQuestion": _repair_text_encoding(latest_question) or None}
+
+
+def _find_waiting_analysis_thread(
+    thread_store: ThreadStore,
+    *,
+    title: str,
+    user_id: str | None,
+    metadata_match: dict[str, str | None],
+) -> dict[str, Any] | None:
+    for thread in thread_store.list_threads(limit=200, product_kind="analysis_task"):
+        if thread.get("status") != "waiting_for_question":
+            continue
+        if (thread.get("title") or "") != title:
+            continue
+        if user_id is not None and thread.get("userId") != user_id:
+            continue
+        metadata = thread.get("metadata") if isinstance(thread.get("metadata"), dict) else {}
+        if any(metadata.get(key) != value for key, value in metadata_match.items()):
+            continue
+        enriched = _with_latest_thread_question(thread_store, thread)
+        if enriched.get("latestQuestion"):
+            continue
+        return thread
+    return None
+
+
+def _interactive_report_payload(report: Any, version: Any) -> dict[str, Any]:
+    return {
+        "id": report.id,
+        "title": report.title,
+        "subtitle": report.subtitle,
+        "artifactType": report.artifactType,
+        "schemaVersion": "1.0",
+        "renderer": report.renderer,
+        "document": version.document,
+        "filters": version.filters,
+        "queries": version.queries,
+        "chartSpecs": version.chartSpecs,
+        "gridSpecs": version.gridSpecs,
+        "datasets": version.datasets,
+        "source": {
+            "threadId": version.sourceThreadId,
+            "turnId": version.sourceTurnId,
+        },
+    }
 
 
 def _repair_thread_detail_text(detail: dict[str, Any]) -> dict[str, Any]:

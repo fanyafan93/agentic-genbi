@@ -17,6 +17,7 @@ export type BackendAnalysisThreadSummary = {
   createdAt?: string | null;
   updatedAt?: string | null;
   latestQuestion?: string | null;
+  metadata?: Record<string, unknown> | null;
 };
 
 export type BackendAnalysisThreadDetail = {
@@ -102,7 +103,7 @@ export class BackendAnalysisAgentClient implements AgentClient {
     };
     try {
       const targetThreadId = input.threadId || this.threadId;
-      const threadTurnUrl = targetThreadId && input.kind !== "start"
+      const threadTurnUrl = targetThreadId
         ? `${this.apiBaseUrl}/api/analysis/threads/${encodeURIComponent(targetThreadId)}/turns/stream`
         : `${this.apiBaseUrl}/api/analysis/threads/turns/stream`;
       const response = await fetch(threadTurnUrl, {
@@ -178,6 +179,19 @@ export async function listBackendAnalysisThreads(): Promise<BackendAnalysisThrea
   if (!response.ok) throw new Error(`Analysis threads API returned ${response.status}`);
   const payload = await response.json() as { threads?: BackendAnalysisThreadSummary[] };
   return Array.isArray(payload.threads) ? payload.threads : [];
+}
+
+export async function createBackendAnalysisThread(title: string, userId?: string): Promise<BackendAnalysisThreadSummary> {
+  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
+  if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
+  const response = await fetch(`${apiBaseUrl}/api/analysis/threads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, user_id: userId }),
+  });
+  if (!response.ok) throw new Error(`Analysis thread create API returned ${response.status}`);
+  const payload = await response.json() as { thread: BackendAnalysisThreadSummary };
+  return payload.thread;
 }
 
 export async function getBackendAnalysisThread(threadId: string): Promise<BackendAnalysisThreadDetail> {

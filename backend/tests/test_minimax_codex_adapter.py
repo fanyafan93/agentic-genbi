@@ -11,6 +11,7 @@ from backend.harness.minimax_codex_adapter import (
     NamespaceToolMap,
     adapter_base_url,
     adapter_enabled,
+    _iter_rewritten_sse,
     _rewrite_model_name,
     rewrite_request_body,
     rewrite_response_event,
@@ -149,6 +150,26 @@ class MinimaxCodexAdapterTest(unittest.TestCase):
 
         self.assertIn('"namespace": "mcp__BI_doris__"', rewritten)
         self.assertIn('"name": "mysql_query"', rewritten)
+
+    def test_iter_rewritten_sse_converts_timeout_to_failed_event(self) -> None:
+        class TimeoutResponse:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def read(self, size: int) -> bytes:
+                raise TimeoutError("timed out")
+
+            def close(self) -> None:
+                self.closed = True
+
+        response = TimeoutResponse()
+
+        chunks = list(_iter_rewritten_sse(response, []))
+
+        self.assertTrue(response.closed)
+        text = b"".join(chunks).decode("utf-8")
+        self.assertIn("event: response.failed", text)
+        self.assertIn("minimax_stream_timeout", text)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ export type FlowNode =
       role: "agent";
       content: string;
       mode?: "replace" | "delta";
+      thinking?: boolean;
       steps?: { label: string; state: "queued" | "running" | "done"; detail?: string; itemId?: string }[];
       activity?: FlowActivity[];
       activeItemId?: string;
@@ -44,6 +45,7 @@ export const STEP_INITIAL = ["识别业务口径", "查询可用数据表", "生
 
 export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
   const agent = useMemo(() => getAgentClient(), []);
+  const initialSignature = useMemo(() => flowNodeSignature(initial), [initial]);
   const [turnId, setTurnId] = useState<string | null>(threadKey);
   const [threadId, setThreadId] = useState<string | null>(threadKey);
   const [nodes, setNodes] = useState<FlowNode[]>(initial);
@@ -54,6 +56,7 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
   const runningRef = useRef(false);
 
   useEffect(() => {
+    if (runningRef.current) return;
     cancelled = false;
     setTurnId(threadKey);
     setThreadId(threadKey);
@@ -65,7 +68,7 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
     runningRef.current = false;
     agent.cancel?.();
     return () => { cancelled = true; };
-  }, [agent, threadKey, initial]);
+  }, [agent, threadKey, initialSignature]);
 
   const applyEvent = useCallback((event: AgentEvent, currentNodes: FlowNode[]): FlowNode[] => {
     if (event.turnId) setTurnId(event.turnId);
@@ -99,16 +102,18 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
               ...withArchivedMessage,
               content,
               mode: event.mode,
+              thinking: false,
               activeItemId: itemId ?? withArchivedMessage.activeItemId,
             };
           }
         }
       } else {
-        next.push({
+          next.push({
           id: event.nodeId,
           role: "agent",
           content: cleanDisplayText(event.content),
           mode: event.mode,
+          thinking: false,
           steps: [],
           activity: [],
           activeItemId: getAgentEventItemId(event),
@@ -124,8 +129,9 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
         const thinkingNode: FlowNode = {
           id: event.nodeId,
           role: "agent",
-          content: "思考中...",
+          content: "",
           mode: "replace",
+          thinking: true,
           steps: [],
           activity: [],
           activeItemId: getAgentEventItemId(event),
@@ -142,23 +148,25 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
       if (targetIndex >= 0) {
         const target = next[targetIndex];
         if (target.role === "agent") {
-          const withArchivedMessage = target.content.trim() && target.content !== "思考中..."
-            ? archiveAgentMessage(target)
-            : target;
+          if (target.content.trim() || (target.activity?.length ?? 0) > 0) {
+            return currentNodes;
+          }
           next[targetIndex] = {
-            ...withArchivedMessage,
+            ...target,
             id: event.nodeId,
-            content: "思考中...",
+            content: "",
             mode: "replace",
-            activeItemId: getAgentEventItemId(event) ?? withArchivedMessage.activeItemId,
+            thinking: true,
+            activeItemId: getAgentEventItemId(event) ?? target.activeItemId,
           };
         }
       } else {
         next.push({
           id: event.nodeId,
           role: "agent",
-          content: "思考中...",
+          content: "",
           mode: "replace",
+          thinking: true,
           steps: [],
           activity: [],
           activeItemId: getAgentEventItemId(event),
@@ -176,6 +184,7 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
           role: "agent",
           content: cleanDisplayText(event.text),
           mode: "delta",
+          thinking: false,
           steps: [],
           activity: [],
           activeItemId: getAgentEventItemId(event),
@@ -193,9 +202,11 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
           const itemId = getAgentEventItemId(event);
           const itemChanged = Boolean(itemId && target.activeItemId && itemId !== target.activeItemId);
           const withArchivedMessage = itemChanged ? archiveAgentMessage(target) : target;
+          const currentContent = withArchivedMessage.content;
           next[idx] = {
             ...withArchivedMessage,
-            content: withArchivedMessage.content + cleanDisplayText(event.text),
+            content: currentContent + cleanDisplayText(event.text),
+            thinking: false,
             activeItemId: itemId ?? withArchivedMessage.activeItemId,
           };
         }
@@ -205,6 +216,7 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
           role: "agent",
           content: cleanDisplayText(event.text),
           mode: "delta",
+          thinking: false,
           steps: [],
           activity: [],
           activeItemId: getAgentEventItemId(event),
@@ -365,6 +377,16 @@ function isDuplicateAgentContent(currentContent: string, nextContent: string): b
   return Boolean(currentContent && nextContent && currentContent.includes(nextContent));
 }
 
+function flowNodeSignature(nodes: FlowNode[]): string {
+  return nodes
+    .map((node) => {
+      if (node.role === "user") return `user:${node.id}:${node.content}`;
+      if (node.role === "agent") return `agent:${node.id}:${node.content}:${node.activity?.length ?? 0}:${node.thinking ? "thinking" : ""}`;
+      return `ask:${node.id}:${node.question}`;
+    })
+    .join("|");
+}
+
 function cleanDisplayText(value: string): string {
   return value.replace(/\uFFFD+/g, "");
 }
@@ -375,7 +397,7 @@ function withOptimisticTurn(nodes: FlowNode[], input: AgentInput): FlowNode[] {
   return [
     ...nodes,
     { id: "user-pending", role: "user", content: cleanDisplayText(content) },
-    { id: "agent-pending", role: "agent", content: "正在思考...", mode: "replace", steps: [] },
+    { id: "agent-pending", role: "agent", content: "", mode: "replace", thinking: true, steps: [] },
   ];
 }
 

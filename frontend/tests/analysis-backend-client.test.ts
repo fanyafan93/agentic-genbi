@@ -446,6 +446,26 @@ describe("analysis backend client event mapping", () => {
     expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads/thread_existing/turns/stream");
   });
 
+  test("starts the first turn inside an existing waiting backend thread", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      sseEvent({
+        type: "turn/started",
+        turn_id: "turn_waiting_first",
+        payload: { conversation_id: "thread_waiting", question: "first question" },
+      }) + sseEvent({
+        type: "turn/completed",
+        turn_id: "turn_waiting_first",
+        payload: {},
+      }),
+      { status: 200, headers: { "Content-Type": "text/event-stream" } },
+    )));
+
+    const client = new BackendAnalysisAgentClient("http://backend.test");
+    await collect(client.send({ kind: "start", question: "first question", threadId: "thread_waiting" }));
+
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads/thread_waiting/turns/stream");
+  });
+
   test("loads backend analysis threads for the real sidebar", async () => {
     process.env.NEXT_PUBLIC_GENBI_API_BASE_URL = "http://backend.test";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({

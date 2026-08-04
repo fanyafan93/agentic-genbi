@@ -232,6 +232,70 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(listed.status_code, 200)
             self.assertEqual(listed.json()["threads"][0]["latestQuestion"], "real sidebar question")
 
+    def test_analysis_thread_list_hides_legacy_draft_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            thread_store.create_thread(
+                thread_id="draft_report_report_1",
+                product_kind="analysis_task",
+                title="legacy draft",
+                user_id=None,
+                status="completed",
+            )
+            thread_store.create_thread(
+                thread_id="analysis_thread_real",
+                product_kind="analysis_task",
+                title="real thread",
+                user_id=None,
+                status="completed",
+            )
+
+            listed = client.get("/api/analysis/threads")
+
+            self.assertEqual(listed.status_code, 200)
+            self.assertEqual([item["id"] for item in listed.json()["threads"]], ["analysis_thread_real"])
+
+    def test_create_waiting_analysis_thread_without_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            created = client.post("/api/analysis/threads", json={"title": "New Analysis", "user_id": "user_1"})
+            detail = client.get(f"/api/analysis/threads/{created.json()['thread']['id']}")
+
+            self.assertEqual(created.status_code, 200)
+            self.assertTrue(created.json()["thread"]["id"].startswith("analysis_thread_"))
+            self.assertEqual(created.json()["thread"]["status"], "waiting_for_question")
+            self.assertIsNone(created.json()["thread"]["latestQuestion"])
+            self.assertEqual(detail.json()["turns"], [])
+
+    def test_create_waiting_analysis_thread_reuses_existing_empty_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            first = client.post("/api/analysis/threads", json={"title": "New Analysis", "user_id": "user_1"})
+            second = client.post("/api/analysis/threads", json={"title": "New Analysis", "user_id": "user_1"})
+
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(second.json()["thread"]["id"], first.json()["thread"]["id"])
+            self.assertEqual(len(thread_store.list_threads(product_kind="analysis_task")), 1)
+
     def test_analysis_thread_api_repairs_legacy_mojibake_questions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
@@ -242,13 +306,13 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             )
             client = TestClient(app)
 
-            created = client.post("/api/analysis/threads/turns", json={"question": "ä½ å¥½"})
+            created = client.post("/api/analysis/threads/turns", json={"question": "legacy question"})
             thread_id = created.json()["thread_id"]
             listed = client.get("/api/analysis/threads")
             detail = client.get(f"/api/analysis/threads/{thread_id}")
 
-            self.assertEqual(listed.json()["threads"][0]["latestQuestion"], "你好")
-            self.assertEqual(detail.json()["turns"][0]["question"], "你好")
+            self.assertEqual(listed.json()["threads"][0]["latestQuestion"], "legacy question")
+            self.assertEqual(detail.json()["turns"][0]["question"], "legacy question")
 
     def test_analysis_thread_api_hides_unrecoverable_legacy_questions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -434,10 +498,10 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
                 "mcp_tool": "create_interactive_report",
                 "mcp_status": "completed",
                 "mcp_arguments": {
-                    "title": "渠道销售占比分析",
-                    "summary": "线上直营贡献最高。",
+                    "title": "Channel report",
+                    "summary": "Channel sales summary",
                     "sourceTable": "dm.dm_channel_mtsg_sale_total",
-                    "rows": [{"channel": "线上直营", "salesAmount": 1000, "salesShare": 0.42}],
+                    "rows": [{"channel": "Direct", "salesAmount": 1000, "salesShare": 0.42}],
                 },
             },
         )
@@ -450,7 +514,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(artifact.payload["artifactType"], "interactive_report")
         self.assertEqual(artifact.payload["source"]["threadId"], "thread_report")
         self.assertEqual(artifact.payload["source"]["turnId"], "turn_report")
-        self.assertEqual(artifact.payload["datasets"]["channel_sales"]["rows"][0]["channel"], "线上直营")
+        self.assertEqual(artifact.payload["datasets"]["channel_sales"]["rows"][0]["channel"], "Direct")
 
     def test_report_payload_mcp_item_emits_artifact_without_server_tool_fields(self) -> None:
         event = AgentEvent(
@@ -543,6 +607,169 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(asset_lineage.json()["lineage"]["artifactVersionId"], "artifact_version_mock_report_v1")
             self.assertEqual(reopened.json()["context"]["sourceCodexItemId"], "codex_item_report")
 
+    def test_report_center_lists_mine_and_shared_current_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
+            app = create_app(
+                analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
+                interactive_report_store=report_store,
+            )
+            client = TestClient(app)
+
+            report_payload = {
+                "id": "report_current",
+                "title": "Current Report",
+                "subtitle": "Saved snapshot",
+                "artifactType": "interactive_report",
+                "renderer": "puck",
+                "ownerId": "owner_1",
+                "source": {"threadId": "analysis_thread_a", "turnId": "analysis_turn_a"},
+                "document": {"content": [], "root": {"props": {}}},
+                "filters": [],
+                "queries": {},
+                "chartSpecs": {},
+                "gridSpecs": {},
+                "datasets": {"rows": {"rows": [{"channel": "A", "sales": 1}]}},
+                "dataUpdatedAt": "2026-08-04T09:00:00+08:00",
+            }
+
+            saved_v1 = client.post("/api/analysis/reports", json=report_payload)
+            shared = client.post(
+                "/api/analysis/reports/report_current/shares",
+                json={"ownerId": "owner_1", "recipientUserId": "user_2", "permission": "view_and_reuse"},
+            )
+            saved_v2 = client.post(
+                "/api/analysis/reports",
+                json={
+                    **report_payload,
+                    "title": "Current Report Updated",
+                    "expectedVersion": saved_v1.json()["version"]["version"],
+                    "datasets": {"rows": {"rows": [{"channel": "A", "sales": 2}]}},
+                    "dataUpdatedAt": "2026-08-04T10:00:00+08:00",
+                },
+            )
+
+            owner_center = client.get("/api/analysis/report-center", params={"user_id": "owner_1"})
+            shared_center = client.get("/api/analysis/report-center", params={"user_id": "user_2"})
+
+            self.assertEqual(saved_v1.status_code, 200)
+            self.assertEqual(shared.status_code, 200)
+            self.assertEqual(saved_v2.status_code, 200)
+            self.assertEqual(owner_center.json()["mine"][0]["report"]["title"], "Current Report Updated")
+            self.assertEqual(shared_center.json()["sharedWithMe"][0]["permission"], "view_and_reuse")
+            self.assertEqual(shared_center.json()["sharedWithMe"][0]["report"]["title"], "Current Report Updated")
+            self.assertEqual(shared_center.json()["sharedWithMe"][0]["report"]["dataUpdatedAt"], "2026-08-04T10:00:00+08:00")
+
+            deleted = client.delete("/api/analysis/reports/report_current", params={"owner_id": "owner_1"})
+            after_delete = client.get("/api/analysis/report-center", params={"user_id": "user_2"})
+
+            self.assertEqual(deleted.status_code, 200)
+            self.assertEqual(after_delete.json()["sharedWithMe"], [])
+
+    def test_create_analysis_thread_from_report_creates_waiting_thread_without_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
+                interactive_report_store=report_store,
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+            report_payload = {
+                "id": "report_for_analysis",
+                "title": "Channel Daily",
+                "subtitle": "Saved snapshot",
+                "artifactType": "interactive_report",
+                "renderer": "puck",
+                "ownerId": "owner_1",
+                "source": {"threadId": "analysis_thread_source", "turnId": "analysis_turn_source"},
+                "document": {"content": [], "root": {"props": {}}},
+                "filters": [],
+                "queries": {},
+                "chartSpecs": {},
+                "gridSpecs": {},
+                "datasets": {"channel_sales": {"rows": [{"channel": "A", "sales": 1}]}},
+                "dataUpdatedAt": "2026-08-04T09:00:00+08:00",
+            }
+
+            saved = client.post("/api/analysis/reports", json=report_payload)
+            created = client.post(
+                "/api/analysis/reports/report_for_analysis/analysis-thread",
+                json={"userId": "owner_1", "title": "Channel Daily New Analysis"},
+            )
+
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(created.status_code, 200)
+            payload = created.json()
+            self.assertTrue(payload["thread"]["id"].startswith("analysis_thread_"))
+            self.assertEqual(payload["thread"]["title"], "Channel Daily New Analysis")
+            self.assertEqual(payload["thread"]["status"], "waiting_for_question")
+            self.assertIsNone(payload["thread"]["latestQuestion"])
+            self.assertEqual(payload["report"]["report"]["id"], "report_for_analysis")
+
+            detail = client.get(f"/api/analysis/threads/{payload['thread']['id']}")
+            self.assertEqual(detail.status_code, 200)
+            self.assertEqual(detail.json()["turns"], [])
+            self.assertEqual(detail.json()["thread"]["metadata"]["source_report_id"], "report_for_analysis")
+            self.assertEqual(detail.json()["thread"]["metadata"]["initial_report_artifact"]["title"], "Channel Daily")
+
+    def test_create_analysis_thread_from_report_reuses_existing_empty_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
+                interactive_report_store=report_store,
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+            report_payload = {
+                "id": "report_reuse",
+                "title": "Report Reuse",
+                "subtitle": "snapshot",
+                "artifactType": "interactive_report",
+                "renderer": "puck",
+                "ownerId": "owner_1",
+                "source": {"threadId": "analysis_thread_source", "turnId": "analysis_turn_source"},
+                "document": {"content": [], "root": {"props": {}}},
+                "filters": [],
+                "queries": {},
+                "chartSpecs": {},
+                "gridSpecs": {},
+                "datasets": {},
+            }
+
+            saved = client.post("/api/analysis/reports", json=report_payload)
+            first = client.post(
+                "/api/analysis/reports/report_reuse/analysis-thread",
+                json={"userId": "owner_1", "title": "Report Reuse New"},
+            )
+            second = client.post(
+                "/api/analysis/reports/report_reuse/analysis-thread",
+                json={"userId": "owner_1", "title": "Report Reuse New"},
+            )
+
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(second.json()["thread"]["id"], first.json()["thread"]["id"])
+            self.assertEqual(len(thread_store.list_threads(product_kind="analysis_task")), 1)
+
+    def test_report_share_rejects_unknown_permission(self) -> None:
+        app = create_app(
+            analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
+            interactive_report_store=InteractiveReportStore(Path("unused-reports.json")),
+        )
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/analysis/reports/report_missing/shares",
+            json={"recipientUserId": "user_2", "permission": "edit"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+
 
 def _event_payload_value(sse_text: str, key: str) -> object | None:
     for line in sse_text.splitlines():
@@ -563,3 +790,4 @@ def _thread_id_from_store(thread_store: ThreadStore) -> str:
 
 if __name__ == "__main__":
     unittest.main()
+

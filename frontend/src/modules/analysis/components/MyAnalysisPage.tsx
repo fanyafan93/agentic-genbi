@@ -1,35 +1,125 @@
 "use client";
 
-import type { SavedInteractiveReport } from "../api/interactive-report-service";
+import { useState } from "react";
+import type { SavedInteractiveReport, SharedInteractiveReport } from "../api/interactive-report-service";
+import { InteractiveReportPanel } from "./InteractiveReportPanel";
 
 type Props = {
   reports: SavedInteractiveReport[];
-  onOpenReport: (saved: SavedInteractiveReport) => void;
+  sharedReports: SharedInteractiveReport[];
+  onOpenReport: (saved: SavedInteractiveReport) => void | Promise<void>;
+  onCreateAnalysis: (saved: SavedInteractiveReport) => void | Promise<void>;
 };
 
-export function MyAnalysisPage({ reports, onOpenReport }: Props) {
+export function MyAnalysisPage({ reports, sharedReports, onOpenReport, onCreateAnalysis }: Props) {
+  const [previewReport, setPreviewReport] = useState<SavedInteractiveReport | null>(null);
+
   return (
-    <section className="my-analysis-page" aria-label="我的分析">
+    <section className="my-analysis-page" aria-label="报表中心">
       <header>
-        <span>MY ANALYSIS</span>
-        <h1>我的分析</h1>
-        <p>这里保存你确认要保留的结果和可复用的分析模板。临时筛选不产生新版本。</p>
+        <span>REPORT CENTER</span>
+        <h1>报表中心</h1>
+        <p>这里保存用户确认保留的报表快照。打开报表不会自动重新查询，刷新数据只产生运行时结果。</p>
       </header>
-      <section className="my-analysis-section" aria-label="我的结果">
-        <div className="my-analysis-section-head"><div><span>INTERACTIVE RESULTS</span><h2>我的结果</h2></div><small>{reports.length} 份已保存</small></div>
-        {reports.length === 0 ? <p className="my-analysis-empty">尚未保存分析结果。回到分析工作台完成一轮分析后，选择“保存”。</p> : <div className="my-analysis-cards">
-          {reports.map((saved) => <article key={saved.report.id}>
-            <span>交互式报告 · v{saved.version}</span>
-            <h3>{saved.report.title}</h3>
-            <p>{saved.report.subtitle}</p>
-            <footer><time>{new Date(saved.savedAt).toLocaleString("zh-CN")}</time><button type="button" onClick={() => onOpenReport(saved)}>打开结果</button></footer>
-          </article>)}
-        </div>}
+
+      <section className="my-analysis-section" aria-label="我的报表">
+        <div className="my-analysis-section-head">
+          <div>
+            <span>MY REPORTS</span>
+            <h2>我的报表</h2>
+          </div>
+          <small>{reports.length} 份已保存</small>
+        </div>
+        {reports.length === 0 ? (
+          <p className="my-analysis-empty">尚未保存报表。回到分析工作台完成一轮分析后，选择“保存”。</p>
+        ) : (
+          <div className="my-analysis-cards">
+            {reports.map((saved) => (
+              <ReportCard
+                key={saved.report.id}
+                saved={saved}
+                onPreview={setPreviewReport}
+                onOpenReport={onOpenReport}
+                onCreateAnalysis={onCreateAnalysis}
+              />
+            ))}
+          </div>
+        )}
       </section>
-      <section className="my-analysis-section template-placeholder" aria-label="分析模板">
-        <div className="my-analysis-section-head"><div><span>ANALYSIS TEMPLATES</span><h2>分析模板</h2></div><small>下一阶段</small></div>
-        <p>用户可从当前对话、查询步骤和最终结果中提炼模板，再用新参数发起下一次分析。</p>
+
+      <section className="my-analysis-section" aria-label="分享给我">
+        <div className="my-analysis-section-head">
+          <div>
+            <span>SHARED WITH ME</span>
+            <h2>分享给我</h2>
+          </div>
+          <small>{sharedReports.length} 份可查看</small>
+        </div>
+        {sharedReports.length === 0 ? (
+          <p className="my-analysis-empty">暂无别人分享给你的报表。</p>
+        ) : (
+          <div className="my-analysis-cards">
+            {sharedReports.map((shared) => (
+              <ReportCard
+                key={`${shared.report.id}:${shared.permission}`}
+                saved={shared}
+                onPreview={setPreviewReport}
+                onOpenReport={onOpenReport}
+                onCreateAnalysis={shared.permission === "view_and_reuse" ? onCreateAnalysis : undefined}
+              />
+            ))}
+          </div>
+        )}
       </section>
+
+      {previewReport ? <ReportPreviewDialog saved={previewReport} onClose={() => setPreviewReport(null)} /> : null}
     </section>
+  );
+}
+
+function ReportCard({
+  saved,
+  onPreview,
+  onOpenReport,
+  onCreateAnalysis,
+}: {
+  saved: SavedInteractiveReport;
+  onPreview: (saved: SavedInteractiveReport) => void;
+  onOpenReport: (saved: SavedInteractiveReport) => void | Promise<void>;
+  onCreateAnalysis?: (saved: SavedInteractiveReport) => void | Promise<void>;
+}) {
+  return (
+    <article className="report-center-card">
+      <h3>{saved.report.title}</h3>
+      <footer>
+        <div className="report-card-actions">
+          <button type="button" onClick={() => onPreview(saved)}>预览</button>
+          <button type="button" onClick={() => window.alert("删除功能待接入后端。")}>删除</button>
+          <button type="button" onClick={() => onOpenReport(saved)}>回到原任务</button>
+          <button type="button" disabled={!onCreateAnalysis} onClick={() => onCreateAnalysis?.(saved)}>新建分析</button>
+        </div>
+      </footer>
+    </article>
+  );
+}
+
+function ReportPreviewDialog({ saved, onClose }: { saved: SavedInteractiveReport; onClose: () => void }) {
+  return (
+    <div className="report-preview-backdrop" role="dialog" aria-modal="true" aria-label="报表预览">
+      <section className="report-preview-dialog">
+        <header>
+          <h2>{saved.report.title}</h2>
+          <button type="button" onClick={onClose} aria-label="关闭预览">×</button>
+        </header>
+        <div className="report-preview-body">
+          <InteractiveReportPanel
+            taskTitle={saved.report.title}
+            running={false}
+            initialReport={saved.report}
+            initialVersion={saved.version}
+          />
+        </div>
+      </section>
+    </div>
   );
 }
