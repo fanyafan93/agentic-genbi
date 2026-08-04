@@ -1,13 +1,13 @@
 # 当前任务
 
-更新时间：2026-08-03 Asia/Shanghai
+更新时间：2026-08-04 Asia/Shanghai
 
 本页只记录当前可验证状态。历史过程交给 Git。
 
 ## 当前分支
 
 - 分支：`Agentic-GenBI`。
-- 工作区：有未提交改动，集中在分析工作台前端交互、Codex MCP 工具事件、interactive_report artifact、MCP 系统管理页、报告渲染和对应测试。
+- 工作区：有未提交改动；本轮新增本地服务启动脚本和 README 启动说明，另有此前未提交的前端/report 相关改动未处理。
 
 ## 本轮完成
 
@@ -28,6 +28,9 @@
 - 定位任务 `analysis_thread_c033299e5733`：该任务绑定两个 interactive_report，点击历史任务时右侧先清空为无报告状态，再异步加载最新 report，造成柱/折线图看起来刷新两次。
 - 修复右侧报告面板的任务绑定：只展示属于当前 thread 的 `flow.reportArtifact` 或 `openedReport`，历史任务加载 report 时显示稳定的“报告加载中”，并用请求序号避免快速切换任务后旧请求回写。
 - 修复 `InteractiveReportPanel` 中 Puck document `content/zones` 的类型收窄，避免 `next build` 把稳定 ID 处理后的数组推断为 `unknown[]`。
+- 新增 `scripts/start-services.ps1`：Windows 下统一启动 Docker Desktop、等待 Docker daemon、执行 `docker compose up -d`，并检查 backend `/health` 与 frontend 首页。
+- README 本地运行说明改为优先使用 `scripts/start-services.ps1`，保留原始 `docker compose up -d --build` 作为直接方式。
+- 修复 frontend compose 启动方式：容器内 `next dev` 在后台服务场景会显示 `Ready` 后退出，改为 `npm install && prisma migrate deploy && NODE_ENV=production next build && next start`。
 
 ## 已运行验证
 
@@ -47,6 +50,12 @@
 - `docker compose ps frontend`：确认 `agentic-genbi-frontend-1` 运行中并监听 `3000`。
 - Chrome DevTools MCP 自动点击左侧前 12 个任务：修复前多个任务时间被刷新到当前时间并重排；修复后 `initialLabels` 与 `finalLabels` 一致，点击过程未再重排。
 - Chrome DevTools MCP 复测任务 `c033299e`（页面显示 23:03）：右侧从“报告加载中”进入 `各渠道销售趋势折线图`，canvas 数量从 0 到 1 后保持稳定。
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-services.ps1 -TimeoutSeconds 20 -SkipDockerDesktop`：脚本可运行，并在 Docker daemon 不可用时明确失败。
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-services.ps1 -TimeoutSeconds 60`：尝试启动 Docker Desktop 后仍无法等到 Docker daemon ready，错误为 `Docker daemon is not ready`。
+- `docker compose up -d --force-recreate --no-deps frontend`：frontend 已按 production build/start 重建并运行。
+- `GET http://127.0.0.1:8000/health`：返回 `{"status":"ok"}`。
+- `GET http://127.0.0.1:3000`：返回 200。
+- `docker compose ps`：postgres healthy，backend 和 frontend 均为 `Up`。
 
 ## 风险或未完成
 
@@ -54,10 +63,11 @@
 - 若直连的 `@benborla29/mcp-server-mysql` 自身仍向 Codex 暴露 resource/resource_template 能力，是否能被 Codex 原生配置逐项隐藏仍是待验证假设；本轮未新增 MCP 代理或自研工具调度层。
 - 历史任务 `analysis_thread_422345f87652` 已经被旧前端状态切换中止，不会自动恢复；需要用新任务验证修复后的链路。
 - 历史任务 `analysis_thread_f24cdc662d89` 已经因前端超时断流被标记为 `interrupted`，不会自动恢复；新超时配置只影响后续任务。
+- 当前 Docker/WSL 已恢复到可运行状态；PowerShell 启动时仍会输出 `starship` 未安装提示，不影响服务运行。
 - 工作区存在本轮之前的未提交改动，本轮未回滚。
 
 ## 下一步
 
-1. 用一个新分析 turn 验证 `draft_* -> analysis_thread_*` 不再触发前端自中止，且长 reasoning 时会显示 `思考中...`。
-2. 验证 Codex 是否只看到 BI_doris 与 GenBI_report 两个 server，并观察 `commandExecution` / `collabAgentToolCall` 是否消失。
+1. 用 `scripts/start-services.ps1` 再跑一次完整启动脚本，确认脚本在 production frontend 模式下端到端通过。
+2. 验证分析工作台 SSE。
 3. 再回到右侧 ReportArtifact 通用协议和 GenBI_report 工具完善。

@@ -67,6 +67,20 @@ MiniMax、OpenAI-compatible 或其他模型只是 Codex 的 model adapter，不�
 
 ## 本地运行
 
+Windows 推荐使用启动脚本，它会先确认 Docker daemon 可用，再启动 compose 并检查前后端健康状态：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-services.ps1
+```
+
+需要重建镜像或强制重建容器时：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-services.ps1 -Build -ForceRecreate
+```
+
+直接使用 Docker Compose：
+
 ```bash
 docker compose up -d --build
 ```
