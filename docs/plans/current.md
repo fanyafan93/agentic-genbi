@@ -61,6 +61,15 @@
     - 不再产生空会话。
     - 不再需要 `waiting_for_question`。
   - 测试：`backend/tests/test_analysis_api.py` 新增 `SessionlessStartTest`（3 个用例）锁住契约；`backend/tests/test_analysis_api.py` / `frontend/tests/analysis-task-copy.test.ts` / `frontend/tests/analysis-backend-client.test.ts` 各自更新断言以匹配新会话入口与 URL 切换。
+- **前端只认一个 Session ID**（用户规范）：client 内部状态收敛成 `sessionId` + `currentTurnId`，不再保留 `threadId` 字段。
+  - `useFlow(sessionId, initial, { onSessionCreated })` 仅保存 `currentTurnId` / `running` / `nodes` / `artifacts` / `reportArtifact` / `codexLineage`。`currentTurnId` 只在 `user` 事件（来自 `turn/started`）里写入。
+  - `BackendAnalysisAgentClient` 删除 `private threadId` 字段；每次 `send` 必须显式传入 `sessionId`（`null` 走 `/api/analysis/sessions/turns/stream`，否则走 `/api/analysis/sessions/{sessionId}/turns/stream`）。
+  - 不允许 client 跨调用"记住上一次 thread"——切到 B 时 A 的 ID 不得出现在 B 的请求 URL 或 body。
+  - 路由层接 `onSessionCreated` 回调，从 sessionless 流拿到 `sessionId` 后 `setCurrentAnalysisTaskId` + `pushState('/analysis/{sessionId}')`。
+  - 后端新增 `POST /api/analysis/sessions/{sessionId}/turns/stream` 端点：URL 的 `session_id` 是唯一可信 id，body 的 `sessionId` 与 URL 不一致返回 `400 session_id_mismatch`。
+  - 测试：
+    - `frontend/tests/analysis-backend-client.test.ts` 新增 `never leaks the previous session id into the next request (A → B → send)`：开 A → 开 B → 给 B 续传时 URL 与 body 都不出现 A 的 id。
+    - `backend/tests/test_analysis_api.py` 新增 `SessionScopedContinuationTest`（3 个用例）：续传 turn 落入 `codex_thread_created` 行、`session_id_mismatch` 返回 400、URL 单独作为可信 id。
 - 恢复主开发分支到 `29c0e0f merge: feature/report-artifact-design → Agentic-GenBI`。
 - 确认 `119e4c5 fix(frontend): align flow.start/send/reply signature with AgentInput threadId` 内容已包含在恢复点中，cherry-pick 为空补丁。
 - 修复 FineReport 报表画像加载：
@@ -101,6 +110,13 @@
     - 响应 `events` 不包含 `genbi/thread/provisioned` / `genbi/turn/provisioned`（internal markers 已过滤）。
     - `POST /api/analysis/sessions/turns/stream` SSE 同样以 `event: session/created` 开头，body 中不再含 `event: genbi/thread/provisioned`。
     - `message: ""` 端点返回 `422`，`analysis_threads` 仍为空。
+  - **前端只认一个 Session ID（本轮）：**
+    - `python -m unittest discover -s backend/tests -v`：**109 个后端测试全部通过**（新增 3 个 `SessionScopedContinuationTest`）。
+    - `cd frontend && npx.cmd tsc --noEmit`：TypeScript 编译通过。
+    - `cd frontend && npx.cmd vitest run`：**92 个前端测试全部通过**（含 `never leaks the previous session id into the next request (A → B → send)`）。
+    - 契约断言示例：
+      - 前端 `_FakeCodexRuntime` 收到 A→B 切换：A 的 `codex_thread_a` 出现在第一次 SSE response 中，B 的 `codex_thread_b` 出现在第二次，但 B 的续传请求 URL 是 `…/sessions/codex_thread_b/turns/stream`，body 含 `codex_thread_b`，**不含 `codex_thread_a`**。
+      - 后端 `/api/analysis/sessions/{sessionId}/turns/stream`：URL 单独是可信 id，body 的 `sessionId` 与 URL 不一致返回 `400 session_id_mismatch`；同一会话的两次 turn 落库到 `turns[0]` 与 `turns[1]` 两条独立行（`codex_turn_1`、`codex_turn_2`），均满足 `id == codex_turn_id`。
 
 ## 风险或未完成
 

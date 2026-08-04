@@ -67,7 +67,13 @@ const DEFAULT_TOKEN_FLUSH_INTERVAL_MS = 14;
 const DEFAULT_TOKEN_FLUSH_CHARS = 2;
 
 export class BackendAnalysisAgentClient implements AgentClient {
-  private threadId: string | null = null;
+  // The client is session-agnostic: it never remembers a session id
+  // across calls. Every ``send`` is scoped to the ``sessionId`` the
+  // caller passed in (``null`` for the first turn of a brand-new
+  // session, the Codex-issued id for any continuation). The route is
+  // always one of two:
+  //   * ``POST /api/analysis/sessions/turns/stream`` — first turn
+  //   * ``POST /api/analysis/sessions/{sessionId}/turns/stream`` — every turn after
   private abortController: AbortController | null = null;
 
   constructor(private readonly apiBaseUrl: string) {}
@@ -75,7 +81,6 @@ export class BackendAnalysisAgentClient implements AgentClient {
   async *send(input: AgentInput): AsyncIterable<AgentEvent> {
     if (input.kind === "reset") {
       this.cancel();
-      this.threadId = null;
       yield { type: "done" };
       return;
     }
@@ -102,30 +107,26 @@ export class BackendAnalysisAgentClient implements AgentClient {
       timeoutId = null;
     };
     try {
-      const targetThreadId = input.threadId || this.threadId;
-      // The sessionless flow: when starting a brand-new analysis (no
-      // existing thread id) we must NOT pre-allocate a ``waiting_for_question``
-      // row. The single entry point is ``POST /api/analysis/sessions/turns/stream``
-      // which lazily opens a Codex thread and emits ``session/created`` so the
-      // frontend can navigate from ``/analysis/new`` to
-      // ``/analysis/{codex_thread_id}``.
-      const isSessionlessStart = input.kind === "start" && !targetThreadId;
-      const threadTurnUrl = isSessionlessStart
+      const sessionId = input.sessionId;
+      // The sessionless flow is reserved for the very first turn of a
+      // brand-new session. Any later turn must carry an explicit
+      // Codex-issued session id; we never carry state across calls.
+      const isSessionlessStart = sessionId == null;
+      const sessionTurnUrl = isSessionlessStart
         ? `${this.apiBaseUrl}/api/analysis/sessions/turns/stream`
-        : targetThreadId
-        ? `${this.apiBaseUrl}/api/analysis/threads/${encodeURIComponent(targetThreadId)}/turns/stream`
-        : `${this.apiBaseUrl}/api/analysis/threads/turns/stream`;
+        : `${this.apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}/turns/stream`;
       const requestBody: Record<string, unknown> = isSessionlessStart
         ? {
             message: question,
             metadata: { frontend_client: "analysis_task" },
           }
         : {
-            question,
+            sessionId,
+            message: question,
             turn_kind: input.kind,
             metadata: { frontend_client: "analysis_task" },
           };
-      const response = await fetch(threadTurnUrl, {
+      const response = await fetch(sessionTurnUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
@@ -138,23 +139,21 @@ export class BackendAnalysisAgentClient implements AgentClient {
       for await (const backendEvent of readAnalysisSse(response)) {
         refreshTimeout();
         // The first business event on the sessionless flow is
-        // ``session/created`` with the Codex-issued session id; surface
-        // it both as an AgentEvent and as the resolved client thread id.
+        // ``session/created`` with the Codex-issued session id; we
+        // forward it as an AgentEvent so the page can navigate from
+        // ``/analysis/new`` to ``/analysis/{codex_thread_id}``.
         if (backendEvent.type === "session/created") {
-          const sessionId = asString(backendEvent.payload.sessionId) || asString(backendEvent.payload.codexThreadId) || "";
-          if (sessionId) {
-            this.threadId = sessionId;
+          const newSessionId = asString(backendEvent.payload.sessionId) || asString(backendEvent.payload.codexThreadId) || "";
+          if (newSessionId) {
             yield {
               type: "session/created",
-              sessionId,
-              codexThreadId: sessionId,
+              sessionId: newSessionId,
+              codexThreadId: newSessionId,
               codexTurnId: asString(backendEvent.payload.codexTurnId) || undefined,
             };
             continue;
           }
         }
-        const threadId = asString(backendEvent.payload.thread_id) || asString(backendEvent.payload.conversation_id);
-        if (threadId) this.threadId = threadId;
         for (const event of mapBackendEvents([backendEvent], input.kind, streamContext)) {
           for await (const displayEvent of smoothTokenEvent(event)) {
             yield displayEvent;

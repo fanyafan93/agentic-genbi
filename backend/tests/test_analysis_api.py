@@ -28,6 +28,7 @@ class _FakeCodexRuntime:
 
     def __init__(self) -> None:
         self.contexts: list[dict] = []
+        self._invocation = 0
 
     def stream(self, question: str, *, context: dict):
         self.contexts.append(dict(context))
@@ -39,12 +40,15 @@ class _FakeCodexRuntime:
             yield event
 
     def _events(self, context: dict):
+        self._invocation += 1
+        invocation = self._invocation
         codex_thread_id = context.get("codex_thread_id") or "codex_thread_created"
+        codex_turn_id = f"codex_turn_{invocation}"
         # New-session contract: emit the provisioned-thread marker first so
         # ``analysis_threads.id == analysis_threads.codex_thread_id``.
         yield AgentEvent(
             type="genbi/thread/provisioned",
-            turn_id="codex_turn_created",
+            turn_id=codex_turn_id,
             payload={
                 "eventSource": "genbi",
                 "runtime": "openai-codex",
@@ -54,33 +58,33 @@ class _FakeCodexRuntime:
         )
         yield AgentEvent(
             type="genbi/turn/provisioned",
-            turn_id="codex_turn_created",
+            turn_id=codex_turn_id,
             payload={
                 "eventSource": "genbi",
                 "runtime": "openai-codex",
                 "codex_thread_id": codex_thread_id,
-                "codex_turn_id": "codex_turn_created",
+                "codex_turn_id": codex_turn_id,
                 "thread_id": codex_thread_id,
-                "turn_id": "codex_turn_created",
+                "turn_id": codex_turn_id,
             },
         )
         yield AgentEvent(
             type="turn/started",
-            turn_id="codex_turn_created",
+            turn_id=codex_turn_id,
             payload={
                 "eventSource": "codex",
                 "runtime": "openai-codex",
                 "codex_thread_id": codex_thread_id,
-                "codex_turn_id": "codex_turn_created",
+                "codex_turn_id": codex_turn_id,
             },
         )
         yield AgentEvent(
             type="item/agentMessage/delta",
-            turn_id="codex_turn_created",
+            turn_id=codex_turn_id,
             payload={
                 "eventSource": "codex",
                 "codex_thread_id": codex_thread_id,
-                "codex_turn_id": "codex_turn_created",
+                "codex_turn_id": codex_turn_id,
                 "codex_item_id": "codex_item_msg",
                 "codex_item_type": "agentMessage",
                 "delta": "hello",
@@ -88,11 +92,11 @@ class _FakeCodexRuntime:
         )
         yield AgentEvent(
             type="item/completed",
-            turn_id="codex_turn_created",
+            turn_id=codex_turn_id,
             payload={
                 "eventSource": "codex",
                 "codex_thread_id": codex_thread_id,
-                "codex_turn_id": "codex_turn_created",
+                "codex_turn_id": codex_turn_id,
                 "codex_item_id": "codex_item_msg",
                 "codex_item_type": "agentMessage",
                 "content": "Codex answer",
@@ -100,11 +104,11 @@ class _FakeCodexRuntime:
         )
         yield AgentEvent(
             type="turn/completed",
-            turn_id="codex_turn_created",
+            turn_id=codex_turn_id,
             payload={
                 "eventSource": "codex",
                 "codex_thread_id": codex_thread_id,
-                "codex_turn_id": "codex_turn_created",
+                "codex_turn_id": codex_turn_id,
                 "status": "completed",
             },
         )
@@ -285,7 +289,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(thread.status_code, 200)
             self.assertEqual(thread.json()["thread"]["id"], payload["thread_id"])
             self.assertEqual(thread.json()["thread"]["codexThreadId"], "codex_thread_created")
-            self.assertEqual(thread.json()["turns"][0]["codexTurnId"], "codex_turn_created")
+            self.assertEqual(thread.json()["turns"][0]["codexTurnId"], payload["turn_id"])
             self.assertEqual(turn_detail.status_code, 200)
             self.assertEqual(turn_detail.json()["turn"]["id"], payload["turn_id"])
             self.assertNotIn("executionAttempts", turn_detail.json())
@@ -923,7 +927,8 @@ class SessionlessStartTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.json()
             self.assertEqual(payload["thread_id"], "codex_thread_created")
-            self.assertEqual(payload["turn_id"], "codex_turn_created")
+            self.assertTrue(payload["turn_id"].startswith("codex_turn_"))
+            self.assertEqual(payload["turn_id"], "codex_turn_1")
             event_types = [event["type"] for event in payload["events"]]
             self.assertIn("session/created", event_types)
             session_event = next(event for event in payload["events"] if event["type"] == "session/created")
@@ -937,7 +942,7 @@ class SessionlessStartTest(unittest.IsolatedAsyncioTestCase):
             assert thread is not None
             self.assertEqual(thread["thread"]["id"], "codex_thread_created")
             self.assertEqual(thread["thread"]["codexThreadId"], "codex_thread_created")
-            self.assertEqual(thread["turns"][0]["id"], "codex_turn_created")
+            self.assertEqual(thread["turns"][0]["id"], "codex_turn_1")
 
     def test_sessions_turns_stream_emits_session_created_first(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -984,6 +989,96 @@ class SessionlessStartTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(response.status_code, 422)
             self.assertEqual(thread_store.list_threads(product_kind="analysis_task"), [])
+
+
+class SessionScopedContinuationTest(unittest.IsolatedAsyncioTestCase):
+    """Locks the session-scoped continuation turn contract.
+
+    After the first turn has been provisioned, every continuation goes
+    to ``POST /api/analysis/sessions/{sessionId}/turns/stream``. The
+    session id is taken from the URL parameter and never trusted from
+    the body alone; a body field that disagrees with the URL returns
+    ``400 session_id_mismatch``.
+    """
+
+    def test_sessions_id_turns_stream_threads_through_existing_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            # The first turn provisions the thread row and emits the
+            # session/created envelope. The Codex-issued id is
+            # ``codex_thread_created`` per ``_FakeCodexRuntime``.
+            self.assertEqual(thread_store.list_threads(product_kind="analysis_task"), [])
+            first = client.post(
+                "/api/analysis/sessions/turns/stream",
+                json={"message": "analyze channel sales"},
+            )
+            self.assertEqual(first.status_code, 200)
+            self.assertIn("event: session/created", first.text)
+
+            # The continuation turn goes through the session-scoped
+            # endpoint; the URL parameter is the only id the backend
+            # trusts, and the Codex-issued id is echoed back through
+            # the resulting thread row.
+            second = client.post(
+                "/api/analysis/sessions/codex_thread_created/turns/stream",
+                json={"message": "continue", "turn_kind": "message"},
+            )
+
+            self.assertEqual(second.status_code, 200)
+            self.assertIn("event: turn/started", second.text)
+            self.assertIn("event: turn/completed", second.text)
+            thread = thread_store.get_thread("codex_thread_created")
+            assert thread is not None
+            self.assertEqual(thread["thread"]["id"], "codex_thread_created")
+            self.assertEqual(thread["thread"]["codexThreadId"], "codex_thread_created")
+            self.assertEqual(len(thread["turns"]), 2)
+            # The continuation turn also satisfies id == codex_turn_id.
+            self.assertEqual(thread["turns"][1]["id"], "codex_turn_2")
+
+    def test_sessions_id_turns_stream_rejects_mismatched_body_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/analysis/sessions/codex_thread_url/turns/stream",
+                json={"message": "continue", "sessionId": "codex_thread_body", "turn_kind": "message"},
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("session_id_mismatch", response.text)
+            self.assertEqual(thread_store.list_threads(product_kind="analysis_task"), [])
+
+    def test_sessions_id_turns_stream_uses_url_id_when_body_omits_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/analysis/sessions/codex_thread_explicit/turns/stream",
+                json={"message": "follow up", "turn_kind": "message"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            # The URL parameter is the only id the backend trusts; the
+            # thread row is created using the URL session id, not a
+            # codex_turn_created id inferred from the body.
+            thread = thread_store.get_thread("codex_thread_explicit")
+            self.assertIsNotNone(thread)
 
 
 if __name__ == "__main__":

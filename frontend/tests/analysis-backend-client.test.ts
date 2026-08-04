@@ -317,7 +317,7 @@ describe("analysis backend client event mapping", () => {
     })]);
   });
 
-  test("sends the stored thread id on continuation messages", async () => {
+  test("requires an explicit sessionId on continuation messages", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(
         sseEvent({
@@ -357,29 +357,30 @@ describe("analysis backend client event mapping", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    const startEvents = await collect(client.send({ kind: "start", question: "start question" }));
-    const messageEvents = await collect(client.send({ kind: "message", content: "continue question" }));
+    const startEvents = await collect(client.send({ kind: "start", question: "start question", sessionId: null }));
+    const startSessionId = (startEvents.find((event) => event.type === "session/created") as { sessionId: string } | undefined)?.sessionId;
+    expect(startSessionId).toBe("thread_analysis_456");
+    // The second call MUST pass the explicit Codex-issued session id
+    // back in. The agent client does not remember it across calls.
+    const messageEvents = await collect(
+      client.send({ kind: "message", content: "continue question", sessionId: startSessionId! }),
+    );
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const startBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     const messageBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
-    // New-session contract: the very first turn goes through the
-    // sessionless entry point (``POST /api/analysis/sessions/turns/stream``)
-    // with ``message`` instead of ``question``.
+    // First turn: sessionless entry point with ``message``.
     expect(fetchMock.mock.calls[0][0]).toBe("http://backend.test/api/analysis/sessions/turns/stream");
-    expect(fetchMock.mock.calls[1][0]).toBe("http://backend.test/api/analysis/threads/thread_analysis_456/turns/stream");
+    // Every continuation must carry the Codex session id in the URL and
+    // in the body — no client-side memory, no agent-side memory.
+    expect(fetchMock.mock.calls[1][0]).toBe("http://backend.test/api/analysis/sessions/thread_analysis_456/turns/stream");
     expect(startBody.message).toBe("start question");
     expect(startBody.question).toBeUndefined();
     expect(startBody.metadata).toMatchObject({ frontend_client: "analysis_task" });
-    expect(messageBody.conversation_id).toBeUndefined();
+    expect(messageBody.sessionId).toBe("thread_analysis_456");
     expect(messageBody.turn_kind).toBe("message");
-    // The sessionless endpoint resolves the client thread id from the
-    // ``session/created`` event payload.
-    expect(startEvents[0]).toMatchObject({
-      type: "session/created",
-      sessionId: "thread_analysis_456",
-      codexThreadId: "thread_analysis_456",
-    });
+    expect(messageBody.question).toBeUndefined();
+    expect(messageBody.message).toBe("continue question");
     expect(messageEvents[0]).toMatchObject({
       type: "user",
       turnId: "turn_analysis_789",
@@ -434,7 +435,7 @@ describe("analysis backend client event mapping", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    const eventsPromise = collect(client.send({ kind: "start", question: "slow question" }));
+    const eventsPromise = collect(client.send({ kind: "start", question: "slow question", sessionId: null }));
     await vi.advanceTimersByTimeAsync(25);
     const events = await eventsPromise;
 
@@ -444,7 +445,7 @@ describe("analysis backend client event mapping", () => {
     ]);
   });
 
-  test("can send a continuation message to an already opened backend thread", async () => {
+  test("routes a continuation turn to the session-scoped endpoint", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
       sseEvent({
         type: "turn/started",
@@ -459,12 +460,12 @@ describe("analysis backend client event mapping", () => {
     )));
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    await collect(client.send({ kind: "message", content: "follow up", threadId: "thread_existing" }));
+    await collect(client.send({ kind: "message", content: "follow up", sessionId: "thread_existing" }));
 
-    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads/thread_existing/turns/stream");
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions/thread_existing/turns/stream");
   });
 
-  test("starts the first turn inside an existing waiting backend thread", async () => {
+  test("starts the first turn inside an existing session", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
       sseEvent({
         type: "turn/started",
@@ -479,9 +480,103 @@ describe("analysis backend client event mapping", () => {
     )));
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    await collect(client.send({ kind: "start", question: "first question", threadId: "thread_waiting" }));
+    await collect(client.send({ kind: "start", question: "first question", sessionId: "thread_waiting" }));
 
-    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads/thread_waiting/turns/stream");
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions/thread_waiting/turns/stream");
+  });
+
+  test("never leaks the previous session id into the next request (A → B → send)", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(
+        // Open session A via the sessionless entry point.
+        sseEvent({
+          type: "session/created",
+          turn_id: "turn_a",
+          payload: {
+            sessionId: "codex_thread_a",
+            codexThreadId: "codex_thread_a",
+            codexTurnId: "turn_a",
+          },
+        }) + sseEvent({
+          type: "turn/started",
+          turn_id: "turn_a",
+          payload: { conversation_id: "codex_thread_a", question: "open A" },
+        }) + sseEvent({
+          type: "turn/completed",
+          turn_id: "turn_a",
+          payload: {},
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ))
+      .mockResolvedValueOnce(new Response(
+        // Open session B via the sessionless entry point. The page
+        // router swapped to B; we pass ``sessionId: null``.
+        sseEvent({
+          type: "session/created",
+          turn_id: "turn_b",
+          payload: {
+            sessionId: "codex_thread_b",
+            codexThreadId: "codex_thread_b",
+            codexTurnId: "turn_b",
+          },
+        }) + sseEvent({
+          type: "turn/started",
+          turn_id: "turn_b",
+          payload: { conversation_id: "codex_thread_b", question: "open B" },
+        }) + sseEvent({
+          type: "turn/completed",
+          turn_id: "turn_b",
+          payload: {},
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ))
+      .mockResolvedValueOnce(new Response(
+        // Continuation turn on B. The caller is responsible for
+        // passing B's id explicitly. A's id must NOT appear in the
+        // request body or the URL.
+        sseEvent({
+          type: "turn/started",
+          turn_id: "turn_b_2",
+          payload: { conversation_id: "codex_thread_b", question: "continue on B" },
+        }) + sseEvent({
+          type: "turn/completed",
+          turn_id: "turn_b_2",
+          payload: {},
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new BackendAnalysisAgentClient("http://backend.test");
+    // 1. Open A.
+    const eventsA = await collect(client.send({ kind: "start", question: "open A", sessionId: null }));
+    const aSessionId = (eventsA.find((event) => event.type === "session/created") as { sessionId: string } | undefined)?.sessionId;
+    expect(aSessionId).toBe("codex_thread_a");
+    // 2. Open B (the page switched; the agent client never carries state).
+    const eventsB = await collect(client.send({ kind: "start", question: "open B", sessionId: null }));
+    const bSessionId = (eventsB.find((event) => event.type === "session/created") as { sessionId: string } | undefined)?.sessionId;
+    expect(bSessionId).toBe("codex_thread_b");
+    // 3. Send a continuation on B with B's id only.
+    await collect(client.send({ kind: "message", content: "continue on B", sessionId: bSessionId! }));
+
+    const urlA = String(fetchMock.mock.calls[0][0]);
+    const urlB = String(fetchMock.mock.calls[1][0]);
+    const urlBCont = String(fetchMock.mock.calls[2][0]);
+    const bodyA = JSON.stringify(fetchMock.mock.calls[0][1].body);
+    const bodyB = JSON.stringify(fetchMock.mock.calls[1][1].body);
+    const bodyBCont = JSON.stringify(fetchMock.mock.calls[2][1].body);
+
+    // The first two requests are sessionless entry points.
+    expect(urlA).toBe("http://backend.test/api/analysis/sessions/turns/stream");
+    expect(urlB).toBe("http://backend.test/api/analysis/sessions/turns/stream");
+    // The third request must hit B's session-scoped endpoint and never
+    // mention A anywhere on the wire.
+    expect(urlBCont).toBe("http://backend.test/api/analysis/sessions/codex_thread_b/turns/stream");
+    expect(urlBCont).not.toContain("codex_thread_a");
+    expect(bodyA).not.toContain("codex_thread_b");
+    expect(bodyB).not.toContain("codex_thread_a");
+    expect(bodyBCont).not.toContain("codex_thread_a");
+    expect(bodyBCont).toContain("codex_thread_b");
   });
 
   test("loads backend analysis threads for the real sidebar", async () => {
@@ -574,7 +669,7 @@ describe("analysis backend client event mapping", () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(stream, { status: 200 }))));
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    const eventsPromise = collect(client.send({ kind: "start", question: "slow but active" }));
+    const eventsPromise = collect(client.send({ kind: "start", question: "slow but active", sessionId: null }));
     await vi.advanceTimersByTimeAsync(40);
     const events = await eventsPromise;
 

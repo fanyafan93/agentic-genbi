@@ -1,6 +1,13 @@
 ﻿import type { InteractiveReport } from "../types/interactive-report";
 
 export type AgentEventSystemContext = {
+  // ``sessionId`` is the only durable id a frontend has to track a
+  // session. It is the Codex-issued thread id (and equals
+  // ``analysis_threads.id`` and ``analysis_threads.codex_thread_id``).
+  // ``threadId`` is kept for backward compatibility with events that
+  // still surface the legacy field name and is always equal to
+  // ``sessionId`` for new sessions.
+  sessionId?: string;
   threadId?: string;
   turnId?: string;
   itemId?: string;
@@ -23,10 +30,16 @@ export type AgentEvent =
   | ({ type: "session/created"; sessionId: string } & AgentEventSystemContext)
   | ({ type: "done" } & AgentEventSystemContext);
 
+// ``sessionId`` is the only durable id we let the caller pass in. It is
+// ``null`` for the very first message of a brand-new session
+// (sessionless flow, ``POST /api/analysis/sessions/turns``). After the
+// first turn completes it is the Codex-issued thread id and any
+// continuation call must echo the same id explicitly — the agent
+// client must not remember a previous session across calls.
 export type AgentInput =
-  | { kind: "start"; suggestionId?: string; question?: string; threadId?: string | null }
-  | { kind: "message"; content: string; threadId?: string | null }
-  | { kind: "reply"; optionId: string; threadId?: string | null }
+  | { kind: "start"; suggestionId?: string; question?: string; sessionId: string | null }
+  | { kind: "message"; content: string; sessionId: string | null }
+  | { kind: "reply"; optionId: string; sessionId: string | null }
   | { kind: "reset" };
 
 export interface AgentClient {

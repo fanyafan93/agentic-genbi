@@ -143,6 +143,20 @@ def create_app(
         user_id: str | None = None
         metadata: dict[str, Any] = Field(default_factory=dict)
 
+    class AnalysisSessionContinuationBody(BaseModel):
+        """Request body for ``POST /api/analysis/sessions/{sessionId}/turns/stream``.
+
+        The ``sessionId`` is normally taken from the URL path, but the
+        body is allowed to carry it for clients that prefer a single
+        source of truth. If the body field disagrees with the URL the
+        endpoint returns ``400 session_id_mismatch``.
+        """
+        message: str = Field(min_length=1)
+        sessionId: str | None = None
+        turn_kind: str = "message"
+        user_id: str | None = None
+        metadata: dict[str, Any] = Field(default_factory=dict)
+
     class KnowledgeBody(BaseModel):
         title: str = Field(min_length=1)
         question: str = Field(min_length=1)
@@ -368,6 +382,40 @@ def create_app(
             configured_thread_store,
             configured_interactive_report_store,
             turn_request,
+        )
+
+    @app.post("/api/analysis/sessions/{session_id}/turns/stream")
+    def stream_existing_session_turn(session_id: str, body: AnalysisSessionContinuationBody = Body(default_factory=AnalysisSessionContinuationBody)) -> StreamingResponse:
+        """Continuation turn on an existing session.
+
+        ``session_id`` is the Codex-issued id from the initial
+        ``session/created`` event. The route param is the only durable
+        id we use here: we do NOT trust a thread id supplied in the
+        body, and we do NOT carry any prior state. If the body omits
+        ``sessionId`` the URL param is enforced; if the body supplies a
+        conflicting id the request is rejected.
+        """
+        if not session_id.strip():
+            raise HTTPException(status_code=400, detail="session_id_required")
+        body_session_id = _string_or_none(body.sessionId)
+        if body_session_id and body_session_id != session_id:
+            raise HTTPException(
+                status_code=400,
+                detail="session_id_mismatch: body sessionId does not match URL session_id",
+            )
+        request = AnalysisTurnRequest(
+            question=body.message.strip(),
+            thread_id=session_id,
+            user_id=body.user_id,
+            turn_kind=str(body.turn_kind or "message").strip().lower() or "message",  # type: ignore[arg-type]
+            metadata={**(body.metadata or {}), "domain": "analysis_task", "thread_id": session_id, "codex_thread_id": session_id},
+        )
+        return _stream_analysis_turn_response(
+            configured_analysis_runtime,
+            configured_thread_store,
+            configured_interactive_report_store,
+            request,
+            thread_id=session_id,
         )
 
     @app.post("/api/analysis/threads/turns")

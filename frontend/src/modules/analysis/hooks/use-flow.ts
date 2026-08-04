@@ -43,23 +43,35 @@ export type FlowCodexLineage = {
 
 export const STEP_INITIAL = ["识别业务口径", "查询可用数据表", "生成并校验 SQL", "整理图表与结论"];
 
-export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
+export function useFlow(
+  sessionId: string | null,
+  initial: FlowNode[] = [],
+  options: { onSessionCreated?: (sessionId: string) => void } = {},
+) {
   const agent = useMemo(() => getAgentClient(), []);
   const initialSignature = useMemo(() => flowNodeSignature(initial), [initial]);
-  const [turnId, setTurnId] = useState<string | null>(threadKey);
-  const [threadId, setThreadId] = useState<string | null>(threadKey);
+  // The frontend keeps exactly one durable id per session: ``sessionId``,
+  // which the page router owns. We do NOT keep a parallel ``threadId`` —
+  // the agent client only learns the id from the ``session/created``
+  // event payload, and continuation turns are always issued against the
+  // route's id. ``currentTurnId`` is the only per-turn field we keep and
+  // it is set strictly from ``turn/started`` events.
+  const [currentTurnId, setCurrentTurnId] = useState<string | null>(null);
   const [nodes, setNodes] = useState<FlowNode[]>(initial);
   const [artifacts, setArtifacts] = useState<ArtifactFolder[]>([]);
   const [reportArtifact, setReportArtifact] = useState<InteractiveReport | null>(null);
   const [codexLineage, setCodexLineage] = useState<FlowCodexLineage>({});
   const [running, setRunning] = useState(false);
   const runningRef = useRef(false);
+  const onSessionCreatedRef = useRef(options.onSessionCreated);
+  useEffect(() => {
+    onSessionCreatedRef.current = options.onSessionCreated;
+  }, [options.onSessionCreated]);
 
   useEffect(() => {
     if (runningRef.current) return;
     cancelled = false;
-    setTurnId(threadKey);
-    setThreadId(threadKey);
+    setCurrentTurnId(null);
     setNodes([...initial]);
     setArtifacts([]);
     setReportArtifact(null);
@@ -68,29 +80,36 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
     runningRef.current = false;
     agent.cancel?.();
     return () => { cancelled = true; };
-  }, [agent, threadKey, initialSignature]);
+  }, [agent, sessionId, initialSignature]);
 
   const applyEvent = useCallback((event: AgentEvent, currentNodes: FlowNode[]): FlowNode[] => {
-    if (event.turnId) setTurnId(event.turnId);
-    if (event.threadId) setThreadId(event.threadId);
     updateCodexLineage(event, setCodexLineage);
 
     if (event.type === "session/created") {
-      // Informational event from the sessionless flow. Adopt the
-      // Codex-issued id as the active thread id immediately so that
-      // downstream turn events resolve to the same session.
+      // Informational event from the sessionless flow. Surface the
+      // Codex-issued id to the page via the ``onSessionCreated``
+      // callback so the router can switch the URL from
+      // ``/analysis/new`` to ``/analysis/{codex_thread_id}``. We also
+      // adopt it as the lineage anchor so subsequent events that carry
+      // ``codex_thread_id`` resolve to the same session.
       const codexSessionId = event.codexThreadId || event.sessionId;
       if (codexSessionId) {
-        setThreadId(codexSessionId);
         setCodexLineage((lineage) => ({
           ...lineage,
           sourceCodexThreadId: codexSessionId,
         }));
+        onSessionCreatedRef.current?.(codexSessionId);
       }
       return currentNodes;
     }
 
     if (event.type === "user") {
+      // The backend maps ``turn/started`` to a ``user`` event carrying
+      // the same ``turnId`` in the system context. This is the only
+      // place we cache ``currentTurnId``: continuations echo the same
+      // id and we never accept a turn id from a later event.
+      if (event.turnId) setCurrentTurnId(event.turnId);
+
       const userNode: FlowNode = { id: event.nodeId, role: "user", content: cleanDisplayText(event.content) };
       const pendingIndex = currentNodes.findIndex((node) => node.id === "user-pending");
       const next = pendingIndex >= 0
@@ -347,10 +366,11 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
     let snapshot: FlowNode[] = withOptimisticTurn(nodes, input);
     if (snapshot !== nodes) setNodes(snapshot);
     try {
-      const inputWithThread = input.kind === "reset" || input.threadId
-        ? input
-        : { ...input, threadId };
-      for await (const event of agent.send(inputWithThread)) {
+      // The agent client is session-agnostic. The caller must pass an
+      // explicit ``sessionId`` (``null`` for the very first turn of a
+      // brand-new session, the page-routed id otherwise). We never
+      // backfill a previous id from internal state.
+      for await (const event of agent.send(input)) {
         if (cancelled) break;
         snapshot = applyEvent(event, snapshot);
       }
@@ -358,18 +378,18 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
       setRunning(false);
       runningRef.current = false;
     }
-  }, [agent, applyEvent, nodes, threadId]);
+  }, [agent, applyEvent, nodes]);
 
   const start = useCallback(
-    (question?: string, threadId?: string | null) => consume({ kind: "start", question, threadId }),
+    (question?: string, sessionId: string | null = null) => consume({ kind: "start", question, sessionId }),
     [consume],
   );
   const send = useCallback(
-    (content: string, threadId?: string | null) => consume({ kind: "message", content, threadId }),
+    (content: string, sessionId: string | null = null) => consume({ kind: "message", content, sessionId }),
     [consume],
   );
   const reply = useCallback(
-    (optionId: string, threadId?: string | null) => consume({ kind: "reply", optionId, threadId }),
+    (optionId: string, sessionId: string | null = null) => consume({ kind: "reply", optionId, sessionId }),
     [consume],
   );
   const stop = useCallback(() => {
@@ -381,8 +401,7 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
   }, [agent]);
 
   return {
-    turnId,
-    threadId,
+    currentTurnId,
     nodes,
     artifacts,
     reportArtifact,

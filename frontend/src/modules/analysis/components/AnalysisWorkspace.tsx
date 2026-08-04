@@ -158,38 +158,37 @@ export function AnalysisWorkspace() {
   const hadLocalRunningFlowRef = useRef(false);
   const reportLoadRequestRef = useRef(0);
   const reportOwnerId = session?.user?.id ?? "local-user";
-  // Cancels the legacy ``waiting_for_question`` flow. When the user clicks
-  // "New analysis" we open a blank page locally; the first message is
-  // what triggers ``POST /api/analysis/sessions/turns`` and creates the
-  // backend thread/turn rows. ``localNewSession`` is the local-only
-  // session id used as a placeholder before the Codex-issued id arrives.
+  // The page router owns the only durable id we recognise. When the user
+  // is in "new" mode ``currentAnalysisTaskId`` is null; after the
+  // sessionless first turn is provisioned by the backend the
+  // ``onSessionCreated`` callback below adopts the Codex-issued id.
   const [localNewSession, setLocalNewSession] = useState(false);
   const localNewSessionRef = useRef<string | null>(null);
-  const flow = useFlow(currentAnalysisTaskId, initialFlowMessages);
-  useEffect(() => {
-    if (!localNewSession) return;
-    if (currentAnalysisTaskId) {
-      // The sessionless flow has been provisioned: navigate the URL so
-      // the page reflects ``/analysis/{codex_thread_id}`` and the user
-      // can refresh the page or share the link.
-      const sessionId = currentAnalysisTaskId;
-      if (typeof window !== "undefined" && window.location.pathname !== `/analysis/${sessionId}`) {
-        window.history.pushState({ analysisSessionId: sessionId }, "", `/analysis/${sessionId}`);
+  const flow = useFlow(currentAnalysisTaskId, initialFlowMessages, {
+    onSessionCreated: (sessionId) => {
+      if (sessionId && sessionId !== currentAnalysisTaskId) {
+        setCurrentAnalysisTaskId(sessionId);
+        if (typeof window !== "undefined" && window.location.pathname !== `/analysis/${sessionId}`) {
+          window.history.pushState({ analysisSessionId: sessionId }, "", `/analysis/${sessionId}`);
+        }
+        setLocalNewSession(false);
+        localNewSessionRef.current = null;
       }
-      setLocalNewSession(false);
-      localNewSessionRef.current = null;
-    }
-  }, [currentAnalysisTaskId, localNewSession]);
-  // Sessionless flow: when the agent client resolves a Codex thread id
-  // (it shows up in ``flow.threadId`` after the ``session/created``
-  // event), promote it to ``currentAnalysisTaskId`` so the rest of the
-  // workspace binds to the new session.
+    },
+  });
   useEffect(() => {
     if (!localNewSession) return;
-    if (!flow.threadId) return;
-    if (currentAnalysisTaskId === flow.threadId) return;
-    setCurrentAnalysisTaskId(flow.threadId);
-  }, [flow.threadId, currentAnalysisTaskId, localNewSession]);
+    if (!currentAnalysisTaskId) return;
+    // The sessionless flow has been provisioned: navigate the URL so
+    // the page reflects ``/analysis/{codex_thread_id}`` and the user
+    // can refresh the page or share the link.
+    const sessionId = currentAnalysisTaskId;
+    if (typeof window !== "undefined" && window.location.pathname !== `/analysis/${sessionId}`) {
+      window.history.pushState({ analysisSessionId: sessionId }, "", `/analysis/${sessionId}`);
+    }
+    setLocalNewSession(false);
+    localNewSessionRef.current = null;
+  }, [currentAnalysisTaskId, localNewSession]);
   useEffect(() => {
     let cancelled = false;
     if (!shouldUseBackendInteractiveReports()) {
@@ -226,27 +225,26 @@ export function AnalysisWorkspace() {
     return () => { cancelled = true; };
   }, []);
   useEffect(() => {
-    if (!flow.threadId || !selectedAnalysisTask) return;
-    const threadId = flow.threadId;
-    if (currentAnalysisTaskId && threadId !== currentAnalysisTaskId) return;
+    if (!currentAnalysisTaskId || !selectedAnalysisTask) return;
+    const sessionId = currentAnalysisTaskId;
     const hadLocalRunningFlow = hadLocalRunningFlowRef.current;
     if (flow.running) hadLocalRunningFlowRef.current = true;
     setAnalysisThreads((threads) => {
       const now = new Date().toISOString();
-      const existing = threads.find((thread) => thread.id === threadId);
+      const existing = threads.find((thread) => thread.id === sessionId);
       const shouldSyncThread = flow.running || hadLocalRunningFlow;
       if (!shouldSyncThread) return threads;
       const nextThread: BackendAnalysisThreadSummary = {
-        ...(existing ?? { id: threadId, createdAt: now }),
+        ...(existing ?? { id: sessionId, createdAt: now }),
         title: selectedAnalysisTask,
         latestQuestion: selectedAnalysisTask,
         updatedAt: now,
         status: flow.running ? "running" : "completed",
       };
-      return [nextThread, ...threads.filter((thread) => thread.id !== threadId)];
+      return [nextThread, ...threads.filter((thread) => thread.id !== sessionId)];
     });
     if (!flow.running && hadLocalRunningFlow) hadLocalRunningFlowRef.current = false;
-  }, [currentAnalysisTaskId, flow.threadId, flow.running, selectedAnalysisTask]);
+  }, [currentAnalysisTaskId, flow.running, selectedAnalysisTask]);
   const isAdmin = true;
   const isNewAnalysisTask = selectedAnalysisTask === null;
   const openedReport = savedReports.find((saved) => saved.report.id === openedReportId);
@@ -254,7 +252,7 @@ export function AnalysisWorkspace() {
     || (currentAnalysisTaskId ? openedReportThreadId === currentAnalysisTaskId : false);
   const flowReportBelongsToCurrentTask = Boolean(
     flow.reportArtifact
-    && (flow.reportArtifact.source.threadId === currentAnalysisTaskId || flow.reportArtifact.source.threadId === flow.threadId),
+    && (flow.reportArtifact.source.threadId === currentAnalysisTaskId),
   );
   const currentPanelReport = flowReportBelongsToCurrentTask ? flow.reportArtifact : openedReportBelongsToCurrentTask && openedReport ? openedReport.report : undefined;
   const currentPanelVersion = openedReportBelongsToCurrentTask && openedReport ? openedReport.version : undefined;
@@ -404,27 +402,24 @@ export function AnalysisWorkspace() {
   }
 
   async function handleSendMessage(content: string) {
+    // The session id is the only durable id we send to the agent
+    // client. When the user is in "new" mode (no session yet) it is
+    // ``null`` and the backend runs the sessionless first-turn flow.
+    // Once a Codex-issued id has been adopted we always pass that same
+    // id explicitly, including for continuations.
     if (isNewAnalysisTask || localNewSession) {
-      // Sessionless first-turn: no waiting_for_question row, no preflight
-      // create. The backend will lazily start a Codex thread and emit
-      // ``session/created`` with the Codex-issued id, which the
-      // BackendAnalysisAgentClient forwards as a ``session/created``
-      // AgentEvent. ``flow.start(content, null)`` tells the agent client
-      // to use the sessionless endpoint; the resolved session id will
-      // arrive via the next event and the ``useEffect`` above will route
-      // the page to ``/analysis/{codex_thread_id}``.
       setSelectedAnalysisTask(taskTitleFromQuestion(content));
       setInitialFlowMessages([]);
       setOpenedReportId(null);
       setOpenedReportThreadId(null);
       setMobilePane("analysisTask");
-      void flow.start(content, null);
+      void flow.start(content, currentAnalysisTaskId);
     } else {
       if (isWaitingForFirstQuestion) {
         markCurrentThreadAsStarted(content);
         void flow.start(content, currentAnalysisTaskId);
       } else {
-        flow.send(content);
+        flow.send(content, currentAnalysisTaskId);
       }
     }
   }
@@ -446,7 +441,7 @@ export function AnalysisWorkspace() {
     setOpenedReportThreadId(null);
     setMobilePane("analysisTask");
     setLocalNewSession(true);
-    void flow.start(question, null);
+    void flow.start(question, currentAnalysisTaskId);
   }
 
   async function handleSaveReport(saved: SavedInteractiveReport): Promise<SavedInteractiveReport> {

@@ -169,9 +169,11 @@ describe("analysis task product language", () => {
 
   test("keeps the lower-level interaction event generic for shared threads", () => {
     expect(agentTypesSource).not.toContain('"conversation-init"');
-    expect(agentTypesSource).toContain("threadId?: string | null");
-    expect(agentTypesSource).not.toContain("conversationId?: string | null");
+    expect(agentTypesSource).toContain("sessionId?: string");
+    expect(agentTypesSource).toContain("threadId?: string");
     expect(agentTypesSource).toContain("turnId?: string");
+    expect(agentTypesSource).toContain("sessionId: string | null");
+    expect(agentTypesSource).not.toContain("conversationId?: string | null");
     expect(agentTypesSource).not.toContain('"analysis-task-init"');
   });
 
@@ -200,9 +202,9 @@ describe("analysis task product language", () => {
     expect(agentClientIndexSource).toContain("shouldUseBackendAnalysisClient");
     expect(backendClientSource).toContain("NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME");
     expect(backendClientSource).toContain("NEXT_PUBLIC_GENBI_API_BASE_URL");
-    expect(backendClientSource).toContain("createBackendAnalysisThread");
     expect(backendClientSource).toContain("/api/analysis/threads");
-    expect(backendClientSource).toContain("/api/analysis/threads/turns/stream");
+    expect(backendClientSource).toContain("/api/analysis/sessions/turns/stream");
+    expect(backendClientSource).toContain("/api/analysis/sessions/");
     expect(backendClientSource).toContain("/turns/stream");
     expect(backendClientSource).toContain("item/completed");
     expect(backendClientSource).toContain("item/agentMessage/delta");
@@ -212,16 +214,18 @@ describe("analysis task product language", () => {
     expect(backendClientSource).toContain("event.payload.thread_id");
     expect(backendClientSource).toContain("listBackendAnalysisThreads");
     expect(backendClientSource).toContain("deleteBackendAnalysisThread");
-    expect(backendClientSource).toContain("/api/analysis/sessions/turns/stream");
     expect(backendClientSource).toContain("session/created");
     // New-session contract: "click new" never pre-allocates a backend
     // thread; the first message drives the sessionless flow.
-    expect(workspaceSource).toContain("flow.start(content, null)");
+    expect(workspaceSource).toContain("flow.start(content, currentAnalysisTaskId)");
     expect(workspaceSource).toContain("setLocalNewSession(true)");
     expect(workspaceSource).toContain("window.history.pushState");
     expect(workspaceSource).toContain("/analysis/new");
+    expect(workspaceSource).toContain("useFlow(currentAnalysisTaskId");
+    expect(workspaceSource).toContain("onSessionCreated");
     expect(workspaceSource).not.toContain("createWaitingThread");
     expect(workspaceSource).not.toContain("createBackendAnalysisThread");
+    expect(workspaceSource).not.toContain("private threadId");
     expect(workspaceSource).toContain("const isWaitingForFirstQuestion = Boolean(");
     expect(workspaceSource).toContain('currentAnalysisThread?.status === "waiting_for_question"');
     expect(workspaceSource).toContain("markCurrentThreadAsStarted");
@@ -381,12 +385,13 @@ describe("analysis task product language", () => {
 
   test("keeps the history list stable when opening an existing task", () => {
     expect(workspaceSource).toContain("}, []);");
-    expect(workspaceSource).toContain("if (!flow.threadId || !selectedAnalysisTask) return;");
-    expect(workspaceSource).toContain("threadId !== currentAnalysisTaskId");
+    expect(workspaceSource).toContain("if (!currentAnalysisTaskId || !selectedAnalysisTask) return;");
+    expect(workspaceSource).toContain("const sessionId = currentAnalysisTaskId;");
     expect(workspaceSource).toContain("当前任务正在分析，停止回答后再切换任务。");
     expect(workspaceSource).toContain("const shouldSyncThread = flow.running || hadLocalRunningFlow;");
     expect(workspaceSource).toContain("if (!shouldSyncThread) return threads;");
     expect(workspaceSource).not.toContain("setCurrentAnalysisTaskId(threadId);");
     expect(workspaceSource).not.toContain("}, [flow.threadId]);");
+    expect(workspaceSource).not.toContain("flow.threadId");
   });
 });
