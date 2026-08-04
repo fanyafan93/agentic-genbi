@@ -345,9 +345,18 @@ export function useFlow(threadKey: string | null, initial: FlowNode[] = []) {
     }
   }, [agent, applyEvent, nodes, threadId]);
 
-  const start = useCallback((question?: string) => consume({ kind: "start", question }), [consume]);
-  const send = useCallback((content: string) => consume({ kind: "message", content }), [consume]);
-  const reply = useCallback((optionId: string) => consume({ kind: "reply", optionId }), [consume]);
+  const start = useCallback(
+    (question?: string, threadId?: string | null) => consume({ kind: "start", question, threadId }),
+    [consume],
+  );
+  const send = useCallback(
+    (content: string, threadId?: string | null) => consume({ kind: "message", content, threadId }),
+    [consume],
+  );
+  const reply = useCallback(
+    (optionId: string, threadId?: string | null) => consume({ kind: "reply", optionId, threadId }),
+    [consume],
+  );
   const stop = useCallback(() => {
     if (!runningRef.current) return;
     agent.cancel?.();
