@@ -24,6 +24,7 @@ from backend.business_semantics.knowledge_store import KnowledgeStore
 
 class _FakeCodexRuntime:
     runtime_name = "openai-codex"
+    enabled = True
 
     def __init__(self) -> None:
         self.contexts: list[dict] = []
@@ -39,6 +40,30 @@ class _FakeCodexRuntime:
 
     def _events(self, context: dict):
         codex_thread_id = context.get("codex_thread_id") or "codex_thread_created"
+        # New-session contract: emit the provisioned-thread marker first so
+        # ``analysis_threads.id == analysis_threads.codex_thread_id``.
+        yield AgentEvent(
+            type="genbi/thread/provisioned",
+            turn_id="codex_turn_created",
+            payload={
+                "eventSource": "genbi",
+                "runtime": "openai-codex",
+                "codex_thread_id": codex_thread_id,
+                "thread_id": codex_thread_id,
+            },
+        )
+        yield AgentEvent(
+            type="genbi/turn/provisioned",
+            turn_id="codex_turn_created",
+            payload={
+                "eventSource": "genbi",
+                "runtime": "openai-codex",
+                "codex_thread_id": codex_thread_id,
+                "codex_turn_id": "codex_turn_created",
+                "thread_id": codex_thread_id,
+                "turn_id": "codex_turn_created",
+            },
+        )
         yield AgentEvent(
             type="turn/started",
             turn_id="codex_turn_created",
@@ -87,17 +112,41 @@ class _FakeCodexRuntime:
 
 class _AsyncOnlyRuntime:
     runtime_name = "openai-codex"
+    enabled = True
 
     def stream(self, question: str, *, context: dict):
         raise RuntimeError("sync stream must not be used from the create path")
 
     async def async_stream(self, question: str, *, context: dict):
+        codex_thread_id = context.get("codex_thread_id") or "codex_thread_async"
+        yield AgentEvent(
+            type="genbi/thread/provisioned",
+            turn_id="codex_turn_async",
+            payload={
+                "eventSource": "genbi",
+                "runtime": "openai-codex",
+                "codex_thread_id": codex_thread_id,
+                "thread_id": codex_thread_id,
+            },
+        )
+        yield AgentEvent(
+            type="genbi/turn/provisioned",
+            turn_id="codex_turn_async",
+            payload={
+                "eventSource": "genbi",
+                "runtime": "openai-codex",
+                "codex_thread_id": codex_thread_id,
+                "codex_turn_id": "codex_turn_async",
+                "thread_id": codex_thread_id,
+                "turn_id": "codex_turn_async",
+            },
+        )
         yield AgentEvent(
             type="turn/completed",
             turn_id="codex_turn_async",
             payload={
                 "eventSource": "codex",
-                "codex_thread_id": context.get("codex_thread_id") or "codex_thread_async",
+                "codex_thread_id": codex_thread_id,
                 "codex_turn_id": "codex_turn_async",
                 "status": "completed",
             },
@@ -106,14 +155,38 @@ class _AsyncOnlyRuntime:
 
 class _MissingTerminalRuntime:
     runtime_name = "openai-codex"
+    enabled = True
 
     async def async_stream(self, question: str, *, context: dict):
+        codex_thread_id = "codex_thread_missing_terminal"
+        yield AgentEvent(
+            type="genbi/thread/provisioned",
+            turn_id="codex_turn_missing_terminal",
+            payload={
+                "eventSource": "genbi",
+                "runtime": "openai-codex",
+                "codex_thread_id": codex_thread_id,
+                "thread_id": codex_thread_id,
+            },
+        )
+        yield AgentEvent(
+            type="genbi/turn/provisioned",
+            turn_id="codex_turn_missing_terminal",
+            payload={
+                "eventSource": "genbi",
+                "runtime": "openai-codex",
+                "codex_thread_id": codex_thread_id,
+                "codex_turn_id": "codex_turn_missing_terminal",
+                "thread_id": codex_thread_id,
+                "turn_id": "codex_turn_missing_terminal",
+            },
+        )
         yield AgentEvent(
             type="turn/started",
             turn_id="codex_turn_missing_terminal",
             payload={
                 "eventSource": "codex",
-                "codex_thread_id": "codex_thread_missing_terminal",
+                "codex_thread_id": codex_thread_id,
                 "codex_turn_id": "codex_turn_missing_terminal",
             },
         )
@@ -122,7 +195,7 @@ class _MissingTerminalRuntime:
             turn_id="codex_turn_missing_terminal",
             payload={
                 "eventSource": "codex",
-                "codex_thread_id": "codex_thread_missing_terminal",
+                "codex_thread_id": codex_thread_id,
                 "codex_turn_id": "codex_turn_missing_terminal",
                 "codex_item_id": "codex_item_tool",
                 "codex_item_type": "mcpToolCall",
@@ -197,11 +270,14 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             payload = response.json()
 
             self.assertEqual(response.status_code, 200)
-            self.assertTrue(payload["thread_id"].startswith("analysis_thread_"))
+            self.assertTrue(payload["thread_id"].startswith("codex_thread_"))
             self.assertNotIn("conversation_id", payload)
-            self.assertTrue(payload["turn_id"].startswith("analysis_turn_"))
-            self.assertEqual([event["type"] for event in payload["events"]], ["turn/started", "item/agentMessage/delta", "item/completed", "turn/completed"])
-            self.assertTrue(all(event["payload"]["eventSource"] == "codex" for event in payload["events"]))
+            self.assertTrue(payload["turn_id"].startswith("codex_turn_"))
+            self.assertEqual(
+                [event["type"] for event in payload["events"]],
+                ["genbi/thread/provisioned", "genbi/turn/provisioned", "turn/started", "item/agentMessage/delta", "item/completed", "turn/completed"],
+            )
+            self.assertTrue(all(event["payload"]["eventSource"] in ("codex", "genbi") for event in payload["events"]))
 
             thread = client.get(f"/api/analysis/threads/{payload['thread_id']}")
             turn_detail = client.get(f"/api/analysis/threads/{payload['thread_id']}/turns/{payload['turn_id']}")
@@ -249,7 +325,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
                 status="completed",
             )
             thread_store.create_thread(
-                thread_id="analysis_thread_real",
+                thread_id="codex_thread_real",
                 product_kind="analysis_task",
                 title="real thread",
                 user_id=None,
@@ -259,22 +335,33 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             listed = client.get("/api/analysis/threads")
 
             self.assertEqual(listed.status_code, 200)
-            self.assertEqual([item["id"] for item in listed.json()["threads"]], ["analysis_thread_real"])
+            self.assertEqual([item["id"] for item in listed.json()["threads"]], ["codex_thread_real"])
 
     def test_create_waiting_analysis_thread_without_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            # New-session contract: ``thread_id`` must equal ``codex_thread_id``,
+            # which the client must supply as preflight metadata when the
+            # runtime is disabled (no live Codex available).
+            preflight_id = "codex_thread_waiting"
             app = create_app(
                 analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
                 thread_store=thread_store,
             )
             client = TestClient(app)
 
-            created = client.post("/api/analysis/threads", json={"title": "New Analysis", "user_id": "user_1"})
+            created = client.post(
+                "/api/analysis/threads",
+                json={
+                    "title": "New Analysis",
+                    "user_id": "user_1",
+                    "metadata": {"codex_thread_id": preflight_id},
+                },
+            )
             detail = client.get(f"/api/analysis/threads/{created.json()['thread']['id']}")
 
             self.assertEqual(created.status_code, 200)
-            self.assertTrue(created.json()["thread"]["id"].startswith("analysis_thread_"))
+            self.assertEqual(created.json()["thread"]["id"], preflight_id)
             self.assertEqual(created.json()["thread"]["status"], "waiting_for_question")
             self.assertIsNone(created.json()["thread"]["latestQuestion"])
             self.assertEqual(detail.json()["turns"], [])
@@ -282,14 +369,16 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
     def test_create_waiting_analysis_thread_reuses_existing_empty_thread(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            preflight_id = "codex_thread_reuse"
             app = create_app(
                 analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
                 thread_store=thread_store,
             )
             client = TestClient(app)
 
-            first = client.post("/api/analysis/threads", json={"title": "New Analysis", "user_id": "user_1"})
-            second = client.post("/api/analysis/threads", json={"title": "New Analysis", "user_id": "user_1"})
+            body = {"title": "New Analysis", "user_id": "user_1", "metadata": {"codex_thread_id": preflight_id}}
+            first = client.post("/api/analysis/threads", json=body)
+            second = client.post("/api/analysis/threads", json=body)
 
             self.assertEqual(first.status_code, 200)
             self.assertEqual(second.status_code, 200)
@@ -368,12 +457,12 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
                 thread_store,
                 InteractiveReportStore(Path(temp_dir) / "interactive-reports.json"),
                 body,
-                thread_id="thread_async_create",
+                thread_id="codex_thread_async_create",
             )
 
-            self.assertEqual(payload["thread_id"], "thread_async_create")
-            self.assertEqual(payload["events"][0]["type"], "turn/completed")
-            self.assertEqual(thread_store.get_thread("thread_async_create")["thread"]["codexThreadId"], "codex_thread_async")  # type: ignore[index]
+            self.assertEqual(payload["thread_id"], "codex_thread_async_create")
+            self.assertEqual(payload["events"][0]["type"], "genbi/thread/provisioned")
+            self.assertEqual(thread_store.get_thread("codex_thread_async_create")["thread"]["codexThreadId"], "codex_thread_async")  # type: ignore[index]
 
     def test_enrich_analysis_event_adds_question_to_user_message_items(self) -> None:
         event = AgentEvent(
@@ -444,33 +533,42 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
     def test_interrupted_terminal_event_persists_interrupted_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            # New-session contract: ``thread_id == codex_thread_id`` and
+            # ``turn_id == codex_turn_id`` for new analysis writes.
+            thread_store.create_thread(
+                thread_id="codex_thread_cancelled",
+                product_kind="analysis_task",
+                title="interrupted",
+                user_id=None,
+                codex_thread_id="codex_thread_cancelled",
+            )
             events = [
                 AgentEvent(
                     type="turn/started",
-                    turn_id="analysis_turn_cancelled",
+                    turn_id="codex_turn_cancelled",
                     payload={
-                        "thread_id": "analysis_thread_cancelled",
-                        "turn_id": "analysis_turn_cancelled",
+                        "thread_id": "codex_thread_cancelled",
+                        "turn_id": "codex_turn_cancelled",
                         "codex_thread_id": "codex_thread_cancelled",
                         "codex_turn_id": "codex_turn_cancelled",
                     },
                 ),
                 analysis_api._interrupted_terminal_event(
-                    thread_id="analysis_thread_cancelled",
-                    turn_id="analysis_turn_cancelled",
+                    thread_id="codex_thread_cancelled",
+                    turn_id="codex_turn_cancelled",
                 ),
             ]
 
             thread_store.save_turn(
-                thread_id="analysis_thread_cancelled",
-                turn_id="analysis_turn_cancelled",
+                thread_id="codex_thread_cancelled",
+                turn_id="codex_turn_cancelled",
                 question="cancelled stream",
                 input_kind="start",
                 product_kind="analysis_task",
                 user_id=None,
                 events=events,
             )
-            detail = thread_store.get_thread("analysis_thread_cancelled")
+            detail = thread_store.get_thread("codex_thread_cancelled")
 
             self.assertEqual(detail["thread"]["status"], "interrupted")
             self.assertEqual(detail["turns"][0]["status"], "interrupted")
@@ -479,12 +577,14 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
         app = create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled())
         client = TestClient(app)
 
+        # New-session contract: when the runtime is disabled and the caller
+        # did not supply a Codex-issued ``codex_thread_id`` in metadata, the
+        # endpoint refuses to fabricate a GenBI thread id; it returns 503
+        # so the caller knows it must reroute through a Codex-aware flow.
         response = client.post("/api/analysis/threads/turns", json={"question": "analyze channel sales"})
-        payload = response.json()
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["events"], [event for event in payload["events"] if event["type"] == "turn/completed"])
-        self.assertEqual(payload["events"][0]["payload"]["error"], "codex_runtime_not_configured")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("codex_runtime_not_configured", response.text)
 
     def test_genbi_report_tool_call_emits_interactive_report_artifact(self) -> None:
         event = AgentEvent(
@@ -670,6 +770,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            preflight_id = "codex_thread_from_report"
             app = create_app(
                 analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
                 interactive_report_store=report_store,
@@ -696,13 +797,17 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             saved = client.post("/api/analysis/reports", json=report_payload)
             created = client.post(
                 "/api/analysis/reports/report_for_analysis/analysis-thread",
-                json={"userId": "owner_1", "title": "Channel Daily New Analysis"},
+                json={
+                    "userId": "owner_1",
+                    "title": "Channel Daily New Analysis",
+                    "metadata": {"codex_thread_id": preflight_id},
+                },
             )
 
             self.assertEqual(saved.status_code, 200)
             self.assertEqual(created.status_code, 200)
             payload = created.json()
-            self.assertTrue(payload["thread"]["id"].startswith("analysis_thread_"))
+            self.assertEqual(payload["thread"]["id"], preflight_id)
             self.assertEqual(payload["thread"]["title"], "Channel Daily New Analysis")
             self.assertEqual(payload["thread"]["status"], "waiting_for_question")
             self.assertIsNone(payload["thread"]["latestQuestion"])
@@ -718,6 +823,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            preflight_id = "codex_thread_reuse_from_report"
             app = create_app(
                 analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
                 interactive_report_store=report_store,
@@ -741,14 +847,13 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             }
 
             saved = client.post("/api/analysis/reports", json=report_payload)
-            first = client.post(
-                "/api/analysis/reports/report_reuse/analysis-thread",
-                json={"userId": "owner_1", "title": "Report Reuse New"},
-            )
-            second = client.post(
-                "/api/analysis/reports/report_reuse/analysis-thread",
-                json={"userId": "owner_1", "title": "Report Reuse New"},
-            )
+            body = {
+                "userId": "owner_1",
+                "title": "Report Reuse New",
+                "metadata": {"codex_thread_id": preflight_id},
+            }
+            first = client.post("/api/analysis/reports/report_reuse/analysis-thread", json=body)
+            second = client.post("/api/analysis/reports/report_reuse/analysis-thread", json=body)
 
             self.assertEqual(saved.status_code, 200)
             self.assertEqual(first.status_code, 200)

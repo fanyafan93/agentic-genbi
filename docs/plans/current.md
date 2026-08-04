@@ -27,6 +27,19 @@
 - `thread.id == thread.codex_thread_id`
 - `turn.id == turn.codex_turn_id`
 
+**实现要点（已落地）：**
+
+- `CodexSdkAnalysisRuntime._iter_streamed` 在拿到 Codex thread 之后立即 yield `genbi/thread/provisioned`（payload 含 `codex_thread_id`），收到 turn 之后立即 yield `genbi/turn/provisioned`（payload 含 `codex_turn_id`）。两条事件的 `eventSource=genbi`，前置出现于任何 Codex 业务事件之前。
+- `ThreadStore.create_thread(thread_id, codex_thread_id=…)` 强制要求 `thread_id == codex_thread_id`，违反时抛 `ValueError(thread_id must equal codex_thread_id)`。
+- `ThreadStore.create_turn_only(thread_id, turn_id, codex_turn_id=…)` 同样强制 `turn_id == codex_turn_id`，并要求 thread 行已存在。
+- `ThreadStore.save_turn` 增加防御性契约 guard：若事件流中出现与 `turn_id` 不一致的 `codex_turn_id` 直接抛错。
+- `analysis_api._astream_runtime_events` 捕获 `genbi/thread/provisioned` / `genbi/turn/provisioned`：
+  - thread 事件 → 直接 `ThreadStore.create_thread(thread_id=codex_thread_id, ...)`。
+  - turn 事件 → `ThreadStore.create_turn_only(turn_id=codex_turn_id, ...)`。
+  - 末尾 `save_turn` 时 `turn_id` 已是 Codex 原始 id，保证 `analysis_turns.id == analysis_turns.codex_turn_id`。
+- 同步端点 `POST /api/analysis/threads` 与 `POST /api/analysis/reports/{id}/analysis-thread` 通过 `_provision_codex_thread_id` 在 FastAPI event loop 中驱动一次 `async_stream("")`，遇到 `genbi/thread/provisioned` 即返回 `codex_thread_id`；调用方立刻用该 id 落库。
+- `disabled` 运行时若未在 metadata 中预置 `codex_thread_id`，同步端点返回 `503 codex_runtime_not_configured`（绝不擅自生成本地 id）。
+
 ## 当前分支
 
 - 分支：`Agentic-GenBI`
@@ -56,6 +69,15 @@
 - 真实接口验证：`GET http://127.0.0.1:8000/api/business-semantics/finereport/reports` 返回 692 条。
 - 真实接口验证：`POST http://127.0.0.1:8000/api/analysis/tasks` 从 404 修复为 200。
 - 服务重启验证：backend health ready，frontend ready。
+- **新会话 ID 契约（本轮）：**
+  - `python -m unittest discover -s backend/tests -v`：**103 个后端测试全部通过**（含 `test_analysis_api`、`test_thread_store`、`test_codex_sdk_runner`、`test_principal_isolation`、`test_genbi_report_mcp_server`、`test_minimax_codex_adapter`、`test_thread_store`、`test_finereport_reports`、`test_env_config`、`test_analysis_task_endpoint`、`test_artifact_strict_save_contract`、`test_health_endpoint`、`test_text_encoding_contract`）。
+  - 契约断言示例（`backend/tests/test_analysis_api.py::test_analysis_thread_turn_api_streams_codex_events_and_persists_thread`）：
+    - `payload["thread_id"]` 以 `codex_thread_` 开头
+    - `payload["turn_id"]` 以 `codex_turn_` 开头
+    - 事件序列前置 `genbi/thread/provisioned` 与 `genbi/turn/provisioned`
+    - `GET /api/analysis/threads/{id}` 返回的 `thread.codexThreadId == thread.id`、`turns[0].codexTurnId == turns[0].id`
+  - `disabled` 运行时端点契约：`POST /api/analysis/threads/turns` 未传 `metadata.codex_thread_id` 时返回 `503 codex_runtime_not_configured`（不再偷偷生成本地 `analysis_thread_xxx`）。
+  - `python -m py_compile backend/api/analysis_api.py backend/harness/codex_sdk_runner.py backend/harness/thread_store.py`：语法检查通过。
 
 ## 风险或未完成
 
@@ -63,9 +85,13 @@
 - PowerShell 控制台直接显示 API 表格时中文可能乱码；Python 读取同一接口验证中文正常。
 - `.pytest_cache` 目录权限警告仍存在，不影响本轮测试结果。
 - PowerShell profile 中 `starship` 未安装的提示仍存在，不影响服务。
+- 新会话 ID 契约生效后，旧数据库里的 `analysis_thread_xxx` / `analysis_turn_xxx` 行会与新 `codex_thread_xxx` / `codex_turn_xxx` 行并存；旧行**不在本切片迁移**，仅供历史查询与回放。
+- 生产 Codex 启动延迟会同步反映到 `POST /api/analysis/threads` 的响应耗时；当前 mock 测试通过，但真实 Codex CLI 的首次启动可能更慢。
+- `disabled` runtime 单元测试需要 fixture 在 metadata 里显式预置 `codex_thread_id`；缺少该字段即返回 503，提醒调用方走真实 Codex 路径。
 
 ## 下一步
 
 1. 提交本轮恢复修复。
 2. 用非强推方式合并远端分叉历史并推送 `Agentic-GenBI`。
 3. 推送后在浏览器复测：新建分析任务、报表画像列表、报表画像使用情况页签。
+4. （新会话 ID 契约）在真实 Codex 环境下端到端验证 `thread.id == thread.codex_thread_id`、`turn.id == turn.codex_turn_id`。

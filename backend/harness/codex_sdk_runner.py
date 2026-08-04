@@ -147,14 +147,46 @@ class CodexSdkAnalysisRuntime:
             return
         runner_context = _normalize_context(context, default_cwd=self.cwd)
         codex_thread_id: str | None = runner_context.codex_thread_id
+        provisioned_turn_id = _context_turn_id(context)
 
         try:
             async with self._make_async_codex() as codex:
                 await self._login_if_configured(codex)
                 thread = await self._open_thread(codex, runner_context)
                 codex_thread_id = str(getattr(thread, "id", codex_thread_id or ""))
+                # Emit the provisioned-thread marker BEFORE any other event so
+                # GenBI Runtime can persist the analysis thread with the
+                # Codex-issued id as its primary key. ``id == codex_thread_id``
+                # is the new-session contract.
+                yield AgentEvent(
+                    type="genbi/thread/provisioned",
+                    turn_id=provisioned_turn_id,
+                    payload={
+                        "eventSource": "genbi",
+                        "runtime": "openai-codex",
+                        "codex_thread_id": codex_thread_id,
+                        "thread_id": codex_thread_id,
+                    },
+                )
 
                 turn = await thread.turn(question, **self._turn_kwargs(runner_context))
+                provisioned_codex_turn_id = _string_or_none(getattr(turn, "id", None))
+                if provisioned_codex_turn_id:
+                    # Surface the Codex-issued turn id BEFORE the first turn
+                    # notification so downstream code can use it as the turn
+                    # primary key (``analysis_turns.id == codex_turn_id``).
+                    yield AgentEvent(
+                        type="genbi/turn/provisioned",
+                        turn_id=provisioned_codex_turn_id,
+                        payload={
+                            "eventSource": "genbi",
+                            "runtime": "openai-codex",
+                            "codex_thread_id": codex_thread_id,
+                            "codex_turn_id": provisioned_codex_turn_id,
+                            "thread_id": codex_thread_id,
+                            "turn_id": provisioned_codex_turn_id,
+                        },
+                    )
                 async for notification in turn.stream():
                     event = self._notification_to_event(notification, codex_thread_id=codex_thread_id)
                     if event:

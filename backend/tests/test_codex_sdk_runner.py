@@ -41,12 +41,13 @@ class _FakeThread:
         self.id = thread_id
 
     async def turn(self, question: str, **kwargs):
-        return _FakeTurn(question, kwargs)
+        return _FakeTurn("codex_turn_1", kwargs)
 
 
 class _FakeTurn:
-    def __init__(self, question: str, kwargs: dict) -> None:
-        self.question = question
+    def __init__(self, turn_id: str, kwargs: dict) -> None:
+        self.id = turn_id
+        self.question = kwargs.get("question", "")
         self.kwargs = kwargs
 
     async def stream(self):
@@ -97,8 +98,14 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         item_events = [event for event in events if event.type == "item/completed"]
         delta_events = [event for event in events if event.type == "item/agentMessage/delta"]
 
-        self.assertEqual(event_types, ["turn/started", "item/agentMessage/delta", "item/completed", "turn/completed"])
-        self.assertTrue(all(event.payload.get("eventSource") == "codex" for event in events))
+        self.assertEqual(event_types, ["genbi/thread/provisioned", "genbi/turn/provisioned", "turn/started", "item/agentMessage/delta", "item/completed", "turn/completed"])
+        # ``genbi/thread/provisioned`` and ``genbi/turn/provisioned`` are emitted
+        # by GenBI runtime (eventSource=genbi) to surface the Codex-issued
+        # ids before any Codex-originated event. The remaining events are
+        # Codex-originated.
+        event_sources = {event.payload.get("eventSource") for event in events}
+        self.assertIn("codex", event_sources)
+        self.assertIn("genbi", event_sources)
         self.assertEqual(delta_events[0].payload["delta"], "part 1")
         self.assertEqual(item_events[0].payload["content"], "complete text")
         self.assertEqual(item_events[0].payload["codex_item_id"], "codex_item_msg")

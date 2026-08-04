@@ -83,14 +83,24 @@ class ThreadStore:
         user_id: str | None,
         status: str = "waiting_for_question",
         metadata: dict[str, Any] | None = None,
+        codex_thread_id: str | None = None,
     ) -> dict[str, Any]:
         if not thread_id.strip():
             raise ValueError("thread_id is required.")
+        # New-session contract: ``analysis_threads.id == analysis_threads.codex_thread_id``.
+        # ``thread_id`` is the Codex-issued id; the legacy ``codex_thread_id`` column is
+        # kept for compatibility and must mirror ``id`` exactly.
+        effective_codex_thread_id = (codex_thread_id or thread_id or "").strip() or None
+        if effective_codex_thread_id and effective_codex_thread_id != thread_id:
+            raise ValueError(
+                "thread_id must equal codex_thread_id (new-session contract); "
+                f"got thread_id={thread_id!r}, codex_thread_id={effective_codex_thread_id!r}."
+            )
         state = self._read_state()
         existing_thread = state["threads"].get(thread_id)
         now = _now()
         merged_metadata = {**(existing_thread.metadata if existing_thread else {}), **(metadata or {})}
-        codex_thread_id = _thread_codex_thread_id(merged_metadata, existing_thread=existing_thread)
+        codex_thread_id = effective_codex_thread_id or _thread_codex_thread_id(merged_metadata, existing_thread=existing_thread)
         if codex_thread_id:
             merged_metadata["codex_thread_id"] = codex_thread_id
         thread = ThreadRecord(
@@ -115,6 +125,68 @@ class ThreadStore:
             "codexItemProjections": [],
         }
 
+    def create_turn_only(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        codex_turn_id: str | None = None,
+    ) -> TurnRecord:
+        """Persist a turn row using the Codex-issued ``turn_id``.
+
+        Used by the analysis pipeline after it observes
+        ``genbi/turn/provisioned``. Enforces the new-session contract:
+        ``analysis_turns.id == analysis_turns.codex_turn_id``.
+        """
+        if not thread_id.strip():
+            raise ValueError("thread_id is required.")
+        if not turn_id.strip():
+            raise ValueError("turn_id is required.")
+        effective_codex_turn_id = (codex_turn_id or turn_id or "").strip() or None
+        if effective_codex_turn_id and effective_codex_turn_id != turn_id:
+            raise ValueError(
+                "turn_id must equal codex_turn_id (new-session contract); "
+                f"got turn_id={turn_id!r}, codex_turn_id={effective_codex_turn_id!r}."
+            )
+        state = self._read_state()
+        thread = state["threads"].get(thread_id)
+        if thread is None:
+            raise ValueError(f"thread not found: {thread_id}")
+        existing_turn = state["turns"].get(turn_id)
+        now = _now()
+        merged_metadata = {**(existing_turn.metadata if existing_turn else {}), "codex_turn_id": effective_codex_turn_id}
+        if thread.codexThreadId:
+            merged_metadata.setdefault("codex_thread_id", thread.codexThreadId)
+        turn = TurnRecord(
+            id=turn_id,
+            threadId=thread_id,
+            inputKind="start",
+            question="",
+            status="provisioned",
+            createdAt=existing_turn.createdAt if existing_turn else now,
+            updatedAt=now,
+            metadata=merged_metadata,
+            codexThreadId=thread.codexThreadId,
+            codexTurnId=effective_codex_turn_id,
+        )
+        state["turns"][turn_id] = turn
+        # Re-write the thread with a refreshed updatedAt so list views see the new turn.
+        state["threads"][thread_id] = ThreadRecord(
+            id=thread.id,
+            productKind=thread.productKind,
+            title=thread.title,
+            userId=thread.userId,
+            status=thread.status,
+            createdAt=thread.createdAt,
+            updatedAt=now,
+            metadata=dict(thread.metadata or {}),
+            tenantId=thread.tenantId,
+            workspaceId=thread.workspaceId,
+            codexThreadId=thread.codexThreadId,
+        )
+        self._write_state(state)
+        return turn
+
     def save_turn(
         self,
         *,
@@ -134,6 +206,15 @@ class ThreadStore:
         state = self._read_state()
         existing_thread = state["threads"].get(thread_id)
         existing_turn = state["turns"].get(turn_id)
+        # Defensive contract guard: refuse to persist a turn whose ``id``
+        # does not match the Codex-issued ``codex_turn_id``. New sessions
+        # must satisfy ``analysis_turns.id == analysis_turns.codex_turn_id``.
+        effective_codex_turn_id = _latest_payload_value(events, "codex_turn_id") or _string_or_none((metadata or {}).get("codex_turn_id"))
+        if effective_codex_turn_id and effective_codex_turn_id != turn_id:
+            raise ValueError(
+                "turn_id must equal codex_turn_id (new-session contract); "
+                f"got turn_id={turn_id!r}, codex_turn_id={effective_codex_turn_id!r}."
+            )
         started_at = events[0].created_at if events else None
         completed_at = events[-1].created_at if events else started_at
         status = _turn_status(events)

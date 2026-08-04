@@ -2,6 +2,7 @@
 import asyncio
 import os
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -128,6 +129,7 @@ def create_app(
     class ReportAnalysisThreadBody(BaseModel):
         userId: str | None = None
         title: str | None = None
+        metadata: dict[str, Any] = Field(default_factory=dict)
 
     class KnowledgeBody(BaseModel):
         title: str = Field(min_length=1)
@@ -261,7 +263,7 @@ def create_app(
         return {"threads": [_with_latest_thread_question(configured_thread_store, item) for item in threads]}
 
     @app.post("/api/analysis/threads")
-    def create_waiting_analysis_thread(body: AnalysisThreadBody = Body(...)) -> dict[str, Any]:
+    async def create_waiting_analysis_thread(body: AnalysisThreadBody = Body(...)) -> dict[str, Any]:
         title = str(body.title or "新分析").strip() or "新分析"
         existing = _find_waiting_analysis_thread(
             configured_thread_store,
@@ -271,14 +273,18 @@ def create_app(
         )
         if existing:
             return {"thread": _with_latest_thread_question(configured_thread_store, existing)}
-        thread_id = _new_analysis_thread_id()
+        thread_id = await _provision_codex_thread_id(
+            analysis_runtime=configured_analysis_runtime,
+            body=body,
+        )
         thread = configured_thread_store.create_thread(
             thread_id=thread_id,
             product_kind="analysis_task",
             title=title,
             user_id=body.user_id,
             status="waiting_for_question",
-            metadata={**body.metadata, "domain": "analysis_task", "thread_id": thread_id},
+            codex_thread_id=thread_id,
+            metadata={**body.metadata, "domain": "analysis_task", "thread_id": thread_id, "codex_thread_id": thread_id},
         )
         return {"thread": _with_latest_thread_question(configured_thread_store, thread["thread"])}
 
@@ -297,13 +303,23 @@ def create_app(
 
     @app.post("/api/analysis/threads/turns")
     async def create_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
-        thread_id = body.thread_id or body.conversation_id or _new_analysis_thread_id()
+        try:
+            thread_id = body.thread_id or body.conversation_id or await _provision_codex_thread_id(
+                analysis_runtime=configured_analysis_runtime,
+                body=body,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return await _create_analysis_turn_payload(configured_analysis_runtime, configured_thread_store, configured_interactive_report_store, body, thread_id=thread_id)
 
     @app.post("/api/analysis/threads/turns/stream")
     def stream_new_analysis_thread_turn(body: AnalysisTurnBody = Body(...)) -> StreamingResponse:
-        thread_id = body.thread_id or body.conversation_id or _new_analysis_thread_id()
-        return _stream_analysis_turn_response(configured_analysis_runtime, configured_thread_store, configured_interactive_report_store, body, thread_id=thread_id)
+        # The actual Codex-issued thread id is observed in the first
+        # ``genbi/thread/provisioned`` event. Until then we use the caller-
+        # supplied thread id (which equals the Codex thread id once Codex is
+        # running) or fall back to a Codex-preflight probe.
+        initial_thread_id = body.thread_id or body.conversation_id
+        return _stream_analysis_turn_response(configured_analysis_runtime, configured_thread_store, configured_interactive_report_store, body, thread_id=initial_thread_id)
 
     @app.post("/api/analysis/threads/{thread_id}/turns")
     async def create_existing_analysis_thread_turn(thread_id: str, body: AnalysisTurnBody = Body(...)) -> dict[str, Any]:
@@ -467,7 +483,7 @@ def create_app(
         return {"report": asdict_report(report), "version": asdict(version)}
 
     @app.post("/api/analysis/reports/{report_id}/analysis-thread")
-    def create_analysis_thread_from_report(report_id: str, body: ReportAnalysisThreadBody = Body(default_factory=ReportAnalysisThreadBody)) -> dict[str, Any]:
+    async def create_analysis_thread_from_report(report_id: str, body: ReportAnalysisThreadBody = Body(default_factory=ReportAnalysisThreadBody)) -> dict[str, Any]:
         result = configured_interactive_report_store.get_report(report_id)
         if not result:
             raise HTTPException(status_code=404, detail="interactive_report_not_found")
@@ -488,15 +504,21 @@ def create_app(
                     "version": asdict(version),
                 },
             }
-        thread_id = _new_analysis_thread_id()
+        thread_id = await _provision_codex_thread_id(
+            analysis_runtime=configured_analysis_runtime,
+            body=body,
+        )
         thread = configured_thread_store.create_thread(
             thread_id=thread_id,
             product_kind="analysis_task",
             title=title,
             user_id=body.userId,
             status="waiting_for_question",
+            codex_thread_id=thread_id,
             metadata={
                 "domain": "analysis_task",
+                "thread_id": thread_id,
+                "codex_thread_id": thread_id,
                 "source_report_id": report.id,
                 "initial_report_id": report.id,
                 "initial_report_version": version.version,
@@ -681,18 +703,29 @@ async def _create_analysis_turn_payload(
     thread_id: str,
 ) -> dict[str, Any]:
     request = _analysis_request_from_body(body, thread_id=thread_id)
-    turn_id = _new_analysis_turn_id()
-    events = [
-        event
-        async for event in _astream_runtime_events(
-            analysis_runtime,
-            thread_store,
-            interactive_report_store,
-            request,
-            thread_id=thread_id,
-            turn_id=turn_id,
+    # ``turn_id`` and ``thread_id`` are assigned dynamically from the
+    # ``genbi/thread/provisioned`` / ``genbi/turn/provisioned`` events emitted
+    # by the Codex runtime (see ``codex_sdk_runner._iter_streamed``). The
+    # new-session contract forbids allocating them locally: ``analysis_turns.id``
+    # must equal the Codex-issued ``codex_turn_id``.
+    turn_id = ""
+    events: list[AgentEvent] = []
+    async for event in _astream_runtime_events(
+        analysis_runtime,
+        thread_store,
+        interactive_report_store,
+        request,
+        thread_id=thread_id,
+        turn_id=turn_id,
+    ):
+        if not turn_id and event.type == "genbi/turn/provisioned":
+            turn_id = _string_or_none(event.payload.get("codex_turn_id")) or _string_or_none(event.payload.get("turn_id")) or ""
+        events.append(event)
+    if not turn_id:
+        raise RuntimeError(
+            "codex_runtime_did_not_emit_turn_id: cannot persist turn without Codex-issued turn id."
         )
-    ]
+    request = _analysis_request_from_body(body, thread_id=thread_id)
     _save_analysis_turn(thread_store, request, thread_id=thread_id, turn_id=turn_id, events=events)
     return {
         "thread_id": thread_id,
@@ -721,21 +754,58 @@ def _stream_analysis_turn_response(
     from fastapi.responses import StreamingResponse
 
     request = _analysis_request_from_body(body, thread_id=thread_id)
-    turn_id = _new_analysis_turn_id()
 
     async def event_stream() -> Any:
         events: list[AgentEvent] = []
+        resolved_turn_id = ""
+        resolved_thread_id = thread_id
         try:
-            async for event in _astream_runtime_events(analysis_runtime, thread_store, interactive_report_store, request, thread_id=thread_id, turn_id=turn_id):
+            async for event in _astream_runtime_events(
+                analysis_runtime,
+                thread_store,
+                interactive_report_store,
+                request,
+                thread_id=thread_id,
+                turn_id=resolved_turn_id,
+            ):
+                if not resolved_thread_id and event.type == "genbi/thread/provisioned":
+                    resolved_thread_id = (
+                        _string_or_none(event.payload.get("codex_thread_id"))
+                        or _string_or_none(event.payload.get("thread_id"))
+                        or ""
+                    )
+                if not resolved_turn_id and event.type == "genbi/turn/provisioned":
+                    resolved_turn_id = (
+                        _string_or_none(event.payload.get("codex_turn_id"))
+                        or _string_or_none(event.payload.get("turn_id"))
+                        or ""
+                    )
                 events.append(event)
                 yield event.to_sse()
         except asyncio.CancelledError:
             if not _has_terminal_turn_event(events):
-                events.append(_interrupted_terminal_event(thread_id=thread_id, turn_id=turn_id))
+                fallback_turn_id = resolved_turn_id or thread_id
+                events.append(_interrupted_terminal_event(thread_id=thread_id, turn_id=fallback_turn_id))
             raise
         finally:
-            if events:
-                _save_analysis_turn(thread_store, request, thread_id=thread_id, turn_id=turn_id, events=events)
+            if events and resolved_turn_id:
+                # Lazy-persist the thread row using the Codex-issued id so
+                # the stream endpoint also satisfies
+                # ``analysis_threads.id == analysis_threads.codex_thread_id``.
+                if resolved_thread_id:
+                    try:
+                        thread_store.create_thread(
+                            thread_id=resolved_thread_id,
+                            product_kind="analysis_task",
+                            title=request.question.strip()[:32] or None,
+                            user_id=request.user_id,
+                            status="running",
+                            codex_thread_id=resolved_thread_id,
+                            metadata={**(request.metadata or {}), "domain": "analysis_task", "thread_id": resolved_thread_id, "codex_thread_id": resolved_thread_id},
+                        )
+                    except ValueError:
+                        pass
+                _save_analysis_turn(thread_store, request, thread_id=resolved_thread_id, turn_id=resolved_turn_id, events=events)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -750,11 +820,42 @@ async def _astream_runtime_events(
     turn_id: str,
 ) -> Any:
     saw_terminal_event = False
+    effective_thread_id = thread_id
     async for event in analysis_runtime.async_stream(
         request.question.strip(),
         context=_runtime_context(thread_store, request, thread_id=thread_id, turn_id=turn_id),
     ):
-        enriched = _enrich_analysis_event(event, thread_id=thread_id, turn_id=turn_id, question=request.question.strip())
+        # Persist the analysis thread the first time we observe Codex's
+        # thread id (so ``analysis_threads.id == analysis_threads.codex_thread_id``).
+        if not effective_thread_id and event.type == "genbi/thread/provisioned":
+            effective_thread_id = (
+                _string_or_none(event.payload.get("codex_thread_id"))
+                or _string_or_none(event.payload.get("thread_id"))
+                or ""
+            )
+            thread_id = effective_thread_id
+        # Persist the turn row as soon as Codex tells us the turn id (so
+        # ``analysis_turns.id == analysis_turns.codex_turn_id``).
+        if (
+            effective_thread_id
+            and event.type == "genbi/turn/provisioned"
+        ):
+            provisioned_turn_id = (
+                _string_or_none(event.payload.get("codex_turn_id"))
+                or _string_or_none(event.payload.get("turn_id"))
+                or ""
+            )
+            if provisioned_turn_id:
+                try:
+                    thread_store.create_turn_only(
+                        thread_id=effective_thread_id,
+                        turn_id=provisioned_turn_id,
+                        codex_turn_id=provisioned_turn_id,
+                    )
+                except ValueError:
+                    # Idempotent re-entry: row already exists.
+                    pass
+        enriched = _enrich_analysis_event(event, thread_id=effective_thread_id, turn_id=turn_id, question=request.question.strip())
         if enriched.type == "turn/completed":
             saw_terminal_event = True
         yield enriched
@@ -958,12 +1059,77 @@ def _analysis_request_from_body(body: Any, *, thread_id: str) -> AnalysisTurnReq
     )
 
 
-def _new_analysis_thread_id() -> str:
-    return f"analysis_thread_{uuid4().hex[:12]}"
+async def _provision_codex_thread_id(
+    *,
+    analysis_runtime: CodexSdkAnalysisRuntime,
+    body: Any,
+) -> str:
+    """Open a Codex thread and return the Codex-issued thread id.
+
+    Synchronous endpoints (POST ``/api/analysis/threads``,
+    ``/api/analysis/reports/{id}/analysis-thread``) need a ``thread_id``
+    before they can persist anything, but the new-session contract
+    forbids allocating one locally: ``analysis_threads.id`` must equal
+    ``analysis_threads.codex_thread_id``. This helper opens a Codex
+    thread and returns its id, persisting nothing itself; the caller is
+    expected to immediately call ``ThreadStore.create_thread`` with the
+    returned id.
+
+    The caller may pre-supply a ``codex_thread_id`` via
+    ``body.metadata["codex_thread_id"]`` (for example, when the frontend
+    is restoring a previously-used Codex thread). That short-circuits the
+    preflight call.
+
+    When the runtime is disabled (``CodexSdkAnalysisRuntime.disabled()``)
+    or the caller passes an explicit ``codex_thread_id``, the helper
+    returns that id without contacting Codex.
+    """
+    metadata = dict(getattr(body, "metadata", None) or {})
+    preflight = _string_or_none(metadata.get("codex_thread_id")) or _string_or_none(getattr(body, "thread_id", None)) or _string_or_none(getattr(body, "conversation_id", None))
+    if preflight:
+        return preflight
+    if not getattr(analysis_runtime, "enabled", False):
+        # No Codex available: fall back to a caller-supplied id (must be
+        # provided in metadata) so unit tests and dev workflows can still
+        # exercise the contract path.
+        raise RuntimeError(
+            "codex_runtime_not_configured: provide codex_thread_id in "
+            "request metadata so the GenBI thread can be provisioned."
+        )
+    from backend.harness.codex_sdk_runner import CodexSdkRunnerContext  # noqa: WPS433
+
+    context = CodexSdkRunnerContext(
+        genbi_thread_id=None,
+        genbi_turn_id=None,
+        codex_thread_id=None,
+        cwd=str(Path.cwd()),
+    )
+    # Re-use the runtime's internal preflight by running an empty stream
+    # that we break out of as soon as we observe ``genbi/thread/provisioned``.
+    async for event in analysis_runtime.async_stream(
+        "",
+        context={
+            "genbi_thread_id": None,
+            "genbi_turn_id": None,
+            "codex_thread_id": None,
+            "cwd": str(Path.cwd()),
+        },
+    ):
+        if event.type == "genbi/thread/provisioned":
+            codex_thread_id = _string_or_none(event.payload.get("codex_thread_id"))
+            if codex_thread_id:
+                return codex_thread_id
+        # Stop after the thread is provisioned (do not start a turn).
+        if event.type == "genbi/thread/provisioned":
+            break
+    raise RuntimeError("codex_runtime_did_not_emit_thread_id")
 
 
-def _new_analysis_turn_id() -> str:
-    return f"analysis_turn_{uuid4().hex[:12]}"
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def build_default_analysis_runtime() -> CodexSdkAnalysisRuntime:
