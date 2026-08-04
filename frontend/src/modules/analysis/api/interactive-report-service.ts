@@ -6,6 +6,29 @@ export type SavedInteractiveReport = {
   savedAt: string;
 };
 
+export type SharedInteractiveReport = SavedInteractiveReport & {
+  permission: "view" | "view_and_reuse";
+  sharedAt: string;
+  sharedByReportOwnerId: string;
+};
+
+export type ReportCenter = {
+  mine: SavedInteractiveReport[];
+  sharedWithMe: SharedInteractiveReport[];
+};
+
+export type ReportAnalysisThread = {
+  thread: {
+    id: string;
+    title?: string | null;
+    status?: string | null;
+    createdAt?: string | null;
+    updatedAt?: string | null;
+    latestQuestion?: string | null;
+  };
+  saved: SavedInteractiveReport;
+};
+
 type BackendReportSummary = {
   id: string;
   title: string;
@@ -47,6 +70,17 @@ type BackendReportDetailResponse = {
   version: BackendReportVersion;
 };
 
+type BackendReportCenterResponse = {
+  mine: Array<{ report: BackendReportSummary }>;
+  sharedWithMe: Array<{
+    reportId: string;
+    recipientUserId: string;
+    permission: "view" | "view_and_reuse";
+    createdAt: string;
+    report: BackendReportSummary;
+  }>;
+};
+
 const DEFAULT_REPORT_OWNER_ID = "local-user";
 
 export function shouldUseBackendInteractiveReports(): boolean {
@@ -86,6 +120,70 @@ export async function listInteractiveReportsFromBackend(ownerId = DEFAULT_REPORT
   const response = await fetchInteractiveReport(`/api/analysis/reports?owner_id=${encodeURIComponent(ownerId)}`);
   const payload = await readJson<{ reports: BackendReportSummary[] }>(response);
   return Promise.all(payload.reports.map((report) => getInteractiveReportFromBackend(report.id)));
+}
+
+export async function listReportCenterFromBackend(userId = DEFAULT_REPORT_OWNER_ID): Promise<ReportCenter> {
+  const response = await fetchInteractiveReport(`/api/analysis/report-center?user_id=${encodeURIComponent(userId)}`);
+  const payload = await readJson<BackendReportCenterResponse>(response);
+  const mine = await Promise.all(payload.mine.map((item) => getInteractiveReportFromBackend(item.report.id)));
+  const sharedWithMe = await Promise.all(payload.sharedWithMe.map(async (item) => ({
+    ...await getInteractiveReportFromBackend(item.report.id),
+    permission: item.permission,
+    sharedAt: item.createdAt,
+    sharedByReportOwnerId: item.report.ownerId,
+  })));
+  return { mine, sharedWithMe };
+}
+
+export async function renameInteractiveReportInBackend(
+  reportId: string,
+  title: string,
+  ownerId = DEFAULT_REPORT_OWNER_ID,
+): Promise<void> {
+  await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ownerId, title }),
+  });
+}
+
+export async function shareInteractiveReportToBackend(
+  reportId: string,
+  recipientUserId: string,
+  permission: "view" | "view_and_reuse",
+  ownerId = DEFAULT_REPORT_OWNER_ID,
+): Promise<void> {
+  await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}/shares`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ownerId, recipientUserId, permission }),
+  });
+}
+
+export async function deleteInteractiveReportFromBackend(
+  reportId: string,
+  ownerId = DEFAULT_REPORT_OWNER_ID,
+): Promise<void> {
+  await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}?owner_id=${encodeURIComponent(ownerId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function createAnalysisThreadFromReportBackend(
+  reportId: string,
+  title?: string,
+  userId = DEFAULT_REPORT_OWNER_ID,
+): Promise<ReportAnalysisThread> {
+  const response = await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}/analysis-thread`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId, title }),
+  });
+  const payload = await readJson<{ thread: ReportAnalysisThread["thread"]; report: BackendReportDetailResponse }>(response);
+  return {
+    thread: payload.thread,
+    saved: toSavedInteractiveReport(payload.report),
+  };
 }
 
 export async function listInteractiveReportsByThreadFromBackend(threadId: string): Promise<SavedInteractiveReport[]> {

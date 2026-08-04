@@ -20,6 +20,25 @@ afterEach(() => {
 });
 
 describe("analysis flow streaming", () => {
+  test("hydrates existing thread nodes when history loads after selecting a task", async () => {
+    const historyNodes: FlowNode[] = [
+      { id: "user-turn-1", role: "user", content: "历史问题" },
+      { id: "agent-turn-1", role: "agent", content: "历史回答", mode: "replace", activity: [] },
+    ];
+    const { result, rerender } = renderHook(
+      ({ threadKey, initial }: { threadKey: string; initial: FlowNode[] }) => useFlow(threadKey, initial),
+      { initialProps: { threadKey: "analysis_thread_1", initial: EMPTY_FLOW } },
+    );
+
+    expect(result.current.nodes).toEqual([]);
+
+    rerender({ threadKey: "analysis_thread_1", initial: historyNodes });
+
+    await waitFor(() => {
+      expect(result.current.nodes).toEqual(historyNodes);
+    });
+  });
+
   test("keeps the user message before the thinking placeholder", async () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
       yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };
@@ -34,6 +53,11 @@ describe("analysis flow streaming", () => {
 
     await waitFor(() => {
       expect(result.current.nodes.map((node) => node.id)).toEqual(["user-1", "agent-pending"]);
+      expect(result.current.nodes[1]).toMatchObject({
+        role: "agent",
+        content: "",
+        thinking: true,
+      });
     });
   });
 
@@ -95,7 +119,7 @@ describe("analysis flow streaming", () => {
     });
   });
 
-  test("shows thinking while Codex is in a reasoning item", async () => {
+  test("does not archive reasoning as a visible message once answer content exists", async () => {
     mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
       yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };
       yield { type: "tokens", nodeId: "agent-1", text: "先确认数据范围。", codexItemId: "msg-1" };
@@ -113,10 +137,58 @@ describe("analysis flow streaming", () => {
       expect(result.current.nodes).toHaveLength(2);
       expect(result.current.nodes[1]).toMatchObject({
         role: "agent",
-        content: "思考中...",
-        activity: [
-          { kind: "message", itemId: "msg-1", content: "先确认数据范围。" },
-        ],
+        content: "先确认数据范围。",
+        thinking: false,
+        activity: [],
+      });
+    });
+  });
+
+  test("shows reasoning as a transient placeholder before answer content arrives", async () => {
+    mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
+      yield { type: "user", nodeId: "user-1", content: "分析渠道销售", turnId: "turn-1", threadId: "thread-1" };
+      yield { type: "thinking", nodeId: "agent-1", codexItemId: "reasoning-1" };
+      yield { type: "tokens", nodeId: "agent-1", text: "开始分析。", codexItemId: "msg-1" };
+      yield { type: "done" };
+    });
+
+    const { result } = renderHook(() => useFlow(null, EMPTY_FLOW));
+
+    act(() => {
+      void result.current.start("分析渠道销售");
+    });
+
+    await waitFor(() => {
+      expect(result.current.nodes).toHaveLength(2);
+      expect(result.current.nodes[1]).toMatchObject({
+        role: "agent",
+        content: "开始分析。",
+        thinking: false,
+        activity: [],
+      });
+    });
+  });
+
+  test("keeps assistant text intact and only hides the separate thinking state", async () => {
+    mockSend.mockImplementation(async function* (_input: AgentInput): AsyncIterable<AgentEvent> {
+      yield { type: "user", nodeId: "user-1", content: "早上好", turnId: "turn-1", threadId: "thread-1" };
+      yield { type: "thinking", nodeId: "agent-1", codexItemId: "reasoning-1" };
+      yield { type: "tokens", nodeId: "agent-1", text: "思考中...早上好！今天有什么需要我帮忙的吗？", codexItemId: "msg-1" };
+      yield { type: "done" };
+    });
+
+    const { result } = renderHook(() => useFlow(null, EMPTY_FLOW));
+
+    act(() => {
+      void result.current.start("早上好");
+    });
+
+    await waitFor(() => {
+      expect(result.current.nodes).toHaveLength(2);
+      expect(result.current.nodes[1]).toMatchObject({
+        role: "agent",
+        content: "思考中...早上好！今天有什么需要我帮忙的吗？",
+        thinking: false,
       });
     });
   });

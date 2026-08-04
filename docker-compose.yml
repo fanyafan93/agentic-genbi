@@ -53,7 +53,7 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
-    command: ["sh", "-c", "npm install && npm run prisma:migrate && NODE_ENV=production npm run build && NODE_ENV=production npm run start"]
+    command: ["sh", "-c", "npm install && npm run prisma:migrate && NODE_ENV=production npm run build && mkdir -p .next/standalone/.next && cp -R .next/static .next/standalone/.next/static && cp -R public .next/standalone/public && HOSTNAME=0.0.0.0 PORT=3000 NODE_ENV=production node .next/standalone/server.js"]
     env_file:
       - .env
     environment:

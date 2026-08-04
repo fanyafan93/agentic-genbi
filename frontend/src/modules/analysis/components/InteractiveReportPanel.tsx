@@ -8,10 +8,11 @@ import { EChartRenderer } from "@/shared/charts/EChartRenderer";
 import JsonView from "@uiw/react-json-view";
 import { nordTheme } from "@uiw/react-json-view/nord";
 import type { SavedInteractiveReport } from "../api/interactive-report-service";
-import type { InteractiveReportVersionSummary } from "../api/interactive-report-service";
 import type { InteractiveReport, ReportDatasetRow, ReportRuntimeFilters } from "../types/interactive-report";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
+
+const SAVE_REPORT_CONFIRMATION = "保存后会出现在报表中心「我的报表」。继续保存会覆盖当前报表。是否确认？";
 
 type ReportRuntime = {
   report: InteractiveReport;
@@ -117,8 +118,6 @@ type Props = {
   initialReport?: InteractiveReport;
   initialVersion?: number;
   onSaveReport?: (saved: SavedInteractiveReport) => Promise<SavedInteractiveReport>;
-  onListVersions?: (reportId: string) => Promise<InteractiveReportVersionSummary[]>;
-  onLoadVersion?: (reportId: string, version: number) => Promise<SavedInteractiveReport>;
 };
 
 export function InteractiveReportPanel(props: Props) {
@@ -141,12 +140,13 @@ export function InteractiveReportPanel(props: Props) {
   return <InteractiveReportContent {...props} initialReport={props.initialReport} />;
 }
 
-function InteractiveReportContent({ taskTitle, running, initialReport, initialVersion = 1, onSaveReport, onListVersions, onLoadVersion }: Props & { initialReport: InteractiveReport }) {
+function InteractiveReportContent({ taskTitle, running, initialReport, initialVersion = 1, onSaveReport }: Props & { initialReport: InteractiveReport }) {
   const normalizedInitialReport = useMemo(() => withStablePuckIds(initialReport), [initialReport]);
   const [report, setReport] = useState(normalizedInitialReport);
   const [filters, setFilters] = useState(() => createDefaultReportFilters(normalizedInitialReport));
   const [editorOpen, setEditorOpen] = useState(false);
   const [notice, setNotice] = useState("Agent 已生成一份可继续编辑的分析结果。");
+  const [saveToast, setSaveToast] = useState("");
   const [version, setVersion] = useState(initialVersion);
   const [metadataOpen, setMetadataOpen] = useState(false);
   // 引用稳定即可：JsonView 直接消费对象，避免父组件 re-render 触发子组件重渲。
@@ -157,6 +157,7 @@ function InteractiveReportContent({ taskTitle, running, initialReport, initialVe
     setVersion(initialVersion);
     setFilters(createDefaultReportFilters(normalizedInitialReport));
     setNotice("已加载本轮分析结果；当前筛选是新的运行时视图。");
+    setSaveToast("");
   }, [normalizedInitialReport, initialVersion]);
 
   const changeFilter = (id: keyof ReportRuntimeFilters, value: string) => setFilters((current) => ({ ...current, [id]: value }));
@@ -172,37 +173,29 @@ function InteractiveReportContent({ taskTitle, running, initialReport, initialVe
     try {
       await persist(nextReport);
       setEditorOpen(false);
-      setNotice("已保存新的报告版本。筛选状态保持为本次运行时视图。");
+      setSaveToast("");
+      setNotice("已覆盖保存报表。筛选状态保持为本次运行时视图。");
     } catch (error) {
+      setSaveToast("");
       setNotice(error instanceof Error ? error.message : "分析结果保存失败。");
     }
   };
   const save = async () => {
+    if (!window.confirm(SAVE_REPORT_CONFIRMATION)) return;
     try {
       await persist(report);
-      setNotice("已保存到“我的结果”。筛选状态没有写入报告版本。");
+      setSaveToast("已保存到报表中心");
+      setNotice("已保存到报表中心。");
     } catch (error) {
+      setSaveToast("");
       setNotice(error instanceof Error ? error.message : "分析结果保存失败。");
     }
   };
-  const loadVersion = async (targetVersion: number) => {
-    if (!onLoadVersion || targetVersion === version) return;
-    try {
-      const saved = await onLoadVersion(report.id, targetVersion);
-      setReport(saved.report);
-      setVersion(saved.version);
-      setFilters(createDefaultReportFilters(saved.report));
-      setNotice(`已打开 v${saved.version} 历史版本；编辑或保存会创建新版本。`);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "历史版本读取失败。");
-    }
-  };
-
   return (
     <section className="interactive-report-panel" aria-label="分析结果">
       <header className="result-panel-header">
         <div>
-          <span className="result-kicker">INTERACTIVE RESULT · v{version}</span>
+          <span className="result-kicker">INTERACTIVE RESULT</span>
           <h2>{report.title}</h2>
           <p>{taskTitle} · {report.subtitle}</p>
         </div>
@@ -210,14 +203,14 @@ function InteractiveReportContent({ taskTitle, running, initialReport, initialVe
           <button type="button" onClick={save}>保存</button>
           <button type="button" onClick={() => setMetadataOpen(true)}>显示元数据</button>
           <button type="button" onClick={() => setNotice("已创建团队内只读分享链接（Mock）。")}>分享</button>
-          <button type="button" onClick={() => setNotice("已从本次对话、查询和结果提炼出分析模板草稿（Mock）。")}>提炼为模板</button>
           <button type="button" onClick={() => setNotice("导出队列已创建：交互式报告 PDF 与渠道明细 XLSX（Mock）。")}>导出</button>
           <button className="primary" type="button" onClick={() => setEditorOpen(true)}>编辑结果</button>
+          {saveToast ? <span className="save-report-toast" role="status">{saveToast}</span> : null}
         </div>
       </header>
       <div className="report-filter-row" aria-label="报告筛选条件">
         {report.filters.map((filter) => <label key={filter.id}><span>{filter.label}</span><select aria-label={filter.label} value={filters[filter.id]} onChange={(event) => changeFilter(filter.id, event.target.value)}>{filter.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>)}
-        <span className={`report-runtime-status ${running ? "running" : ""}`}>{running ? "Agent 正在更新结果" : "运行时筛选不会创建版本"}</span>
+        <span className={`report-runtime-status ${running ? "running" : ""}`}>{running ? "Agent 正在更新结果" : "运行时筛选不会覆盖报表"}</span>
       </div>
       <p className="report-notice" role="status">{notice}</p>
       {metadataOpen ? (
