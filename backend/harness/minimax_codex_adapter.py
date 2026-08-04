@@ -226,13 +226,34 @@ def _rewrite_sse_block(block: str, namespace_maps: Iterable[NamespaceToolMap]) -
 
 def _iter_rewritten_sse(response: Any, namespace_maps: list[NamespaceToolMap]) -> Iterable[bytes]:
     buffer = ""
-    while True:
-        chunk = response.read(4096)
-        if not chunk:
-            break
-        buffer += chunk.decode("utf-8", errors="replace")
-        while "\n\n" in buffer:
-            block, buffer = buffer.split("\n\n", 1)
-            yield (_rewrite_sse_block(block, namespace_maps) + "\n\n").encode("utf-8")
-    if buffer:
-        yield _rewrite_sse_block(buffer, namespace_maps).encode("utf-8")
+    try:
+        while True:
+            chunk = response.read(4096)
+            if not chunk:
+                break
+            buffer += chunk.decode("utf-8", errors="replace")
+            while "\n\n" in buffer:
+                block, buffer = buffer.split("\n\n", 1)
+                yield (_rewrite_sse_block(block, namespace_maps) + "\n\n").encode("utf-8")
+        if buffer:
+            yield _rewrite_sse_block(buffer, namespace_maps).encode("utf-8")
+    except TimeoutError:
+        yield _sse_error_event("minimax_stream_timeout", "MiniMax response stream timed out.")
+    except OSError as exc:
+        yield _sse_error_event("minimax_stream_error", str(exc) or "MiniMax response stream failed.")
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+
+
+def _sse_error_event(code: str, message: str) -> bytes:
+    payload = {
+        "type": "response.failed",
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+    return ("event: response.failed\n" + "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")

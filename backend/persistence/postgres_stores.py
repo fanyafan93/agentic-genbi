@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from dataclasses import asdict
@@ -22,6 +22,9 @@ from backend.analysis.interactive_report_store import (
     InteractiveReportRecord,
     InteractiveReportVersionConflict,
     InteractiveReportVersionRecord,
+    ReportShareRecord,
+    asdict_report,
+    asdict_share,
 )
 from backend.business_semantics.knowledge_store import KnowledgeRecord, KnowledgeStore
 
@@ -35,6 +38,7 @@ POSTGRES_ANALYSIS_ASSET_TABLE = "analysis_assets"
 POSTGRES_ARTIFACT_LINEAGE_TABLE = "analysis_artifact_lineage"
 POSTGRES_INTERACTIVE_REPORT_TABLE = "analysis_reports"
 POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE = "analysis_report_versions"
+POSTGRES_REPORT_SHARE_TABLE = "analysis_report_shares"
 
 
 def postgres_persistence_enabled() -> bool:
@@ -607,6 +611,9 @@ class PostgresInteractiveReportStore:
                     source_thread_id TEXT NOT NULL,
                     source_turn_id TEXT NOT NULL,
                     latest_version INTEGER NOT NULL,
+                    data_updated_at TEXT,
+                    derived_from_report_id TEXT,
+                    deleted_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
@@ -663,6 +670,20 @@ class PostgresInteractiveReportStore:
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS source_thread_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS source_turn_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ADD COLUMN IF NOT EXISTS datasets JSONB NOT NULL DEFAULT '{{}}'::jsonb")
+            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS data_updated_at TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS derived_from_report_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_REPORT_SHARE_TABLE} (
+                    report_id TEXT NOT NULL REFERENCES {POSTGRES_INTERACTIVE_REPORT_TABLE}(id) ON DELETE CASCADE,
+                    recipient_user_id TEXT NOT NULL,
+                    permission TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (report_id, recipient_user_id)
+                )
+                """
+            )
             conn.execute(
                 f"""
                 UPDATE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} AS version
@@ -675,8 +696,9 @@ class PostgresInteractiveReportStore:
             )
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ALTER COLUMN source_thread_id SET NOT NULL")
             conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE} ALTER COLUMN source_turn_id SET NOT NULL")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_INTERACTIVE_REPORT_TABLE}_owner_updated ON {POSTGRES_INTERACTIVE_REPORT_TABLE} (owner_id, updated_at DESC)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_INTERACTIVE_REPORT_TABLE}_owner_updated ON {POSTGRES_INTERACTIVE_REPORT_TABLE} (owner_id, updated_at DESC) WHERE deleted_at IS NULL")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_INTERACTIVE_REPORT_TABLE}_thread ON {POSTGRES_INTERACTIVE_REPORT_TABLE} (source_thread_id, updated_at DESC)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_REPORT_SHARE_TABLE}_recipient ON {POSTGRES_REPORT_SHARE_TABLE} (recipient_user_id)")
 
     def save_report(self, payload: dict[str, Any]) -> tuple[InteractiveReportRecord, InteractiveReportVersionRecord]:
         from backend.analysis.interactive_report_store import _validate_payload
@@ -703,6 +725,9 @@ class PostgresInteractiveReportStore:
                         SET title = %(title)s, subtitle = %(subtitle)s, artifact_type = %(artifact_type)s,
                             renderer = %(renderer)s, owner_id = %(owner_id)s, source_thread_id = %(source_thread_id)s,
                             source_turn_id = %(source_turn_id)s,
+                            data_updated_at = %(data_updated_at)s,
+                            derived_from_report_id = %(derived_from_report_id)s,
+                            deleted_at = NULL,
                             latest_version = %(latest_version)s, updated_at = now()
                         WHERE id = %(id)s
                         """,
@@ -713,10 +738,11 @@ class PostgresInteractiveReportStore:
                         f"""
                         INSERT INTO {POSTGRES_INTERACTIVE_REPORT_TABLE} (
                             id, title, subtitle, artifact_type, renderer, owner_id, source_thread_id,
-                            source_turn_id, latest_version
+                            source_turn_id, latest_version, data_updated_at, derived_from_report_id
                         ) VALUES (
                             %(id)s, %(title)s, %(subtitle)s, %(artifact_type)s, %(renderer)s, %(owner_id)s,
-                            %(source_thread_id)s, %(source_turn_id)s, %(latest_version)s
+                            %(source_thread_id)s, %(source_turn_id)s, %(latest_version)s,
+                            %(data_updated_at)s, %(derived_from_report_id)s
                         )
                         """,
                         report_params,
@@ -740,11 +766,12 @@ class PostgresInteractiveReportStore:
                 ).fetchone()
         return _interactive_report_from_row(report_row), _interactive_report_version_from_row(version_row)
 
-    def list_reports(self, *, owner_id: str | None = None, limit: int = 50) -> list[InteractiveReportRecord]:
-        where = "WHERE owner_id = %(owner_id)s" if owner_id else ""
+    def list_reports(self, *, user_id: str | None = None, limit: int = 50) -> list[InteractiveReportRecord]:
+        where = "WHERE deleted_at IS NULL"
         params: dict[str, Any] = {"limit": limit}
-        if owner_id:
-            params["owner_id"] = owner_id
+        if user_id:
+            where += " AND owner_id = %(user_id)s"
+            params["user_id"] = user_id
         with _connect(self.database_url) as conn:
             rows = conn.execute(
                 f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} {where} ORDER BY updated_at DESC LIMIT %(limit)s",
@@ -754,7 +781,7 @@ class PostgresInteractiveReportStore:
 
     def get_report(self, report_id: str, *, version: int | None = None) -> tuple[InteractiveReportRecord, InteractiveReportVersionRecord] | None:
         with _connect(self.database_url) as conn:
-            report_row = conn.execute(f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s", {"id": report_id}).fetchone()
+            report_row = conn.execute(f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s AND deleted_at IS NULL", {"id": report_id}).fetchone()
             if not report_row:
                 return None
             target_version = version if version is not None else int(report_row["latest_version"])
@@ -766,7 +793,7 @@ class PostgresInteractiveReportStore:
 
     def list_versions(self, report_id: str) -> list[InteractiveReportVersionRecord] | None:
         with _connect(self.database_url) as conn:
-            exists = conn.execute(f"SELECT 1 FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s", {"id": report_id}).fetchone()
+            exists = conn.execute(f"SELECT 1 FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s AND deleted_at IS NULL", {"id": report_id}).fetchone()
             if not exists:
                 return None
             rows = conn.execute(
@@ -774,6 +801,105 @@ class PostgresInteractiveReportStore:
                 {"report_id": report_id},
             ).fetchall()
         return [_interactive_report_version_from_row(row) for row in rows]
+
+    def rename_report(self, report_id: str, *, owner_id: str, title: str) -> InteractiveReportRecord | None:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"""
+                UPDATE {POSTGRES_INTERACTIVE_REPORT_TABLE}
+                SET title = %(title)s, updated_at = now()
+                WHERE id = %(id)s AND owner_id = %(owner_id)s AND deleted_at IS NULL
+                RETURNING *
+                """,
+                {"id": report_id, "owner_id": owner_id, "title": title.strip()},
+            ).fetchone()
+        return _interactive_report_from_row(row) if row else None
+
+    def delete_report(self, report_id: str, *, owner_id: str) -> bool:
+        with _connect(self.database_url) as conn:
+            with conn.transaction():
+                row = conn.execute(
+                    f"""
+                    UPDATE {POSTGRES_INTERACTIVE_REPORT_TABLE}
+                    SET deleted_at = now(), updated_at = now()
+                    WHERE id = %(id)s AND owner_id = %(owner_id)s AND deleted_at IS NULL
+                    RETURNING id
+                    """,
+                    {"id": report_id, "owner_id": owner_id},
+                ).fetchone()
+                if not row:
+                    return False
+                conn.execute(f"DELETE FROM {POSTGRES_REPORT_SHARE_TABLE} WHERE report_id = %(id)s", {"id": report_id})
+        return True
+
+    def share_report(self, report_id: str, *, owner_id: str, recipient_user_id: str, permission: str) -> ReportShareRecord | None:
+        if permission not in {"view", "view_and_reuse"}:
+            raise ValueError("invalid_report_share_permission")
+        with _connect(self.database_url) as conn:
+            report = conn.execute(
+                f"SELECT 1 FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s AND owner_id = %(owner_id)s AND deleted_at IS NULL",
+                {"id": report_id, "owner_id": owner_id},
+            ).fetchone()
+            if not report:
+                return None
+            row = conn.execute(
+                f"""
+                INSERT INTO {POSTGRES_REPORT_SHARE_TABLE} (report_id, recipient_user_id, permission)
+                VALUES (%(report_id)s, %(recipient_user_id)s, %(permission)s)
+                ON CONFLICT (report_id, recipient_user_id)
+                DO UPDATE SET permission = EXCLUDED.permission, created_at = now()
+                RETURNING *
+                """,
+                {"report_id": report_id, "recipient_user_id": recipient_user_id.strip(), "permission": permission},
+            ).fetchone()
+        return _report_share_from_row(row) if row else None
+
+    def revoke_report_share(self, report_id: str, *, owner_id: str, recipient_user_id: str) -> bool:
+        with _connect(self.database_url) as conn:
+            report = conn.execute(
+                f"SELECT 1 FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s AND owner_id = %(owner_id)s AND deleted_at IS NULL",
+                {"id": report_id, "owner_id": owner_id},
+            ).fetchone()
+            if not report:
+                return False
+            result = conn.execute(
+                f"DELETE FROM {POSTGRES_REPORT_SHARE_TABLE} WHERE report_id = %(report_id)s AND recipient_user_id = %(recipient_user_id)s",
+                {"report_id": report_id, "recipient_user_id": recipient_user_id},
+            )
+        return result.rowcount > 0
+
+    def list_report_center(self, *, user_id: str, limit: int = 50) -> dict[str, list[dict[str, Any]]]:
+        with _connect(self.database_url) as conn:
+            mine_rows = conn.execute(
+                f"""
+                SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE}
+                WHERE owner_id = %(user_id)s AND deleted_at IS NULL
+                ORDER BY updated_at DESC
+                LIMIT %(limit)s
+                """,
+                {"user_id": user_id, "limit": limit},
+            ).fetchall()
+            shared_rows = conn.execute(
+                f"""
+                SELECT share.report_id, share.recipient_user_id, share.permission, share.created_at,
+                       report.*
+                FROM {POSTGRES_REPORT_SHARE_TABLE} AS share
+                JOIN {POSTGRES_INTERACTIVE_REPORT_TABLE} AS report ON report.id = share.report_id
+                WHERE share.recipient_user_id = %(user_id)s AND report.deleted_at IS NULL
+                ORDER BY report.updated_at DESC
+                LIMIT %(limit)s
+                """,
+                {"user_id": user_id, "limit": limit},
+            ).fetchall()
+        mine = [_interactive_report_from_row(row) for row in mine_rows]
+        shared = [
+            {
+                **asdict_share(_report_share_from_row(row)),
+                "report": asdict_report(_interactive_report_from_row(row)),
+            }
+            for row in shared_rows
+        ]
+        return {"mine": [{"report": asdict_report(report)} for report in mine], "sharedWithMe": shared}
 
 
 class PostgresKnowledgeStore(KnowledgeStore):
@@ -1129,6 +1255,8 @@ def _interactive_report_params(payload: dict[str, Any], *, latest_version: int) 
         "source_thread_id": str(source["threadId"]).strip(),
         "source_turn_id": str(source["turnId"]).strip(),
         "latest_version": latest_version,
+        "data_updated_at": str(payload.get("dataUpdatedAt") or "").strip() or None,
+        "derived_from_report_id": str(payload.get("derivedFromReportId") or "").strip() or None,
     }
 
 
@@ -1279,6 +1407,9 @@ def _interactive_report_from_row(row: dict[str, Any]) -> InteractiveReportRecord
         latestVersion=int(row["latest_version"]),
         createdAt=_iso(row["created_at"]) or "",
         updatedAt=_iso(row["updated_at"]) or "",
+        dataUpdatedAt=row.get("data_updated_at"),
+        derivedFromReportId=row.get("derived_from_report_id"),
+        deletedAt=_iso(row.get("deleted_at")),
     )
 
 
@@ -1294,6 +1425,15 @@ def _interactive_report_version_from_row(row: dict[str, Any]) -> InteractiveRepo
         chartSpecs=dict(row["chart_specs"] or {}),
         gridSpecs=dict(row["grid_specs"] or {}),
         datasets=dict(row["datasets"] or {}),
+        createdAt=_iso(row["created_at"]) or "",
+    )
+
+
+def _report_share_from_row(row: dict[str, Any]) -> ReportShareRecord:
+    return ReportShareRecord(
+        reportId=str(row["report_id"]),
+        recipientUserId=str(row["recipient_user_id"]),
+        permission=str(row["permission"]),
         createdAt=_iso(row["created_at"]) or "",
     )
 

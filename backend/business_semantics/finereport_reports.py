@@ -19,7 +19,7 @@ SENSITIVE_SEMANTIC_TOKEN_PATTERN = re.compile(
 
 class FineReportReportRepository:
     def __init__(self, root: Path | None = None) -> None:
-        configured_root = Path(os.getenv("GENBI_FINEREPORT_ROOT", "资源库/finereport/解析"))
+        configured_root = Path(os.getenv("GENBI_FINEREPORT_ROOT", "资源库/finereport/报表画像"))
         self.root = root or configured_root
 
     def list_reports(self) -> list[dict[str, Any]]:
@@ -72,6 +72,8 @@ class FineReportReportRepository:
 
     def _report_sources(self) -> dict[str, dict[str, Path]]:
         sources = self._merged_files()
+        for name, source in self._profile_files().items():
+            sources.setdefault(name, source)
         for name, parts in self._group_files().items():
             sources.setdefault(name, parts)
         return dict(sorted(sources.items()))
@@ -89,6 +91,18 @@ class FineReportReportRepository:
             groups[name] = {"merged": path}
         return groups
 
+    def _profile_files(self) -> dict[str, dict[str, Path]]:
+        groups: dict[str, dict[str, Path]] = {}
+        if not self.root.exists():
+            return groups
+        for path in sorted(self.root.rglob("*.json"), key=lambda item: str(item.relative_to(self.root))):
+            if MERGED_PATTERN.match(path.name) or PART_PATTERN.match(path.name):
+                continue
+            relative_stem = path.relative_to(self.root).with_suffix("")
+            name = str(relative_stem).replace("\\", "/")
+            groups[name] = {"profile": path}
+        return groups
+
     def _group_files(self) -> dict[str, dict[str, Path]]:
         groups: dict[str, dict[str, Path]] = {}
         if not self.root.exists():
@@ -103,6 +117,8 @@ class FineReportReportRepository:
     def _load_report(self, name: str, parts: dict[str, Path]) -> dict[str, Any]:
         if "merged" in parts:
             return self._load_merged_report(name, parts["merged"])
+        if "profile" in parts:
+            return self._load_merged_report(name, parts["profile"], available_part="profile")
 
         parsed: dict[str, dict[str, Any]] = {}
         errors: list[str] = []
@@ -139,6 +155,8 @@ class FineReportReportRepository:
             "cells": sum(len(sheet["cells"]) for sheet in sheets),
             "formulas": sum(1 for sheet in sheets for cell in sheet["cells"] if cell.get("formula")),
             "bindings": sum(1 for sheet in sheets for cell in sheet["cells"] if cell.get("binding")),
+            "usageUsers": 0,
+            "totalUsageCount": 0,
         }
         summary = {
             "id": _report_id(name),
@@ -158,9 +176,10 @@ class FineReportReportRepository:
             "parameterWidgets": parameter_widgets,
             "conditionalRules": conditional_rules,
             "sheets": sheets,
+            "reportUsage": {"totalUsageCount": 0, "users": []},
         }
 
-    def _load_merged_report(self, name: str, path: Path) -> dict[str, Any]:
+    def _load_merged_report(self, name: str, path: Path, *, available_part: str = "merged") -> dict[str, Any]:
         errors: list[str] = []
         payload: dict[str, Any] = {}
         try:
@@ -180,6 +199,7 @@ class FineReportReportRepository:
         parameter_widgets = _list(interactions.get("parameter_widgets"))
         conditional_rules = _list(interactions.get("conditional_rules"))
         sheets = [_normalize_sheet(sheet) for sheet in _list(structure.get("sheets"))]
+        report_usage = _normalize_report_usage(payload.get("report_usage"))
         status = "complete" if not errors else "incomplete"
         sheet_names = report_metadata.get("sheet_names") or [sheet["name"] for sheet in sheets]
         counts = {
@@ -192,6 +212,8 @@ class FineReportReportRepository:
             "cells": sum(len(sheet["cells"]) for sheet in sheets),
             "formulas": sum(1 for sheet in sheets for cell in sheet["cells"] if cell.get("formula")),
             "bindings": sum(1 for sheet in sheets for cell in sheet["cells"] if cell.get("binding")),
+            "usageUsers": len(report_usage["users"]),
+            "totalUsageCount": report_usage["totalUsageCount"],
         }
         summary = {
             "id": _report_id(name),
@@ -199,7 +221,7 @@ class FineReportReportRepository:
             "sourceCptPath": report_metadata.get("source_cpt_path"),
             "sheetNames": sheet_names,
             "status": status,
-            "availableParts": ["merged"],
+            "availableParts": [available_part],
             "missingParts": [],
             "errors": errors,
             "counts": counts,
@@ -211,6 +233,7 @@ class FineReportReportRepository:
             "parameterWidgets": parameter_widgets,
             "conditionalRules": conditional_rules,
             "sheets": sheets,
+            "reportUsage": report_usage,
         }
 
 
@@ -265,6 +288,26 @@ def _normalize_sheet(sheet: dict[str, Any]) -> dict[str, Any]:
         "rowCount": row_count,
         "columnCount": column_count,
         "cells": cells,
+    }
+
+
+def _normalize_report_usage(value: Any) -> dict[str, Any]:
+    payload = value if isinstance(value, dict) else {}
+    users = _list(payload.get("users"))
+    total_usage_count = _positive_int(payload.get("total_usage_count"), 0)
+    if not total_usage_count:
+        total_usage_count = sum(_positive_int(user.get("usage_count"), 0) for user in users)
+    return {
+        "totalUsageCount": total_usage_count,
+        "users": [
+            {
+                "userName": str(user.get("user_name") or user.get("userName") or ""),
+                "position": str(user.get("position") or ""),
+                "department": str(user.get("department") or ""),
+                "usageCount": _positive_int(user.get("usage_count") or user.get("usageCount"), 0),
+            }
+            for user in users
+        ],
     }
 
 

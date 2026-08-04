@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -73,6 +74,50 @@ class ThreadStore:
     def __init__(self, path: Path = DEFAULT_THREAD_STORE_PATH) -> None:
         self.path = path
 
+    def create_thread(
+        self,
+        *,
+        thread_id: str,
+        product_kind: ThreadProductKind,
+        title: str | None,
+        user_id: str | None,
+        status: str = "waiting_for_question",
+        metadata: dict[str, Any] | None = None,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not thread_id.strip():
+            raise ValueError("thread_id is required.")
+        state = self._read_state()
+        existing_thread = state["threads"].get(thread_id)
+        now = _now()
+        merged_metadata = {**(existing_thread.metadata if existing_thread else {}), **(metadata or {})}
+        if tenant_id:
+            merged_metadata.setdefault("tenant_id", tenant_id)
+        codex_thread_id = _thread_codex_thread_id(merged_metadata, existing_thread=existing_thread)
+        if codex_thread_id:
+            merged_metadata["codex_thread_id"] = codex_thread_id
+        thread = ThreadRecord(
+            id=thread_id,
+            productKind=product_kind,
+            title=str(title).strip() if title else (existing_thread.title if existing_thread else None),
+            userId=user_id,
+            status=status,
+            createdAt=existing_thread.createdAt if existing_thread else now,
+            updatedAt=now,
+            metadata=merged_metadata,
+            tenantId=_thread_scope_value(merged_metadata, "tenant_id", "tenantId", existing_value=existing_thread.tenantId if existing_thread else None) or (tenant_id or None),
+            workspaceId=_thread_scope_value(merged_metadata, "workspace_id", "workspaceId", existing_value=existing_thread.workspaceId if existing_thread else None),
+            codexThreadId=codex_thread_id,
+        )
+        state["threads"][thread_id] = thread
+        self._write_state(state)
+        return {
+            "thread": asdict(thread),
+            "turns": [],
+            "items": [],
+            "codexItemProjections": [],
+        }
+
     def save_turn(
         self,
         *,
@@ -84,6 +129,7 @@ class ThreadStore:
         user_id: str | None,
         events: list["AgentEvent"],
         metadata: dict[str, Any] | None = None,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         if not thread_id.strip():
             raise ValueError("thread_id is required.")
@@ -97,6 +143,8 @@ class ThreadStore:
         status = _turn_status(events)
         thread_status = "needs_input" if any(_is_agent_question_event(event) for event in events) else status
         merged_metadata = {**(existing_thread.metadata if existing_thread else {}), **(metadata or {})}
+        if tenant_id:
+            merged_metadata.setdefault("tenant_id", tenant_id)
         codex_thread_id = _thread_codex_thread_id(
             merged_metadata,
             existing_thread=existing_thread,
@@ -129,7 +177,7 @@ class ThreadStore:
             createdAt=existing_thread.createdAt if existing_thread else (started_at or now),
             updatedAt=now,
             metadata=merged_metadata,
-            tenantId=_thread_scope_value(merged_metadata, "tenant_id", "tenantId", existing_value=existing_thread.tenantId if existing_thread else None),
+            tenantId=_thread_scope_value(merged_metadata, "tenant_id", "tenantId", existing_value=existing_thread.tenantId if existing_thread else None) or (tenant_id or None),
             workspaceId=_thread_scope_value(merged_metadata, "workspace_id", "workspaceId", existing_value=existing_thread.workspaceId if existing_thread else None),
             codexThreadId=codex_thread_id,
         )
@@ -466,6 +514,10 @@ def _string_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _title_from_question(question: str, *, input_kind: TurnInputKind) -> str | None:

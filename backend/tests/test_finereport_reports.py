@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
 
-from backend.api.analysis_api import create_app
 from backend.business_semantics.finereport_reports import FineReportReportRepository
+from backend.tests.auth_test_client import build_test_app
 
 
 class FineReportReportsApiTest(unittest.TestCase):
@@ -94,7 +94,7 @@ class FineReportReportsApiTest(unittest.TestCase):
             )
 
             with patch.dict("os.environ", {"GENBI_FINEREPORT_ROOT": str(resource_root / "finereport" / "解析")}, clear=False):
-                client = TestClient(create_app())
+                client = TestClient(build_test_app())
                 listed = client.get("/api/business-semantics/finereport/reports")
 
                 self.assertEqual(listed.status_code, 200)
@@ -208,6 +208,79 @@ class FineReportReportsApiTest(unittest.TestCase):
             self.assertIn("sMonth", encoded)
             self.assertNotIn("select amount from dm.live_review", encoded)
             self.assertNotIn("fine_username", encoded)
+
+    def test_lists_and_loads_recursive_report_profile_with_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_root = Path(temp_dir) / "finereport" / "报表画像"
+            report_path = profile_root / "ADV" / "推广总览明细表.json"
+            report_path.parent.mkdir(parents=True)
+            self._write_json(
+                report_path,
+                {
+                    "report": {
+                        "name": "推广总览明细表",
+                        "source_cpt_path": "reports/ADV/推广总览明细表.cpt",
+                        "sheet_names": ["sheet1"],
+                    },
+                    "datasets": [
+                        {
+                            "name": "adv_data",
+                            "type": "database_query",
+                            "connection_name": "fat_dm",
+                            "raw_sql": "select cost from dm.adv",
+                        }
+                    ],
+                    "parameters_and_interactions": {
+                        "parameters": [{"name": "month"}],
+                        "parameter_widgets": [{"parameter": "month", "widget_class": "ComboBox", "label": "月份"}],
+                        "conditional_rules": [],
+                    },
+                    "report_structure": {
+                        "sheets": [
+                            {
+                                "name": "sheet1",
+                                "cells": [
+                                    {
+                                        "cell": "A1",
+                                        "row": 1,
+                                        "column": "A",
+                                        "value": "推广费用",
+                                        "binding": {"dataset": "adv_data", "field": "cost"},
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                    "report_usage": {
+                        "total_usage_count": 3,
+                        "users": [
+                            {
+                                "user_name": "朱子越",
+                                "position": "财务BP",
+                                "department": "财务管理部",
+                                "usage_count": 3,
+                            }
+                        ],
+                    },
+                },
+            )
+
+            repository = FineReportReportRepository(profile_root)
+            listed = repository.list_reports()
+
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["name"], "推广总览明细表")
+            self.assertEqual(listed[0]["availableParts"], ["profile"])
+            self.assertEqual(listed[0]["counts"]["usageUsers"], 1)
+            self.assertEqual(listed[0]["counts"]["totalUsageCount"], 3)
+
+            detail = repository.get_report(listed[0]["id"])
+
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertEqual(detail["reportUsage"]["totalUsageCount"], 3)
+            self.assertEqual(detail["reportUsage"]["users"][0]["userName"], "朱子越")
+            self.assertEqual(detail["reportUsage"]["users"][0]["department"], "财务管理部")
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, object]) -> None:

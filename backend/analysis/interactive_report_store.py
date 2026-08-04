@@ -27,6 +27,9 @@ class InteractiveReportRecord:
     latestVersion: int
     createdAt: str
     updatedAt: str
+    dataUpdatedAt: str | None = None
+    derivedFromReportId: str | None = None
+    deletedAt: str | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,14 @@ class InteractiveReportVersionRecord:
     gridSpecs: dict[str, Any]
     createdAt: str
     datasets: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ReportShareRecord:
+    reportId: str
+    recipientUserId: str
+    permission: str
+    createdAt: str
 
 
 class InteractiveReportStore:
@@ -76,6 +87,9 @@ class InteractiveReportStore:
             "latestVersion": version_number,
             "createdAt": existing["createdAt"] if existing else now,
             "updatedAt": now,
+            "dataUpdatedAt": str(payload.get("dataUpdatedAt") or "").strip() or None,
+            "derivedFromReportId": str(payload.get("derivedFromReportId") or "").strip() or None,
+            "deletedAt": None,
         }
         version = {
             "reportId": report_id,
@@ -96,16 +110,16 @@ class InteractiveReportStore:
         self._write_state(state)
         return _report_from_dict(report), _version_from_dict(version)
 
-    def list_reports(self, *, owner_id: str | None = None, limit: int = 50) -> list[InteractiveReportRecord]:
-        reports = [_report_from_dict(item) for item in self._read_state()["reports"]]
-        if owner_id:
-            reports = [item for item in reports if item.ownerId == owner_id]
+    def list_reports(self, *, user_id: str | None = None, limit: int = 50) -> list[InteractiveReportRecord]:
+        reports = [_report_from_dict(item) for item in self._read_state()["reports"] if not item.get("deletedAt")]
+        if user_id:
+            reports = [item for item in reports if item.ownerId == user_id]
         return sorted(reports, key=lambda item: item.updatedAt, reverse=True)[:limit]
 
     def get_report(self, report_id: str, *, version: int | None = None) -> tuple[InteractiveReportRecord, InteractiveReportVersionRecord] | None:
         state = self._read_state()
         report = next((item for item in state["reports"] if item["id"] == report_id), None)
-        if not report:
+        if not report or report.get("deletedAt"):
             return None
         target_version = version if version is not None else int(report["latestVersion"])
         record = next((item for item in state["versions"] if item["reportId"] == report_id and int(item["version"]) == target_version), None)
@@ -118,9 +132,103 @@ class InteractiveReportStore:
         records = [_version_from_dict(item) for item in state["versions"] if item["reportId"] == report_id]
         return sorted(records, key=lambda item: item.version, reverse=True)
 
+    def rename_report(self, report_id: str, *, owner_id: str, title: str) -> InteractiveReportRecord | None:
+        state = self._read_state()
+        now = _now()
+        updated = None
+        reports = []
+        for item in state["reports"]:
+            if item["id"] == report_id and not item.get("deletedAt") and item.get("ownerId") == owner_id:
+                updated = {**item, "title": title.strip(), "updatedAt": now}
+                reports.append(updated)
+            else:
+                reports.append(item)
+        if not updated:
+            return None
+        state["reports"] = reports
+        self._write_state(state)
+        return _report_from_dict(updated)
+
+    def delete_report(self, report_id: str, *, owner_id: str) -> bool:
+        state = self._read_state()
+        now = _now()
+        changed = False
+        reports = []
+        for item in state["reports"]:
+            if item["id"] == report_id and not item.get("deletedAt") and item.get("ownerId") == owner_id:
+                reports.append({**item, "deletedAt": now, "updatedAt": now})
+                changed = True
+            else:
+                reports.append(item)
+        if not changed:
+            return False
+        state["reports"] = reports
+        state["shares"] = [share for share in state["shares"] if share.get("reportId") != report_id]
+        self._write_state(state)
+        return True
+
+    def share_report(self, report_id: str, *, owner_id: str, recipient_user_id: str, permission: str) -> ReportShareRecord | None:
+        if permission not in {"view", "view_and_reuse"}:
+            raise ValueError("invalid_report_share_permission")
+        state = self._read_state()
+        report = next((item for item in state["reports"] if item["id"] == report_id and not item.get("deletedAt")), None)
+        if not report or report.get("ownerId") != owner_id:
+            return None
+        now = _now()
+        share = {
+            "reportId": report_id,
+            "recipientUserId": recipient_user_id.strip(),
+            "permission": permission,
+            "createdAt": now,
+        }
+        state["shares"] = [
+            item for item in state["shares"]
+            if not (item.get("reportId") == report_id and item.get("recipientUserId") == recipient_user_id.strip())
+        ]
+        state["shares"].append(share)
+        self._write_state(state)
+        return _share_from_dict(share)
+
+    def revoke_report_share(self, report_id: str, *, owner_id: str, recipient_user_id: str) -> bool:
+        state = self._read_state()
+        report = next((item for item in state["reports"] if item["id"] == report_id and not item.get("deletedAt")), None)
+        if not report or report.get("ownerId") != owner_id:
+            return False
+        before = len(state["shares"])
+        state["shares"] = [
+            item for item in state["shares"]
+            if not (item.get("reportId") == report_id and item.get("recipientUserId") == recipient_user_id)
+        ]
+        if len(state["shares"]) == before:
+            return False
+        self._write_state(state)
+        return True
+
+    def list_report_center(self, *, user_id: str, limit: int = 50) -> dict[str, list[dict[str, Any]]]:
+        state = self._read_state()
+        reports_by_id = {item["id"]: item for item in state["reports"] if not item.get("deletedAt")}
+        mine = [_report_from_dict(item) for item in reports_by_id.values() if item.get("ownerId") == user_id]
+        shared = []
+        for share in state["shares"]:
+            if share.get("recipientUserId") != user_id:
+                continue
+            report = reports_by_id.get(str(share.get("reportId")))
+            if not report:
+                continue
+            shared.append({"share": _share_from_dict(share), "report": _report_from_dict(report)})
+        mine = sorted(mine, key=lambda item: item.updatedAt, reverse=True)[:limit]
+        shared = sorted(shared, key=lambda item: item["report"].updatedAt, reverse=True)[:limit]
+        return {
+            "mine": [{"report": asdict_report(report)} for report in mine],
+            "sharedWithMe": [
+                {**asdict_share(item["share"]), "report": asdict_report(item["report"])}
+                for item in shared
+            ],
+        }
+
     def _read_state(self) -> dict[str, list[dict[str, Any]]]:
         if not self.path.exists():
-            return {"reports": [], "versions": []}
+            return {"reports": [], "versions": [], "shares": []}
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         reports = list(payload.get("reports") or [])
         sources = {
@@ -136,7 +244,8 @@ class InteractiveReportStore:
             for name, value in sources.get(str(normalized.get("reportId")), {}).items():
                 normalized.setdefault(name, value)
             versions.append(normalized)
-        return {"reports": reports, "versions": versions}
+        shares = list(payload.get("shares") or [])
+        return {"reports": reports, "versions": versions, "shares": shares}
 
     def _write_state(self, state: dict[str, list[dict[str, Any]]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +269,9 @@ def _validate_payload(payload: dict[str, Any]) -> None:
             raise ValueError(f"{name} has an invalid type.")
     if "datasets" in payload and not isinstance(payload.get("datasets"), dict):
         raise ValueError("datasets has an invalid type.")
+    for name in ("dataUpdatedAt", "derivedFromReportId"):
+        if name in payload and payload.get(name) is not None and not isinstance(payload.get(name), str):
+            raise ValueError(f"{name} has an invalid type.")
 
 
 def _report_from_dict(payload: dict[str, Any]) -> InteractiveReportRecord:
@@ -168,6 +280,22 @@ def _report_from_dict(payload: dict[str, Any]) -> InteractiveReportRecord:
 
 def _version_from_dict(payload: dict[str, Any]) -> InteractiveReportVersionRecord:
     return InteractiveReportVersionRecord(**_filter_dataclass_payload(payload, InteractiveReportVersionRecord))
+
+
+def _share_from_dict(payload: dict[str, Any]) -> ReportShareRecord:
+    return ReportShareRecord(**_filter_dataclass_payload(payload, ReportShareRecord))
+
+
+def asdict_report(record: InteractiveReportRecord) -> dict[str, Any]:
+    return {key: value for key, value in _record_asdict(record).items() if value is not None}
+
+
+def asdict_share(record: ReportShareRecord) -> dict[str, Any]:
+    return _record_asdict(record)
+
+
+def _record_asdict(record: Any) -> dict[str, Any]:
+    return {field.name: getattr(record, field.name) for field in fields(record)}
 
 
 def _now() -> str:

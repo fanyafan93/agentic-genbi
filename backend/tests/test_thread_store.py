@@ -12,6 +12,28 @@ from backend.harness.thread_store import ThreadStore
 
 
 class ThreadStoreTest(unittest.TestCase):
+    def test_create_thread_saves_waiting_thread_without_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+
+            created = store.create_thread(
+                thread_id="analysis_thread_report",
+                product_kind="analysis_task",
+                title="渠道日报 新分析",
+                user_id="user_1",
+                status="waiting_for_question",
+                metadata={"source_report_id": "report_1"},
+            )
+            detail = store.get_thread("analysis_thread_report")
+
+            self.assertEqual(created["thread"]["status"], "waiting_for_question")
+            self.assertEqual(created["turns"], [])
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertEqual(detail["thread"]["title"], "渠道日报 新分析")
+            self.assertEqual(detail["thread"]["metadata"]["source_report_id"], "report_1")
+            self.assertEqual(detail["turns"], [])
+
     def test_store_saves_thread_turn_and_items(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")

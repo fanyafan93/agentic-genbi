@@ -15,8 +15,8 @@ type Props = {
   mobileHidden: boolean;
   taskKey: string | null;
   onReply: (optionId: string) => void;
-  onStartFromSuggestion: (suggestionId: string, title: string) => void;
-  onSendMessage: (content: string) => void;
+  onStartFromSuggestion: (suggestionId: string, title: string) => void | Promise<void>;
+  onSendMessage: (content: string) => void | Promise<void>;
   onStop: () => void;
 };
 
@@ -81,8 +81,14 @@ export function AnalysisTaskThread({
             <strong>正在开始分析</strong>
             <small>等待模型返回第一段内容...</small>
           </div>
-        ) : nodes.length === 0 ? (
+        ) : nodes.length === 0 && isNewTask ? (
           <Suggestions onSelect={onStartFromSuggestion} />
+        ) : nodes.length === 0 ? (
+          <div className="flow-empty-running" role="status">
+            <span />
+            <strong>等待提问</strong>
+            <small>输入问题后会在这个任务里继续分析。</small>
+          </div>
         ) : (
           <ol className="flow">
             {nodes.map((node) => (
@@ -103,7 +109,7 @@ export function AnalysisTaskThread({
 }
 
 function formatTaskId(taskKey: string | null): string {
-  if (!taskKey || taskKey.startsWith("draft_")) return "";
+  if (!taskKey) return "";
   const parts = taskKey.split("_");
   const suffix = parts.at(-1) || taskKey;
   return suffix.slice(0, 8);

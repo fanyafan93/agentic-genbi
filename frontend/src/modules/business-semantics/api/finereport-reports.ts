@@ -8,6 +8,8 @@ export type FineReportCounts = {
   cells: number;
   formulas: number;
   bindings: number;
+  usageUsers: number;
+  totalUsageCount: number;
 };
 
 export type FineReportReportSummary = {
@@ -52,6 +54,18 @@ export type FineReportSheet = {
   cells: FineReportCell[];
 };
 
+export type FineReportUsageUser = {
+  userName: string;
+  position: string;
+  department: string;
+  usageCount: number;
+};
+
+export type FineReportReportUsage = {
+  totalUsageCount: number;
+  users: FineReportUsageUser[];
+};
+
 export type FineReportReportDetail = {
   report: FineReportReportSummary;
   datasets: FineReportDataset[];
@@ -59,6 +73,7 @@ export type FineReportReportDetail = {
   parameterWidgets: Array<Record<string, unknown>>;
   conditionalRules: Array<Record<string, unknown>>;
   sheets: FineReportSheet[];
+  reportUsage: FineReportReportUsage;
 };
 
 function apiBaseUrl(): string {

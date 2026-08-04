@@ -88,7 +88,7 @@ const systemMcpPageSource = readFileSync(
 describe("analysis task product language", () => {
   test("frames the primary workspace as a unified analysis workspace", () => {
     expect(workspaceSource).toContain('label: "分析工作台"');
-    expect(workspaceSource).toContain('label: "我的分析"');
+    expect(workspaceSource).toContain('label: "报表中心"');
     expect(workspaceSource).toContain('label: "业务语义库"');
     expect(workspaceSource).toContain("ANALYSIS WORKSPACE");
     expect(workspaceSource).toContain("<h2>分析工作台</h2>");
@@ -130,7 +130,7 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain("语义");
     expect(workspaceSource).toContain("业务解释和使用规则");
     expect(workspaceSource).toContain("FineReport");
-    expect(workspaceSource).toContain("报表解析");
+    expect(workspaceSource).toContain("报表画像");
     expect(workspaceSource).toContain("Apache Hop");
     expect(workspaceSource).toContain("ETL 血缘解析");
     expect(workspaceSource).toContain("MySQL / Doris 元数据");
@@ -200,18 +200,26 @@ describe("analysis task product language", () => {
     expect(agentClientIndexSource).toContain("shouldUseBackendAnalysisClient");
     expect(backendClientSource).toContain("NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME");
     expect(backendClientSource).toContain("NEXT_PUBLIC_GENBI_API_BASE_URL");
-    expect(backendClientSource).toContain("/api/analysis/threads/turns/stream");
+    expect(backendClientSource).toContain("createBackendAnalysisThread");
+    expect(backendClientSource).toContain("/api/analysis/threads");
+    expect(backendClientSource).toContain("/api/analysis/threads/${encodeURIComponent(input.threadId)}/turns/stream");
     expect(backendClientSource).toContain("/turns/stream");
     expect(backendClientSource).toContain("item/completed");
     expect(backendClientSource).toContain("item/agentMessage/delta");
     expect(backendClientSource).toContain("genbi/artifact/created");
-    expect(backendClientSource).toContain("genbi/artifact/updated");
+    expect(backendClientSource).toContain("genbi/artifact/failed");
     expect(backendClientSource).toContain("mapBackendEvents");
     expect(backendClientSource).toContain("event.payload.thread_id");
     expect(backendClientSource).toContain("listBackendAnalysisThreads");
     expect(backendClientSource).toContain("deleteBackendAnalysisThread");
-    expect(workspaceSource).toContain("optimisticStartNodes(content)");
-    expect(workspaceSource).toContain("optimisticStartNodes(question)");
+    expect(workspaceSource).toContain("turn.start(trimmed, newTaskId, newTaskId)");
+    expect(workspaceSource).toContain("turn.start(question, newTaskId, newTaskId)");
+    expect(workspaceSource).toContain("taskCreation.createTask");
+    expect(workspaceSource).toContain("const isWaitingForFirstQuestion = Boolean(");
+    expect(workspaceSource).toContain('currentAnalysisThread?.status === "waiting_for_question"');
+    expect(workspaceSource).toContain("markCurrentThreadAsStarted");
+    expect(workspaceSource).toContain("isNewTask={isWaitingForFirstQuestion}");
+    expect(workspaceSource).not.toContain("draft_");
     expect(workspaceSource).not.toContain("const analysisTaskGroups = [");
     expect(workspaceSource).toContain("暂无历史任务");
     expect(workspaceSource).toContain("多选删除");
@@ -226,6 +234,7 @@ describe("analysis task product language", () => {
     expect(analysisTaskThreadSource).toContain("threadScrollRef");
     expect(analysisTaskThreadSource).toContain("输入待解决的业务问题，按回车发送");
     expect(analysisTaskThreadSource).toContain("有什么问题，或想继续分析什么？");
+    expect(analysisTaskThreadSource).not.toContain("draft_");
     expect(workspaceSource).not.toContain("threadScrollRef");
     expect(workspaceSource).not.toContain("lastNodeCountRef");
   });
@@ -263,10 +272,26 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain("openedReportId");
     expect(workspaceSource).toContain("openedReportBelongsToCurrentTask");
     expect(workspaceSource).toContain("currentPanelReport");
+    expect(workspaceSource).toContain("const detail = await getBackendAnalysisThread(sourceThreadId)");
+    expect(workspaceSource).toContain("taskList.upsert(refreshed)");
     expect(workspaceSource).toContain("loading={currentPanelReportLoading}");
-    expect(workspaceSource).toContain("initialVersion={currentPanelVersion}");
+    expect(workspaceSource).not.toContain("onListVersions=");
+    expect(workspaceSource).not.toContain("onLoadVersion=");
     expect(interactiveReportSource).toContain("onSaveReport");
-    expect(interactiveReportSource).toContain("已保存新的报告版本");
+    expect(interactiveReportSource).not.toContain("历史版本");
+    expect(interactiveReportSource).not.toContain("新的报告版本");
+    expect(interactiveReportSource).not.toContain("INTERACTIVE RESULT · v");
+  });
+
+  test("creates a real backend analysis thread from a saved report and carries its report snapshot", () => {
+    expect(workspaceSource).toContain("handleCreateAnalysisFromReport");
+    expect(workspaceSource).toContain("createAnalysisThreadFromReportBackend");
+    expect(workspaceSource).toContain("setCurrentAnalysisTaskId(created.thread.id)");
+    expect(workspaceSource).toContain("setOpenedReportThreadId(created.thread.id)");
+    expect(workspaceSource).toContain("savedReportFromThreadMetadata");
+    expect(workspaceSource).not.toContain("draftReportIds");
+    expect(workspaceSource).not.toContain("draft_report_");
+    expect(workspaceSource).not.toContain("reportDraftNodes");
   });
 
   test("shows a shared asset library entry that can reopen source task context", () => {
@@ -345,12 +370,19 @@ describe("analysis task product language", () => {
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 推荐步骤"');
   });
 
-  test("keeps the history list stable when opening an existing task", () => {
-    expect(workspaceSource).toContain("}, []);");
-    expect(workspaceSource).toContain('if (!flow.threadId || flow.threadId.startsWith("draft_") || !selectedAnalysisTask) return;');
-    expect(workspaceSource).toContain('const shouldSyncThread = flow.running || currentAnalysisTaskId?.startsWith("draft_") || hadLocalRunningFlow;');
-    expect(workspaceSource).toContain("if (!shouldSyncThread) return threads;");
-    expect(workspaceSource).not.toContain("setCurrentAnalysisTaskId(threadId);");
-    expect(workspaceSource).not.toContain("}, [flow.threadId]);");
+  test("history list is owned by useTaskList, not by the live turn execution", () => {
+    // The previous "sync the list from the live flow state" effect
+    // bundled a query concern (the sidebar) with an execution concern
+    // (the live SSE). That coupling is now gone: the workspace pulls
+    // the sidebar from ``useTaskList`` and the live stream from
+    // ``useTurnExecution``, and the list refreshes only on upsert or
+    // explicit ``refresh()``.
+    expect(workspaceSource).toContain("useTaskList");
+    expect(workspaceSource).toContain("useTaskDetail");
+    expect(workspaceSource).toContain("useTurnExecution");
+    expect(workspaceSource).toContain("当前任务正在分析，停止回答后再切换任务。");
+    expect(workspaceSource).not.toContain("hadLocalRunningFlowRef");
+    expect(workspaceSource).not.toContain("shouldSyncThread = flow.running");
+    expect(workspaceSource).not.toContain("if (!flow.threadId || !selectedAnalysisTask)");
   });
 });
