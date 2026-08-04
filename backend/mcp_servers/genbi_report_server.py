@@ -4,8 +4,7 @@ import json
 import sys
 from typing import Any
 
-from backend.analysis.report_artifact import issues_to_payload, normalize_report_artifact, validate_report_artifact
-from backend.analysis.report_compiler import compile_interactive_report
+from backend.analysis.report_artifact import issues_to_payload, validate_report_artifact
 
 
 CREATE_TOOL_NAME = "create_interactive_report"
@@ -44,37 +43,50 @@ def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _create_interactive_report(message: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
-    report = _artifact_from_arguments(arguments, normalize=True)
-    issues = validate_report_artifact(report)
+    # The tool is intentionally strict: ``artifact`` is the only
+    # accepted input shape, and Thread/Turn IDs are NOT accepted from
+    # the agent. The GenBI runtime injects source.threadId / turnId
+    # at the projection layer; any incoming ``codex_*_pending`` or
+    # client-supplied id was exactly the silent-fake-lineage behavior
+    # the contract prohibits.
+    artifact = arguments.get("artifact")
+    if not isinstance(artifact, dict):
+        return _result(message, {"content": [{"type": "text", "text": json.dumps({"ok": False, "status": "validation_failed", "errors": [{"path": "artifact", "code": "required", "message": "artifact is required and must be a complete ReportArtifact object."}], "fatal": True}, ensure_ascii=False)}]})
+    # The agent must not supply lineage fields. GenBI Runtime
+    # injects source.threadId / turnId / codex_* at projection time;
+    # the agent fabricating them in the artifact creates fake
+    # lineage, which is exactly the contract violation.
+    forbidden_top_level = ("threadId", "turnId", "codex_thread_id", "codex_turn_id", "codex_item_id", "source")
+    for forbidden in forbidden_top_level:
+        if forbidden in artifact:
+            return _result(message, {"content": [{"type": "text", "text": json.dumps({"ok": False, "status": "validation_failed", "errors": [{"path": f"artifact.{forbidden}", "code": "forbidden_field", "message": "Thread/Turn/Item IDs 与 source 由 GenBI Runtime 注入，agent 不应填写。"}], "fatal": True}, ensure_ascii=False)}]})
+    issues = validate_report_artifact(artifact)
     if issues:
-        return _result(message, {"content": [{"type": "text", "text": json.dumps({"ok": False, "status": "validation_failed", "errors": issues_to_payload(issues)}, ensure_ascii=False)}]})
-    return _result(message, {"content": [{"type": "text", "text": json.dumps({"ok": True, "status": "validated", "interactive_report": report}, ensure_ascii=False)}]})
+        return _result(message, {"content": [{"type": "text", "text": json.dumps({"ok": False, "status": "validation_failed", "errors": issues_to_payload(issues), "fatal": True}, ensure_ascii=False)}]})
+    return _result(message, {"content": [{"type": "text", "text": json.dumps({"ok": True, "status": "validated", "interactive_report": artifact}, ensure_ascii=False)}]})
 
 
 def _validate_interactive_report(message: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
-    report = _artifact_from_arguments(arguments, normalize=False)
-    issues = validate_report_artifact(report)
-    return _result(message, {"content": [{"type": "text", "text": json.dumps({"ok": not issues, "status": "valid" if not issues else "validation_failed", "errors": issues_to_payload(issues), **({"interactive_report": report} if not issues else {})}, ensure_ascii=False)}]})
-
-
-def _artifact_from_arguments(arguments: dict[str, Any], *, normalize: bool) -> dict[str, Any]:
     artifact = arguments.get("artifact")
-    if isinstance(artifact, dict):
-        source = dict(artifact.get("source") or {})
-        source.setdefault("threadId", str(arguments.get("threadId") or arguments.get("thread_id") or source.get("threadId") or "codex_thread_pending"))
-        source.setdefault("turnId", str(arguments.get("turnId") or arguments.get("turn_id") or source.get("turnId") or "codex_turn_pending"))
-        next_artifact = {**artifact, "source": source}
-        return normalize_report_artifact(next_artifact) if normalize else next_artifact
-    return compile_interactive_report(
-        arguments,
-        thread_id=str(arguments.get("threadId") or arguments.get("thread_id") or "codex_thread_pending"),
-        turn_id=str(arguments.get("turnId") or arguments.get("turn_id") or "codex_turn_pending"),
-    )
+    if not isinstance(artifact, dict):
+        return _result(message, {"content": [{"type": "text", "text": json.dumps({"ok": False, "status": "validation_failed", "errors": [{"path": "artifact", "code": "required", "message": "artifact is required."}], "fatal": True}, ensure_ascii=False)}]})
+    issues = validate_report_artifact(artifact)
+    if issues:
+        return _result(message, {"content": [{"type": "text", "text": json.dumps({"ok": False, "status": "validation_failed", "errors": issues_to_payload(issues)}, ensure_ascii=False)}]})
+    return _result(message, {"content": [{"type": "text", "text": json.dumps({"ok": True, "status": "valid", "interactive_report": artifact}, ensure_ascii=False)}]})
 
 
 def _normalize_tool_arguments(value: Any) -> Any:
+    """Drop empty values and unwrap single-key ``{item: ...}`` shells.
+
+    PowerShell/MCP adapters sometimes serialize large arguments as
+    ``{ "item": "..." }`` wrappers; we unwrap that shape to make
+    ``artifact`` reachable. We do NOT perform any other rewriting
+    (no field inference, no title/subtitle defaults, no row
+    padding). Incomplete inputs are rejected, not coerced.
+    """
     unwrapped = _unwrap_item_payload(value)
-    return _normalize_report_shapes(_drop_empty_values(unwrapped))
+    return _drop_empty_values(unwrapped)
 
 
 def _unwrap_item_payload(value: Any) -> Any:
@@ -88,30 +100,10 @@ def _unwrap_item_payload(value: Any) -> Any:
         parsed_json = _parse_json_value(value)
         if parsed_json is not None:
             return _unwrap_item_payload(parsed_json)
-        parsed = _parse_powershell_object(value)
-        return parsed if parsed is not None else value
-    return value
-
-
-def _normalize_report_shapes(value: Any, *, key: str | None = None) -> Any:
-    if isinstance(value, dict):
-        normalized = {item_key: _normalize_report_shapes(item_value, key=item_key) for item_key, item_value in value.items()}
-        if key in {"rows", "series", "columns", "content", "filterBindings", "filters"}:
-            return [normalized]
-        return normalized
-    if isinstance(value, list):
-        items = [_normalize_report_shapes(item, key=key) for item in value]
-        if key in {"rows", "series", "columns", "content", "filterBindings", "filters"}:
-            flattened: list[Any] = []
-            for item in items:
-                if isinstance(item, list):
-                    flattened.extend(item)
-                else:
-                    flattened.append(item)
-            return flattened
-        return items
-    if value is None and key in {"queries", "datasets", "chartSpecs", "gridSpecs", "zones"}:
-        return {}
+        # PowerShell object strings are not auto-coerced to dicts; the
+        # call will surface a validation error rather than fabricate
+        # a default report.
+        return value
     return value
 
 
@@ -135,62 +127,20 @@ def _parse_json_value(value: str) -> Any:
         return None
 
 
-def _parse_powershell_object(value: str) -> dict[str, Any] | None:
-    text = value.strip()
-    if not text.startswith("@{") or not text.endswith("}"):
-        return None
-    body = text[2:-1].strip()
-    if not body or "System.Object[]" in body:
-        return None
-    parsed: dict[str, Any] = {}
-    for part in body.split(";"):
-        item = part.strip()
-        if not item:
-            continue
-        if "=" not in item:
-            return None
-        key, raw = item.split("=", 1)
-        key = key.strip()
-        raw = raw.strip()
-        if not key or not raw or raw == "System.Object[]":
-            continue
-        parsed[key] = _coerce_scalar(raw)
-    return parsed or None
-
-
-def _coerce_scalar(value: str) -> Any:
-    if value.lower() == "true":
-        return True
-    if value.lower() == "false":
-        return False
-    try:
-        if "." not in value and "e" not in value.lower():
-            return int(value)
-        return float(value)
-    except ValueError:
-        return value
-
-
 def _create_tool_schema() -> dict[str, Any]:
     return {
         "name": CREATE_TOOL_NAME,
-        "description": "Create a GenBI interactive_report artifact for the right-side Puck report panel. The tool validates ReportArtifact JSON before returning a savable artifact; invalid artifacts return structured errors and are not saved.",
+        "description": "Submit a complete GenBI ReportArtifact for validation. The tool accepts only an ``artifact`` object; Thread/Turn/Item IDs are forbidden here (the GenBI Runtime injects them at projection time). Invalid artifacts return structured errors and are NOT saved.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "artifact": {"type": "object", "description": "Preferred: complete ReportArtifact JSON with queries, datasets, components/specs, layout document, source, and ownerId."},
-                "title": {"type": "string"},
-                "subtitle": {"type": "string"},
-                "summary": {"type": "string"},
-                "sourceTable": {"type": "string", "description": "Optional source table or dataset name used as evidence. Not limited to any fixed table."},
-                "sourceDescription": {"type": "string", "description": "Optional human-readable source or query scope when the evidence is not a single table."},
-                "datasetId": {"type": "string", "default": "channel_sales"},
-                "rows": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-                "threadId": {"type": "string"},
-                "turnId": {"type": "string"},
+                "artifact": {
+                    "type": "object",
+                    "description": "Complete ReportArtifact JSON. Must satisfy validate_report_artifact. Thread/Turn/Item IDs and the source object are populated server-side; supplying them is an error.",
+                },
             },
-            "required": ["title", "summary", "rows"],
-            "additionalProperties": True,
+            "required": ["artifact"],
+            "additionalProperties": False,
         },
     }
 
@@ -198,16 +148,14 @@ def _create_tool_schema() -> dict[str, Any]:
 def _validate_tool_schema() -> dict[str, Any]:
     return {
         "name": VALIDATE_TOOL_NAME,
-        "description": "Validate a GenBI ReportArtifact JSON without saving or emitting an artifact. Use this to inspect missing datasets, fields, chart specs, grid specs, query links, and layout contract issues before create/update.",
+        "description": "Validate a GenBI ReportArtifact JSON without saving. Use this to inspect missing datasets, fields, chart specs, grid specs, query links, and layout contract issues before create.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "artifact": {"type": "object", "description": "ReportArtifact JSON to validate."},
-                "threadId": {"type": "string"},
-                "turnId": {"type": "string"},
             },
             "required": ["artifact"],
-            "additionalProperties": True,
+            "additionalProperties": False,
         },
     }
 

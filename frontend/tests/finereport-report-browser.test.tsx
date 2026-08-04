@@ -21,6 +21,8 @@ const reportSummary = {
     cells: 2,
     formulas: 1,
     bindings: 1,
+    usageUsers: 1,
+    totalUsageCount: 3,
   },
 };
 
@@ -38,6 +40,10 @@ const reportDetail = {
   parameters: [],
   parameterWidgets: [{ parameter: "month", widget_class: "ComboBox", label: "月份" }],
   conditionalRules: [{ cell: "A2", condition: "amount > 0", action_class: "Style", action: "highlight" }],
+  reportUsage: {
+    totalUsageCount: 3,
+    users: [{ userName: "朱子越", position: "财务BP", department: "财务管理部", usageCount: 3 }],
+  },
   sheets: [
     {
       name: "额度报表",
@@ -88,6 +94,10 @@ describe("FineReport report browser", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "数据集与 SQL" }));
     await waitFor(() => expect(screen.getByText("select amount from dm.budget")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "使用情况" }));
+    await waitFor(() => expect(screen.getByText("朱子越")).toBeTruthy());
+    expect(screen.getByText("财务BP / 财务管理部")).toBeTruthy();
   });
 
   test("keeps the main area empty for other structured knowledge sources", () => {

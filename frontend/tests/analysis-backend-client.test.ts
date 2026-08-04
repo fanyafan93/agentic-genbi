@@ -349,18 +349,34 @@ describe("analysis backend client event mapping", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    await collect(client.send({ kind: "start", question: "start question" }));
-    const messageEvents = await collect(client.send({ kind: "message", content: "continue question" }));
+    // The caller now owns the controller for every turn, including the
+    // signal. We still hand the client a per-turn AbortSignal so the
+    // session boundary mirrors the production ``useFlow`` wiring.
+    // The client refuses to send an empty question; the workspace
+    // always supplies one before dispatching a turn.
+    await collect(client.send({
+      kind: "start",
+      taskId: "task_seed",
+      threadId: "thread_seed",
+      question: "start question",
+      signal: new AbortController().signal,
+    }));
+    const messageEvents = await collect(client.send({
+      kind: "message",
+      taskId: "task_seed",
+      content: "continue question",
+      threadId: "thread_analysis_456",
+      signal: new AbortController().signal,
+    }));
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const startBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     const messageBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://backend.test/api/analysis/threads/turns/stream");
+    expect(fetchMock.mock.calls[0][0]).toBe("http://backend.test/api/analysis/threads/thread_seed/turns/stream");
     expect(fetchMock.mock.calls[1][0]).toBe("http://backend.test/api/analysis/threads/thread_analysis_456/turns/stream");
     expect(startBody.conversation_id).toBeUndefined();
-    expect(startBody.metadata).toMatchObject({ frontend_client: "analysis_task" });
-    expect(startBody.metadata).toEqual({ frontend_client: "analysis_task" });
-    expect(messageBody.conversation_id).toBeUndefined();
+    expect(startBody.metadata).toMatchObject({ frontend_client: "analysis_task", frontend_task_id: "task_seed" });
+    expect(messageBody.metadata).toMatchObject({ frontend_task_id: "task_seed" });
     expect(messageBody.turn_kind).toBe("message");
     expect(messageEvents[0]).toMatchObject({
       type: "user",
@@ -416,13 +432,23 @@ describe("analysis backend client event mapping", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    const eventsPromise = collect(client.send({ kind: "start", question: "slow question" }));
+    const eventsPromise = collect(client.send({
+      kind: "start",
+      taskId: "task_timeout",
+      threadId: "thread_timeout",
+      signal: new AbortController().signal,
+      question: "slow question",
+    }));
     await vi.advanceTimersByTimeAsync(25);
     const events = await eventsPromise;
 
     expect(events).toEqual([
-      { type: "error", message: "Analysis backend request timed out. Please retry." },
-      { type: "done" },
+      {
+        type: "error",
+        message: "Analysis backend request timed out. Please retry.",
+        threadId: "thread_timeout",
+      },
+      { type: "done", threadId: "thread_timeout" },
     ]);
   });
 
@@ -441,7 +467,13 @@ describe("analysis backend client event mapping", () => {
     )));
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    await collect(client.send({ kind: "message", content: "follow up", threadId: "thread_existing" }));
+    await collect(client.send({
+      kind: "message",
+      taskId: "task_followup",
+      content: "follow up",
+      threadId: "thread_existing",
+      signal: new AbortController().signal,
+    }));
 
     expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads/thread_existing/turns/stream");
   });
@@ -461,7 +493,13 @@ describe("analysis backend client event mapping", () => {
     )));
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    await collect(client.send({ kind: "start", question: "first question", threadId: "thread_waiting" }));
+    await collect(client.send({
+      kind: "start",
+      taskId: "task_waiting",
+      question: "first question",
+      threadId: "thread_waiting",
+      signal: new AbortController().signal,
+    }));
 
     expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads/thread_waiting/turns/stream");
   });
@@ -556,7 +594,13 @@ describe("analysis backend client event mapping", () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(stream, { status: 200 }))));
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
-    const eventsPromise = collect(client.send({ kind: "start", question: "slow but active" }));
+    const eventsPromise = collect(client.send({
+      kind: "start",
+      taskId: "task_timeout_refresh",
+      threadId: "thread_timeout_refresh",
+      signal: new AbortController().signal,
+      question: "slow but active",
+    }));
     await vi.advanceTimersByTimeAsync(40);
     const events = await eventsPromise;
 

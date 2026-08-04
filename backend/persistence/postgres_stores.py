@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from dataclasses import asdict
@@ -766,12 +766,12 @@ class PostgresInteractiveReportStore:
                 ).fetchone()
         return _interactive_report_from_row(report_row), _interactive_report_version_from_row(version_row)
 
-    def list_reports(self, *, owner_id: str | None = None, limit: int = 50) -> list[InteractiveReportRecord]:
+    def list_reports(self, *, user_id: str | None = None, limit: int = 50) -> list[InteractiveReportRecord]:
         where = "WHERE deleted_at IS NULL"
         params: dict[str, Any] = {"limit": limit}
-        if owner_id:
-            where += " AND owner_id = %(owner_id)s"
-            params["owner_id"] = owner_id
+        if user_id:
+            where += " AND owner_id = %(user_id)s"
+            params["user_id"] = user_id
         with _connect(self.database_url) as conn:
             rows = conn.execute(
                 f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} {where} ORDER BY updated_at DESC LIMIT %(limit)s",

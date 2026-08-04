@@ -44,8 +44,6 @@
 ## 实现原则
 
 - 本项目是 vibe coding：用户定方向，AI 快速做可运行切片。
-- 前端优先、mock-first 可以，但 mock 必须贴近未来真实契约。
-- 不确定的产品体验先用可替换 mock 验证。
 - 成熟框架和 SDK 优先；Codex 已有的能力优先于任何自研实现。
 - openai-codex Python SDK / Codex 负责通用 Agent 工程底座；本项目只自研业务语义库、数据安全访问、分析资产治理、前端工作台和 Codex 适配层。
 - 模型 provider、工具、MCP、Skills、Apps / Connectors、sandbox、approval、apply_patch、file search、git 等能力优先接 Codex 生态，不重复造轮子。

@@ -81,8 +81,6 @@ type BackendReportCenterResponse = {
   }>;
 };
 
-const DEFAULT_REPORT_OWNER_ID = "local-user";
-
 export function shouldUseBackendInteractiveReports(): boolean {
   return process.env.NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME === "backend" && Boolean(getInteractiveReportApiBaseUrl());
 }
@@ -94,36 +92,46 @@ export function getInteractiveReportApiBaseUrl(): string | null {
 export async function saveInteractiveReportToBackend(
   report: InteractiveReport,
   expectedVersion?: number,
-  ownerId = DEFAULT_REPORT_OWNER_ID,
 ): Promise<SavedInteractiveReport> {
+  // The backend derives ``ownerId`` from the active Auth.js session cookie.
+  // We never attach an identity field from the client.
   const response = await fetchInteractiveReport("/api/analysis/reports", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...report, ownerId, expectedVersion }),
+    body: JSON.stringify({ ...report, expectedVersion }),
+    credentials: "include",
   });
   return toSavedInteractiveReport(await readJson<BackendReportDetailResponse>(response));
 }
 
 export async function getInteractiveReportFromBackend(reportId: string, version?: number): Promise<SavedInteractiveReport> {
   const suffix = version === undefined ? "" : `/versions/${version}`;
-  const response = await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}${suffix}`);
+  const response = await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}${suffix}`, {
+    credentials: "include",
+  });
   return toSavedInteractiveReport(await readJson<BackendReportDetailResponse>(response));
 }
 
 export async function listInteractiveReportVersionsFromBackend(reportId: string): Promise<InteractiveReportVersionSummary[]> {
-  const response = await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}/versions`);
+  const response = await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}/versions`, {
+    credentials: "include",
+  });
   const payload = await readJson<{ versions: InteractiveReportVersionSummary[] }>(response);
   return payload.versions;
 }
 
-export async function listInteractiveReportsFromBackend(ownerId = DEFAULT_REPORT_OWNER_ID): Promise<SavedInteractiveReport[]> {
-  const response = await fetchInteractiveReport(`/api/analysis/reports?owner_id=${encodeURIComponent(ownerId)}`);
+export async function listInteractiveReportsFromBackend(): Promise<SavedInteractiveReport[]> {
+  const response = await fetchInteractiveReport("/api/analysis/reports", {
+    credentials: "include",
+  });
   const payload = await readJson<{ reports: BackendReportSummary[] }>(response);
   return Promise.all(payload.reports.map((report) => getInteractiveReportFromBackend(report.id)));
 }
 
-export async function listReportCenterFromBackend(userId = DEFAULT_REPORT_OWNER_ID): Promise<ReportCenter> {
-  const response = await fetchInteractiveReport(`/api/analysis/report-center?user_id=${encodeURIComponent(userId)}`);
+export async function listReportCenterFromBackend(): Promise<ReportCenter> {
+  const response = await fetchInteractiveReport("/api/analysis/report-center", {
+    credentials: "include",
+  });
   const payload = await readJson<BackendReportCenterResponse>(response);
   const mine = await Promise.all(payload.mine.map((item) => getInteractiveReportFromBackend(item.report.id)));
   const sharedWithMe = await Promise.all(payload.sharedWithMe.map(async (item) => ({
@@ -135,15 +143,12 @@ export async function listReportCenterFromBackend(userId = DEFAULT_REPORT_OWNER_
   return { mine, sharedWithMe };
 }
 
-export async function renameInteractiveReportInBackend(
-  reportId: string,
-  title: string,
-  ownerId = DEFAULT_REPORT_OWNER_ID,
-): Promise<void> {
+export async function renameInteractiveReportInBackend(reportId: string, title: string): Promise<void> {
   await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ownerId, title }),
+    body: JSON.stringify({ title }),
+    credentials: "include",
   });
 }
 
@@ -151,33 +156,31 @@ export async function shareInteractiveReportToBackend(
   reportId: string,
   recipientUserId: string,
   permission: "view" | "view_and_reuse",
-  ownerId = DEFAULT_REPORT_OWNER_ID,
 ): Promise<void> {
   await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}/shares`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ownerId, recipientUserId, permission }),
+    body: JSON.stringify({ recipientUserId, permission }),
+    credentials: "include",
   });
 }
 
-export async function deleteInteractiveReportFromBackend(
-  reportId: string,
-  ownerId = DEFAULT_REPORT_OWNER_ID,
-): Promise<void> {
-  await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}?owner_id=${encodeURIComponent(ownerId)}`, {
+export async function deleteInteractiveReportFromBackend(reportId: string): Promise<void> {
+  await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}`, {
     method: "DELETE",
+    credentials: "include",
   });
 }
 
 export async function createAnalysisThreadFromReportBackend(
   reportId: string,
   title?: string,
-  userId = DEFAULT_REPORT_OWNER_ID,
 ): Promise<ReportAnalysisThread> {
   const response = await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}/analysis-thread`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ userId, title }),
+    body: JSON.stringify({ title }),
+    credentials: "include",
   });
   const payload = await readJson<{ thread: ReportAnalysisThread["thread"]; report: BackendReportDetailResponse }>(response);
   return {
@@ -187,7 +190,9 @@ export async function createAnalysisThreadFromReportBackend(
 }
 
 export async function listInteractiveReportsByThreadFromBackend(threadId: string): Promise<SavedInteractiveReport[]> {
-  const response = await fetchInteractiveReport(`/api/analysis/reports?source_thread_id=${encodeURIComponent(threadId)}`);
+  const response = await fetchInteractiveReport(`/api/analysis/reports?source_thread_id=${encodeURIComponent(threadId)}`, {
+    credentials: "include",
+  });
   const payload = await readJson<{ reports: BackendReportSummary[] }>(response);
   return Promise.all(payload.reports.map((report) => getInteractiveReportFromBackend(report.id)));
 }
@@ -197,7 +202,11 @@ async function fetchInteractiveReport(path: string, init?: RequestInit): Promise
   if (!apiBaseUrl) throw new Error("Interactive report API base URL is not configured.");
   const response = await fetch(`${apiBaseUrl}${path}`, init);
   if (!response.ok) {
-    const message = response.status === 409 ? "分析结果已被其他更新覆盖，请重新打开后再保存。" : `Interactive report API returned ${response.status}`;
+    const message = response.status === 401
+      ? "登录会话已过期，请重新登录后再试。"
+      : response.status === 409
+      ? "分析结果已被其他更新覆盖，请重新打开后再保存。"
+      : `Interactive report API returned ${response.status}`;
     throw new Error(message);
   }
   return response;

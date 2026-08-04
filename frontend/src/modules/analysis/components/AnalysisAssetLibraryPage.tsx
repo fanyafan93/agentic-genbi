@@ -77,7 +77,7 @@ const sharedAnalysisAssets: AnalysisAssetLibraryEntry[] = [
     assetId: "asset_shared_filereport_path",
     artifactVersionId: "artifact_version_filereport_path_v1",
     sourceTaskId: "analysis_task_report_parser",
-    sourceTaskTitle: "FineReport 报表语义解析",
+    sourceTaskTitle: "FineReport 报表画像语义",
     sourceConversationId: "conv_analysis_report_parser",
     assetType: "分析路径",
     title: "报表级语义模型解析路径",

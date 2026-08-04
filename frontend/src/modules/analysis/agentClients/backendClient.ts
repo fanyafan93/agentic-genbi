@@ -35,7 +35,7 @@ export type BackendAnalysisThreadDetail = {
     itemType: string;
     status: string;
     payload: Record<string, unknown>;
-    createdAt: string;
+    createdAt?: string;
     genbiTurnId?: string | null;
   }>;
 };
@@ -67,46 +67,60 @@ const DEFAULT_TOKEN_FLUSH_INTERVAL_MS = 14;
 const DEFAULT_TOKEN_FLUSH_CHARS = 2;
 
 export class BackendAnalysisAgentClient implements AgentClient {
-  private threadId: string | null = null;
-  private abortController: AbortController | null = null;
-
+  // The client intentionally holds no business state. Every ``send`` call
+  // owns its own fetch, timeout, and reader, and cancellation goes
+  // through the ``AbortSignal`` the caller passes in. See ``use-flow.ts``
+  // for the per-task controller registry that replaced the previous
+  // module-level singleton.
   constructor(private readonly apiBaseUrl: string) {}
 
   async *send(input: AgentInput): AsyncIterable<AgentEvent> {
-    if (input.kind === "reset") {
-      this.cancel();
-      this.threadId = null;
-      yield { type: "done" };
-      return;
-    }
-
     const question = getInputQuestion(input);
+    if (input.signal.aborted) {
+      return;
+    }
     if (!question) {
-      yield { type: "done" };
+      // Empty input is a programming / UI bug, not a default the
+      // client should paper over. Surface the failure explicitly so
+      // the workspace can show a "请输入问题" message instead of a
+      // channel-sales report.
+      yield { type: "error", message: "问题不能为空，请输入业务问题后再开始分析。", threadId: input.threadId };
+      yield { type: "done", threadId: input.threadId };
       return;
     }
 
-    this.abortController = new AbortController();
-    let timedOut = false;
+    const controller = new AbortController();
+    // Re-export the caller's signal so a timeout on our side cancels
+    // the request too.
+    const forwardAbort = () => {
+      if (!controller.signal.aborted) controller.abort(input.signal.reason);
+    };
+    if (input.signal.aborted) {
+      forwardAbort();
+    } else {
+      input.signal.addEventListener("abort", forwardAbort, { once: true });
+    }
+
     let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
-    const refreshTimeout = () => {
+    const startTimeout = () => {
       if (timeoutId) globalThis.clearTimeout(timeoutId);
       timeoutId = globalThis.setTimeout(() => {
-        timedOut = true;
-        this.abortController?.abort();
+        if (!controller.signal.aborted) controller.abort(new Error("analysis_request_timeout"));
       }, getBackendAnalysisRequestTimeoutMs());
     };
-    refreshTimeout();
-    const clearRequestTimeout = () => {
-      if (timeoutId) globalThis.clearTimeout(timeoutId);
-      timeoutId = null;
+    const clearTimeout2 = () => {
+      if (timeoutId) {
+        globalThis.clearTimeout(timeoutId);
+        timeoutId = null;
+      }
     };
+    startTimeout();
+
+    let response: Response | null = null;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     try {
-      const targetThreadId = input.threadId || this.threadId;
-      const threadTurnUrl = targetThreadId
-        ? `${this.apiBaseUrl}/api/analysis/threads/${encodeURIComponent(targetThreadId)}/turns/stream`
-        : `${this.apiBaseUrl}/api/analysis/threads/turns/stream`;
-      const response = await fetch(threadTurnUrl, {
+      const threadTurnUrl = `${this.apiBaseUrl}/api/analysis/threads/${encodeURIComponent(input.threadId)}/turns/stream`;
+      response = await fetch(threadTurnUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -114,50 +128,104 @@ export class BackendAnalysisAgentClient implements AgentClient {
           turn_kind: input.kind,
           metadata: {
             frontend_client: "analysis_task",
+            frontend_task_id: input.taskId,
           },
         }),
-        signal: this.abortController.signal,
+        credentials: "include",
+        signal: controller.signal,
       });
       if (!response.ok) {
+        if (response.status === 401) {
+          yield {
+            type: "error",
+            message: "登录会话已过期，请重新登录后再试。",
+            threadId: input.threadId,
+          };
+          yield { type: "done", threadId: input.threadId };
+          return;
+        }
         throw new Error(`Analysis SSE API returned ${response.status}`);
       }
-      const streamContext: BackendEventMappingContext = {};
-      for await (const backendEvent of readAnalysisSse(response)) {
-        refreshTimeout();
-        const threadId = asString(backendEvent.payload.thread_id) || asString(backendEvent.payload.conversation_id);
-        if (threadId) this.threadId = threadId;
-        for (const event of mapBackendEvents([backendEvent], input.kind, streamContext)) {
-          for await (const displayEvent of smoothTokenEvent(event)) {
-            yield displayEvent;
-          }
+      if (controller.signal.aborted) return;
+      const decoder = new TextDecoder();
+      reader = response.body?.getReader() ?? null;
+      if (!reader) {
+        // No streaming body — fall back to a synchronous parse.
+        const text = await response.text();
+        for await (const displayEvent of mapAndSmooth(text, input, () => startTimeout())) {
+          yield displayEvent;
         }
-      }
-      clearRequestTimeout();
-    } catch (error) {
-      if ((error as Error).name === "AbortError" && !timedOut) {
-        clearRequestTimeout();
+        clearTimeout2();
         return;
       }
-      clearRequestTimeout();
-      if (timedOut) {
+      let buffer = "";
+      while (true) {
+        if (controller.signal.aborted) break;
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+        const parts = buffer.split(/\r?\n\r?\n/);
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          for await (const event of mapAndSmooth(part, input, () => startTimeout())) {
+            yield event;
+          }
+        }
+        if (done) break;
+      }
+      if (buffer.trim()) {
+        for await (const event of mapAndSmooth(buffer, input, () => startTimeout())) {
+          yield event;
+        }
+      }
+    } catch (error) {
+      const reasonMessage = (controller.signal.reason as { message?: string } | undefined)?.message;
+      // Distinguish timeout (caller's signal untouched) from caller-cancel
+      // (caller's signal already aborted).
+      const callerCancelled = input.signal.aborted;
+      if (controller.signal.aborted && callerCancelled) {
+        return;
+      }
+      if (reasonMessage === "analysis_request_timeout") {
         yield {
           type: "error",
           message: "Analysis backend request timed out. Please retry.",
+          threadId: input.threadId,
         };
-        yield { type: "done" };
+        yield { type: "done", threadId: input.threadId };
         return;
       }
       yield {
         type: "error",
         message: error instanceof Error ? error.message : "分析任务后端调用失败",
+        threadId: input.threadId,
       };
-      yield { type: "done" };
+      yield { type: "done", threadId: input.threadId };
+    } finally {
+      clearTimeout2();
+      input.signal.removeEventListener("abort", forwardAbort);
+      try {
+        if (reader) await reader.cancel();
+      } catch {
+        // Closing the reader is best-effort; ignore.
+      }
     }
   }
+}
 
-  cancel(): void {
-    this.abortController?.abort();
-    this.abortController = null;
+async function* mapAndSmooth(
+  block: string,
+  input: AgentInput,
+  refreshTimeout: () => void,
+): AsyncIterable<AgentEvent> {
+  if (!block.trim()) return;
+  const events = parseAnalysisSse(block);
+  for (const backendEvent of events) {
+    refreshTimeout();
+    for (const event of mapBackendEvents([backendEvent], input.kind)) {
+      for await (const displayEvent of smoothTokenEvent(event)) {
+        yield displayEvent;
+      }
+    }
   }
 }
 
@@ -172,32 +240,75 @@ export function getBackendAnalysisApiBaseUrl(): string | null {
   return process.env.NEXT_PUBLIC_GENBI_API_BASE_URL ?? null;
 }
 
+/**
+ * Returns a fresh client per call. The shared singleton previously caused
+ * cross-task aborts and thread-id overwrites; per the multi-task contract
+ * each ``useFlow`` now owns its own controllers and creates the client it
+ * needs. Cheap to construct, no hidden state.
+ */
+export function createBackendAnalysisAgentClient(): BackendAnalysisAgentClient {
+  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
+  if (!shouldUseBackendAnalysisClient() || !apiBaseUrl) {
+    throw new Error("Analysis backend is not configured.");
+  }
+  return new BackendAnalysisAgentClient(apiBaseUrl);
+}
+
 export async function listBackendAnalysisThreads(): Promise<BackendAnalysisThreadSummary[]> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) return [];
-  const response = await fetch(`${apiBaseUrl}/api/analysis/threads`);
+  const response = await fetch(`${apiBaseUrl}/api/analysis/threads`, { credentials: "include" });
+  if (response.status === 401) {
+    return [];
+  }
   if (!response.ok) throw new Error(`Analysis threads API returned ${response.status}`);
   const payload = await response.json() as { threads?: BackendAnalysisThreadSummary[] };
   return Array.isArray(payload.threads) ? payload.threads : [];
 }
 
-export async function createBackendAnalysisThread(title: string, userId?: string): Promise<BackendAnalysisThreadSummary> {
+export async function createBackendAnalysisThread(title: string): Promise<BackendAnalysisThreadSummary> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
   const response = await fetch(`${apiBaseUrl}/api/analysis/threads`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, user_id: userId }),
+    body: JSON.stringify({ title }),
+    credentials: "include",
   });
   if (!response.ok) throw new Error(`Analysis thread create API returned ${response.status}`);
   const payload = await response.json() as { thread: BackendAnalysisThreadSummary };
   return payload.thread;
 }
 
+/**
+ * Create a new analysis task via the ``/api/analysis/tasks`` endpoint.
+ *
+ * The endpoint returns the server-issued ``thread.id``; the frontend
+ * never fabricates a draft_* placeholder. While the request is in
+ * flight the caller should display a "正在创建" placeholder, and only
+ * treat the returned id as the canonical task id once the promise
+ * resolves.
+ */
+export async function createBackendAnalysisTask(title: string): Promise<BackendAnalysisThreadSummary> {
+  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
+  if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
+  const response = await fetch(`${apiBaseUrl}/api/analysis/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(`Analysis task create API returned ${response.status}`);
+  const payload = await response.json() as { task: BackendAnalysisThreadSummary };
+  return payload.task;
+}
+
 export async function getBackendAnalysisThread(threadId: string): Promise<BackendAnalysisThreadDetail> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
-  const response = await fetch(`${apiBaseUrl}/api/analysis/threads/${encodeURIComponent(threadId)}`);
+  const response = await fetch(`${apiBaseUrl}/api/analysis/threads/${encodeURIComponent(threadId)}`, {
+    credentials: "include",
+  });
   if (!response.ok) throw new Error(`Analysis thread API returned ${response.status}`);
   return await response.json() as BackendAnalysisThreadDetail;
 }
@@ -207,6 +318,7 @@ export async function deleteBackendAnalysisThread(threadId: string): Promise<voi
   if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
   const response = await fetch(`${apiBaseUrl}/api/analysis/threads/${encodeURIComponent(threadId)}`, {
     method: "DELETE",
+    credentials: "include",
   });
   if (!response.ok && response.status !== 404) {
     throw new Error(`Analysis thread delete API returned ${response.status}`);
@@ -216,7 +328,7 @@ export async function deleteBackendAnalysisThread(threadId: string): Promise<voi
 export async function listBackendMcpServers(): Promise<BackendMcpServer[]> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) return [];
-  const response = await fetch(`${apiBaseUrl}/api/system/mcp/servers`);
+  const response = await fetch(`${apiBaseUrl}/api/system/mcp/servers`, { credentials: "include" });
   if (!response.ok) throw new Error(`MCP servers API returned ${response.status}`);
   const payload = await response.json() as { servers?: BackendMcpServer[] };
   return Array.isArray(payload.servers) ? payload.servers : [];
@@ -227,6 +339,7 @@ export async function testBackendMcpServer(serverName: string): Promise<{ ok: bo
   if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
   const response = await fetch(`${apiBaseUrl}/api/system/mcp/servers/${encodeURIComponent(serverName)}/test`, {
     method: "POST",
+    credentials: "include",
   });
   if (!response.ok) throw new Error(`MCP server test API returned ${response.status}`);
   return await response.json() as { ok: boolean; status: string; message: string };
@@ -384,7 +497,7 @@ export function parseAnalysisSse(text: string): BackendTurnEvent[] {
 }
 
 function getInputQuestion(input: AgentInput): string {
-  if (input.kind === "start") return input.question || "分析一下渠道销售占比";
+  if (input.kind === "start") return input.question || "";
   if (input.kind === "message") return input.content;
   if (input.kind === "reply") return input.optionId;
   return "";
@@ -496,7 +609,7 @@ export function* mapBackendEvents(
       continue;
     }
 
-    if (event.type === "genbi/artifact/updated" && asString(event.payload.artifactType) === "interactive_report") {
+    if ((event.type === "genbi/artifact/created" || event.type === "genbi/artifact/updated") && asString(event.payload.artifactType) === "interactive_report") {
       const report = asInteractiveReport(event.payload);
       if (report) {
         yield {
@@ -522,6 +635,25 @@ export function* mapBackendEvents(
           ...context,
         };
       }
+      continue;
+    }
+
+    if (event.type === "genbi/artifact/failed") {
+      // The runtime tried to persist the artifact but failed at
+      // validation / save / version conflict. Surface the failure
+      // explicitly: the report must NOT show on the right side as
+      // if it had been saved.
+      const error_code = asString(event.payload.error) || "report_artifact_save_failed";
+      const detail = asString(event.payload.detail) || error_code;
+      const issues = event.payload.errors;
+      const issueText = Array.isArray(issues) && issues.length > 0
+        ? ` (${issues.map((item) => (asString((item as { path?: unknown }).path))).join(", ")})`
+        : "";
+      yield {
+        type: "error",
+        message: `ReportArtifact 保存失败：${detail}${issueText}`,
+        ...context,
+      };
       continue;
     }
 
@@ -636,3 +768,4 @@ function asInteractiveReport(payload: Record<string, unknown>): InteractiveRepor
 function isArtifactKind(value: string): value is ArtifactKind {
   return artifactKinds.has(value as ArtifactKind);
 }
+

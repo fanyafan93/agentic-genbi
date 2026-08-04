@@ -7,13 +7,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.api.analysis_api import create_app
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
+from backend.tests.auth_test_client import build_test_app
 
 
 class RemovedLegacyAnalysisSurfaceTest(unittest.TestCase):
     def test_legacy_resource_and_report_query_routes_are_not_registered(self) -> None:
-        app = create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled())
+        app = build_test_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled())
         route_paths = {route.path for route in app.routes}
 
         self.assertFalse(any(path.startswith("/api/resources") for path in route_paths))

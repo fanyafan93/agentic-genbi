@@ -202,19 +202,19 @@ describe("analysis task product language", () => {
     expect(backendClientSource).toContain("NEXT_PUBLIC_GENBI_API_BASE_URL");
     expect(backendClientSource).toContain("createBackendAnalysisThread");
     expect(backendClientSource).toContain("/api/analysis/threads");
-    expect(backendClientSource).toContain("/api/analysis/threads/turns/stream");
+    expect(backendClientSource).toContain("/api/analysis/threads/${encodeURIComponent(input.threadId)}/turns/stream");
     expect(backendClientSource).toContain("/turns/stream");
     expect(backendClientSource).toContain("item/completed");
     expect(backendClientSource).toContain("item/agentMessage/delta");
     expect(backendClientSource).toContain("genbi/artifact/created");
-    expect(backendClientSource).toContain("genbi/artifact/updated");
+    expect(backendClientSource).toContain("genbi/artifact/failed");
     expect(backendClientSource).toContain("mapBackendEvents");
     expect(backendClientSource).toContain("event.payload.thread_id");
     expect(backendClientSource).toContain("listBackendAnalysisThreads");
     expect(backendClientSource).toContain("deleteBackendAnalysisThread");
-    expect(workspaceSource).toContain("flow.start(content, thread.id)");
-    expect(workspaceSource).toContain("flow.start(question, thread.id)");
-    expect(workspaceSource).toContain("createWaitingThread");
+    expect(workspaceSource).toContain("turn.start(trimmed, newTaskId, newTaskId)");
+    expect(workspaceSource).toContain("turn.start(question, newTaskId, newTaskId)");
+    expect(workspaceSource).toContain("taskCreation.createTask");
     expect(workspaceSource).toContain("const isWaitingForFirstQuestion = Boolean(");
     expect(workspaceSource).toContain('currentAnalysisThread?.status === "waiting_for_question"');
     expect(workspaceSource).toContain("markCurrentThreadAsStarted");
@@ -273,9 +273,7 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain("openedReportBelongsToCurrentTask");
     expect(workspaceSource).toContain("currentPanelReport");
     expect(workspaceSource).toContain("const detail = await getBackendAnalysisThread(sourceThreadId)");
-    expect(workspaceSource).toContain("setInitialFlowMessages(flowNodesFromBackendThread(detail))");
-    expect(workspaceSource).toContain("threads.map((thread) => (thread.id === detail.thread.id ? detail.thread : thread))");
-    expect(workspaceSource).toContain("orderAnalysisThreads([detail.thread, ...threads])");
+    expect(workspaceSource).toContain("taskList.upsert(refreshed)");
     expect(workspaceSource).toContain("loading={currentPanelReportLoading}");
     expect(workspaceSource).not.toContain("onListVersions=");
     expect(workspaceSource).not.toContain("onLoadVersion=");
@@ -372,14 +370,19 @@ describe("analysis task product language", () => {
     expect(assetLibrarySource).toContain('aria-label="编辑 Skill 推荐步骤"');
   });
 
-  test("keeps the history list stable when opening an existing task", () => {
-    expect(workspaceSource).toContain("}, []);");
-    expect(workspaceSource).toContain("if (!flow.threadId || !selectedAnalysisTask) return;");
-    expect(workspaceSource).toContain("threadId !== currentAnalysisTaskId");
+  test("history list is owned by useTaskList, not by the live turn execution", () => {
+    // The previous "sync the list from the live flow state" effect
+    // bundled a query concern (the sidebar) with an execution concern
+    // (the live SSE). That coupling is now gone: the workspace pulls
+    // the sidebar from ``useTaskList`` and the live stream from
+    // ``useTurnExecution``, and the list refreshes only on upsert or
+    // explicit ``refresh()``.
+    expect(workspaceSource).toContain("useTaskList");
+    expect(workspaceSource).toContain("useTaskDetail");
+    expect(workspaceSource).toContain("useTurnExecution");
     expect(workspaceSource).toContain("当前任务正在分析，停止回答后再切换任务。");
-    expect(workspaceSource).toContain("const shouldSyncThread = flow.running || hadLocalRunningFlow;");
-    expect(workspaceSource).toContain("if (!shouldSyncThread) return threads;");
-    expect(workspaceSource).not.toContain("setCurrentAnalysisTaskId(threadId);");
-    expect(workspaceSource).not.toContain("}, [flow.threadId]);");
+    expect(workspaceSource).not.toContain("hadLocalRunningFlowRef");
+    expect(workspaceSource).not.toContain("shouldSyncThread = flow.running");
+    expect(workspaceSource).not.toContain("if (!flow.threadId || !selectedAnalysisTask)");
   });
 });

@@ -110,10 +110,10 @@ class InteractiveReportStore:
         self._write_state(state)
         return _report_from_dict(report), _version_from_dict(version)
 
-    def list_reports(self, *, owner_id: str | None = None, limit: int = 50) -> list[InteractiveReportRecord]:
+    def list_reports(self, *, user_id: str | None = None, limit: int = 50) -> list[InteractiveReportRecord]:
         reports = [_report_from_dict(item) for item in self._read_state()["reports"] if not item.get("deletedAt")]
-        if owner_id:
-            reports = [item for item in reports if item.ownerId == owner_id]
+        if user_id:
+            reports = [item for item in reports if item.ownerId == user_id]
         return sorted(reports, key=lambda item: item.updatedAt, reverse=True)[:limit]
 
     def get_report(self, report_id: str, *, version: int | None = None) -> tuple[InteractiveReportRecord, InteractiveReportVersionRecord] | None:

@@ -62,11 +62,15 @@ describe("interactive report backend API client", () => {
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const thread = await createBackendAnalysisThread("新分析", "owner_1");
+    const thread = await createBackendAnalysisThread("新分析");
 
     expect(fetchMock.mock.calls[0][0]).toBe("http://192.168.101.12:8000/api/analysis/threads");
     expect(fetchMock.mock.calls[0][1].method).toBe("POST");
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({ title: "新分析", user_id: "owner_1" });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({ title: "新分析" });
+    // The fetch should forward the Auth.js session cookie so the backend can
+    // resolve the principal. Sending it explicitly would be redundant and
+    // unsafe; ``credentials: include`` is the supported mechanism.
+    expect(fetchMock.mock.calls[0][1].credentials).toBe("include");
     expect(thread.status).toBe("waiting_for_question");
   });
 
@@ -121,9 +125,10 @@ describe("interactive report backend API client", () => {
       }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const center = await listReportCenterFromBackend("local-user");
+    const center = await listReportCenterFromBackend();
 
-    expect(fetchMock.mock.calls[0][0]).toBe("http://192.168.101.12:8000/api/analysis/report-center?user_id=local-user");
+    expect(fetchMock.mock.calls[0][0]).toBe("http://192.168.101.12:8000/api/analysis/report-center");
+    expect(fetchMock.mock.calls[0][1].credentials).toBe("include");
     expect(center.mine[0].report.title).toBe(interactiveReportFixture.title);
     expect(center.sharedWithMe[0].permission).toBe("view_and_reuse");
     expect(center.sharedWithMe[0].report.title).toBe("共享日报");
@@ -137,18 +142,21 @@ describe("interactive report backend API client", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ deleted: true, report_id: interactiveReportFixture.id }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await renameInteractiveReportInBackend(interactiveReportFixture.id, "新标题", "owner_1");
-    await shareInteractiveReportToBackend(interactiveReportFixture.id, "user_2", "view", "owner_1");
-    await deleteInteractiveReportFromBackend(interactiveReportFixture.id, "owner_1");
+    await renameInteractiveReportInBackend(interactiveReportFixture.id, "新标题");
+    await shareInteractiveReportToBackend(interactiveReportFixture.id, "user_2", "view");
+    await deleteInteractiveReportFromBackend(interactiveReportFixture.id);
 
     expect(fetchMock.mock.calls[0][0]).toBe(`http://192.168.101.12:8000/api/analysis/reports/${interactiveReportFixture.id}`);
     expect(fetchMock.mock.calls[0][1].method).toBe("PATCH");
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({ ownerId: "owner_1", title: "新标题" });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({ title: "新标题" });
+    expect(fetchMock.mock.calls[0][1].credentials).toBe("include");
     expect(fetchMock.mock.calls[1][0]).toBe(`http://192.168.101.12:8000/api/analysis/reports/${interactiveReportFixture.id}/shares`);
     expect(fetchMock.mock.calls[1][1].method).toBe("POST");
-    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string)).toEqual({ ownerId: "owner_1", recipientUserId: "user_2", permission: "view" });
-    expect(fetchMock.mock.calls[2][0]).toBe(`http://192.168.101.12:8000/api/analysis/reports/${interactiveReportFixture.id}?owner_id=owner_1`);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string)).toEqual({ recipientUserId: "user_2", permission: "view" });
+    expect(fetchMock.mock.calls[1][1].credentials).toBe("include");
+    expect(fetchMock.mock.calls[2][0]).toBe(`http://192.168.101.12:8000/api/analysis/reports/${interactiveReportFixture.id}`);
     expect(fetchMock.mock.calls[2][1].method).toBe("DELETE");
+    expect(fetchMock.mock.calls[2][1].credentials).toBe("include");
   });
 
   test("creates a backend analysis thread from a saved report", async () => {
@@ -166,14 +174,14 @@ describe("interactive report backend API client", () => {
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const created = await createAnalysisThreadFromReportBackend(interactiveReportFixture.id, "渠道销售概览 新分析", "owner_1");
+    const created = await createAnalysisThreadFromReportBackend(interactiveReportFixture.id, "渠道销售概览 新分析");
 
     expect(fetchMock.mock.calls[0][0]).toBe(`http://192.168.101.12:8000/api/analysis/reports/${interactiveReportFixture.id}/analysis-thread`);
     expect(fetchMock.mock.calls[0][1].method).toBe("POST");
     expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
-      userId: "owner_1",
       title: "渠道销售概览 新分析",
     });
+    expect(fetchMock.mock.calls[0][1].credentials).toBe("include");
     expect(created.thread.id).toBe("analysis_thread_report123");
     expect(created.thread.status).toBe("waiting_for_question");
     expect(created.saved.version).toBe(3);

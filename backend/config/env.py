@@ -101,10 +101,10 @@ def _check_mysql() -> EnvCheck:
 
 
 def _check_finereport_semantics() -> EnvCheck:
-    root = Path(os.getenv("GENBI_FINEREPORT_ROOT", "资源库/finereport/解析"))
+    root = Path(os.getenv("GENBI_FINEREPORT_ROOT", "资源库/finereport/报表画像"))
     if root.exists() and root.is_dir():
-        return EnvCheck("finereport_semantics", True, "FineReport 语义目录存在。", str(root.resolve()))
-    return EnvCheck("finereport_semantics", False, "FineReport 语义目录不存在。", str(root))
+        return EnvCheck("finereport_semantics", True, "FineReport 报表画像目录存在。", str(root.resolve()))
+    return EnvCheck("finereport_semantics", False, "FineReport 报表画像目录不存在。", str(root))
 
 
 def _check_frontend_api_base() -> EnvCheck:

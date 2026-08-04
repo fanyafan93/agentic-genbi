@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -10,8 +11,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 
 from backend.analysis.interactive_report_store import InteractiveReportStore
-from backend.api.analysis_api import create_app
+from backend.api.principal import enable_dev_principal_bypass
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
+from backend.tests import auth_test_client as _auth_test_client  # noqa: F401  (side effect: TestClient patch)
+from backend.tests.auth_test_client import build_test_app
+import os
+
+
+class _AuthenticatedInteractiveReportTest(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        enable_dev_principal_bypass(True)
+        os.environ["GENBI_AUTH_DEV_BYPASS"] = "1"
+
+    def tearDown(self) -> None:
+        super().tearDown()
+        enable_dev_principal_bypass(False)
+        os.environ.pop("GENBI_AUTH_DEV_BYPASS", None)
 
 
 def _report_payload(
@@ -34,18 +50,17 @@ def _report_payload(
         "gridSpecs": {"channel-sales-grid": {"id": "channel-sales-grid", "datasetId": "channel_sales", "columns": []}},
         "datasets": {"channel_sales": {"rows": [{"channel": "direct", "salesAmount": 1000}]}},
         "source": source,
-        "ownerId": "user_jason",
     }
     if expected_version is not None:
         payload["expectedVersion"] = expected_version
     return payload
 
 
-class InteractiveReportApiTest(unittest.TestCase):
+class InteractiveReportApiTest(_AuthenticatedInteractiveReportTest):
     def test_saves_lists_opens_and_preserves_report_versions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.jsonl")
-            app = create_app(
+            app = build_test_app(
                 analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
                 interactive_report_store=report_store,
             )
@@ -56,7 +71,7 @@ class InteractiveReportApiTest(unittest.TestCase):
                 "/api/analysis/reports",
                 json=_report_payload(expected_version=1, document_title="Channel Sales Share revised", source_turn_id="turn_analysis_456"),
             )
-            listed = client.get("/api/analysis/reports", params={"owner_id": "user_jason"})
+            listed = client.get("/api/analysis/reports")
             latest = client.get("/api/analysis/reports/report_channel_sales")
             version_one = client.get("/api/analysis/reports/report_channel_sales/versions/1")
             versions = client.get("/api/analysis/reports/report_channel_sales/versions")
@@ -77,7 +92,7 @@ class InteractiveReportApiTest(unittest.TestCase):
     def test_saves_report_with_turn_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.jsonl")
-            app = create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled(), interactive_report_store=report_store)
+            app = build_test_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled(), interactive_report_store=report_store)
             client = TestClient(app)
 
             created = client.post("/api/analysis/reports", json=_report_payload(source_turn_id="turn_report_only"))
@@ -88,7 +103,7 @@ class InteractiveReportApiTest(unittest.TestCase):
     def test_rejects_stale_report_version_saves(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.jsonl")
-            app = create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled(), interactive_report_store=report_store)
+            app = build_test_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled(), interactive_report_store=report_store)
             client = TestClient(app)
 
             client.post("/api/analysis/reports", json=_report_payload())
