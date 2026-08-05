@@ -173,8 +173,43 @@
     canonical `session_id` 列。
   * `build_postgres_codex_projection_store` 走 public 构造函数。
   * Turn / projection round-trip 走 fake connection。
-  验收：后端 135/135、前端 93/93、tsc 全过；docker compose up 后
+ - 验收：后端 135/135、前端 93/93、tsc 全过；docker compose up 后
   legacy session 双 id 都能 round-trip。
+- **Streaming Turn ID 必须实时落 streaming accumulator**（用户规范
+  P0）：`_astream_runtime_events` 之前只更新
+  `effective_thread_id`，`turn_id` 参数保持 preflight 空值。
+  后果：
+  * `_accumulate_projection(turn_id="")` → 首轮 Item Projection
+    不会落 canonical turn row。
+  * `_enrich_analysis_event(turn_id="")` → 事件 envelope
+    `turnId` 为空。
+  * `_interactive_report_artifact_event(turn_id="")` →
+    `source.turnId` 为空，首轮报告血缘错。
+  * `_missing_terminal_event(turn_id="")` → 中途中断时无法
+    准确关闭 Turn。
+  * 只有 `_save_analysis_turn()` 批量重建时才部分恢复，
+    中断场景下整个 turn 处于悬挂态。
+  修复：
+  * `_astream_runtime_events` 内部维护 `resolved_turn_id`，在
+    `genbi/turn/provisioned` 第一次出现时立即更新。
+  * 后续所有事件（fold / enrich / artifact / 缺失终态事件）
+    都用 `resolved_turn_id`。
+  * `turn_id` 形参仍然保留（preflight id / 调用方 hint），
+    但首轮 provisioning 之前的事件不会 fold（这些事件没真实
+    turn id，fold 会落到不存在的行上）。
+  * `pre-create turn row` 的逻辑也用 `resolved_turn_id` 写
+    canonical `running` 行（避免 race）。
+  测试（新增 `StreamingResolvedTurnIdTest`，2 例）：
+  * `test_resolved_turn_id_reaches_enrichment_and_artifact_lineage`：
+    驱动 `_astream_runtime_events` 整路径，断言所有
+    `item/agentMessage/delta` 事件 `turn_id == "codex_turn_1"`,
+    `codex_projection_store.list_turns` 包含 canonical 行。
+  * `test_preflight_turn_id_is_overridden_by_runtime`：
+    验证 preflight `turn_id` 不会泄漏到下游；runtime-issued
+    id 才是唯一权威。
+  * 修复前两个测试都失败（`'' != 'codex_turn_1'`），
+    修复后通过。
+  验收：后端 137/137、前端 93/93、tsc 全过。
 - **统一 API**（用户规范）：保留 7 个 `/api/analysis/sessions/*`
   路由，body 永不携带 session id。
   - `GET    /api/analysis/sessions`

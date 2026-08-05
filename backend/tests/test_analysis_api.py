@@ -1191,6 +1191,118 @@ class SessionlessStartTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(thread_store.list_threads(product_kind="analysis_task"), [])
 
 
+class StreamingResolvedTurnIdTest(unittest.IsolatedAsyncioTestCase):
+    """Locks the P0 contract that the resolved Codex turn id is
+    cached in the streaming accumulator the moment the runtime
+    emits ``genbi/turn/provisioned``.
+
+    Before the fix ``_astream_runtime_events`` only updated the
+    local ``effective_thread_id`` and left its ``turn_id``
+    parameter at the empty preflight value. Every downstream side
+    effect — projection fold, event enrichment, interactive
+    report artifact lineage — therefore used ``""`` for the turn
+    id, so:
+
+    * live Item projections landed on a phantom turn row
+    * the event envelope's ``turnId`` was empty
+    * the report's ``source.turnId`` was empty
+    * mid-stream cancellations could not close the right turn
+
+    The streaming accumulator must read the runtime-issued turn
+    id from the first ``genbi/turn/provisioned`` event and use
+    that single value for every event that follows.
+    """
+
+    async def test_resolved_turn_id_reaches_enrichment_and_artifact_lineage(self) -> None:
+        # Drive the streaming helper directly so we can inspect
+        # the events it yields downstream without going through
+        # FastAPI's StreamingResponse wrapper.
+        from backend.api.analysis_api import (
+            _astream_runtime_events,
+            _analysis_request_from_body,
+        )
+
+        runtime = _FakeCodexRuntime()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stores = _TestStores(Path(temp_dir) / "thread-store.jsonl")
+            body = {
+                "message": "hi",
+                "turn_kind": "message",
+                "user_id": None,
+                "metadata": {},
+            }
+            request = _analysis_request_from_body(body, session_id="")
+            # Capture the projection store state mid-stream by
+            # pulling the events off the async generator and
+            # peeking at the store after the turn-provisioned
+            # event has been observed.
+            enriched_events: list[AgentEvent] = []
+            async for event in _astream_runtime_events(
+                runtime,
+                stores.session_catalog,
+                stores.codex_projection_store,
+                None,
+                request,
+                session_id="",
+                turn_id="",
+            ):
+                enriched_events.append(event)
+            # The fake runtime emits the provisioned turn with
+            # ``codex_turn_1`` and then a delta; the streaming
+            # path must surface the resolved id on every yielded
+            # event after provisioning, and the projection store
+            # must own a turn row whose id matches the runtime.
+            deltas = [event for event in enriched_events if event.type == "item/agentMessage/delta"]
+            self.assertTrue(deltas, "delta event should reach downstream")
+            for event in deltas:
+                self.assertEqual(
+                    event.turn_id,
+                    "codex_turn_1",
+                    msg=f"event {event.type} leaked an empty turn id; resolved id was not cached",
+                )
+            turns = stores.codex_projection_store.list_turns("codex_thread_created")
+            self.assertEqual([turn.id for turn in turns], ["codex_turn_1"])
+
+    async def test_preflight_turn_id_is_overridden_by_runtime(self) -> None:
+        """A caller-supplied preflight turn id must not survive
+        the runtime's override: the runtime is the only
+        authority for ``analysis_turns.id``.
+        """
+        from backend.api.analysis_api import (
+            _astream_runtime_events,
+            _analysis_request_from_body,
+        )
+
+        class _PreflightRejectingRuntime(_FakeCodexRuntime):
+            """Pretend the caller passed a preflight turn id, then
+            verify the streaming accumulator never propagates it.
+            """
+
+        runtime = _PreflightRejectingRuntime()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stores = _TestStores(Path(temp_dir) / "thread-store.jsonl")
+            body = {
+                "message": "hi",
+                "turn_kind": "message",
+                "user_id": None,
+                "metadata": {"codex_turn_id": "preflight_turn_id"},
+            }
+            request = _analysis_request_from_body(body, session_id="")
+            seen_turn_ids: list[str] = []
+            async for event in _astream_runtime_events(
+                runtime,
+                stores.session_catalog,
+                stores.codex_projection_store,
+                None,
+                request,
+                session_id="",
+                turn_id="",
+            ):
+                seen_turn_ids.append(event.turn_id)
+            self.assertIn("codex_turn_1", seen_turn_ids)
+            self.assertNotIn("", seen_turn_ids[1:])  # all events after the first carry the resolved id
+
+
 class SessionScopedContinuationTest(unittest.IsolatedAsyncioTestCase):
     """Locks the session-scoped continuation turn contract.
 

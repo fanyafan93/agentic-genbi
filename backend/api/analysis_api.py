@@ -1203,9 +1203,21 @@ async def _astream_runtime_events(
     pull events off the stream, fold them into the projection store
     on the fly, and yield each one to the API consumer. Session +
     turn rows are written by the Runtime itself.
+
+    The caller may pass a preflight ``turn_id`` (empty string when
+    the sessionless start is used). The runtime *always* overrides
+    the preflight id with the Codex-issued one — we read the
+    ``genbi/turn/provisioned`` event on the very first iteration,
+    cache it in ``resolved_turn_id``, and use that single value for
+    the rest of the stream. Anything before
+    ``genbi/turn/provisioned`` cannot fold into the projection
+    store (it would land on a phantom turn), so we still propagate
+    the events downstream for live UI but skip the projection /
+    artifact side effects until the resolved id lands.
     """
     saw_terminal_event = False
     effective_thread_id = session_id
+    resolved_turn_id = turn_id
     runtime = InMemoryCodexAnalysisRuntime(codex_projection_store)
     async for event in analysis_runtime.async_stream(
         request.question.strip(),
@@ -1224,6 +1236,19 @@ async def _astream_runtime_events(
             if runtime_thread_id and runtime_thread_id != effective_thread_id:
                 effective_thread_id = runtime_thread_id
                 session_id = runtime_thread_id
+        # The runtime-issued turn id is the only authoritative
+        # source; capture it the moment we see the provisioned
+        # event so every downstream side effect (projection
+        # fold, event enrichment, artifact lineage) carries the
+        # real id, not the empty preflight string.
+        if event.type == "genbi/turn/provisioned":
+            provisioned_turn_id = (
+                _string_or_none(event.payload.get("codex_turn_id"))
+                or _string_or_none(event.payload.get("turn_id"))
+                or ""
+            )
+            if provisioned_turn_id:
+                resolved_turn_id = provisioned_turn_id
         # ``thread_start``: the catalog owns the session row. We
         # register on the first time we observe the runtime-issued
         # id, regardless of whether we entered this branch above
@@ -1240,49 +1265,53 @@ async def _astream_runtime_events(
                 )
             except Exception:
                 LOGGER.warning("session_registration_failed", extra={"session_id": effective_thread_id})
-        # The Runtime uses ``save_turn`` for the final turn row; the
-        # streaming path here folds projections through the Runtime's
-        # accumulator as a side effect so a partial replay already
-        # has the projection timeline.
+        # Pre-create the turn row in the canonical ``running``
+        # state the moment we know the runtime-issued turn id.
+        # The final write through ``save_turn`` will overwrite
+        # the status to whatever the Runtime computed.
         if (
-            effective_thread_id
-            and event.type == "genbi/turn/provisioned"
+            event.type == "genbi/turn/provisioned"
+            and effective_thread_id
+            and resolved_turn_id
+            and codex_projection_store.get_turn(effective_thread_id, resolved_turn_id) is None
         ):
-            provisioned_turn_id = (
-                _string_or_none(event.payload.get("codex_turn_id"))
-                or _string_or_none(event.payload.get("turn_id"))
-                or ""
+            codex_projection_store.save_turn(
+                session_id=effective_thread_id,
+                turn_id=resolved_turn_id,
+                input_kind="start" if request.turn_kind == "start" else "message",
+                input_text=request.question.strip(),
+                status="running",
+                started_at=event.created_at,
+                codex_session_id=effective_thread_id,
+                codex_turn_id=resolved_turn_id,
             )
-            if provisioned_turn_id and codex_projection_store.get_turn(effective_thread_id, provisioned_turn_id) is None:
-                # Pre-create the turn row in the canonical
-                # ``running`` state. The final write through
-                # ``save_turn`` will overwrite the status to
-                # whatever the Runtime computed.
-                codex_projection_store.save_turn(
-                    session_id=effective_thread_id,
-                    turn_id=provisioned_turn_id,
-                    input_kind="start" if request.turn_kind == "start" else "message",
-                    input_text=request.question.strip(),
-                    status="running",
-                    started_at=event.created_at,
-                    codex_session_id=effective_thread_id,
-                    codex_turn_id=provisioned_turn_id,
-                )
         # Fold the projection as we observe it so the store is
         # in sync with the stream. The Runtime owns the
         # accumulation rules; we hand it a fresh TurnStream and
-        # ask it to absorb the event.
-        if effective_thread_id and turn_id:
-            _accumulate_projection(runtime, effective_thread_id, turn_id, request, event)
-        enriched = _enrich_analysis_event(event, session_id=effective_thread_id, turn_id=turn_id, question=request.question.strip())
+        # ask it to absorb the event. We only fold once we know
+        # the resolved turn id; pre-provisioned events flow
+        # through downstream unchanged.
+        if effective_thread_id and resolved_turn_id:
+            _accumulate_projection(runtime, effective_thread_id, resolved_turn_id, request, event)
+        enriched = _enrich_analysis_event(
+            event,
+            session_id=effective_thread_id,
+            turn_id=resolved_turn_id,
+            question=request.question.strip(),
+        )
         if enriched.type == "turn/completed":
             saw_terminal_event = True
         yield enriched
-        artifact_event = _interactive_report_artifact_event(enriched, session_id=session_id, turn_id=turn_id, interactive_report_store=interactive_report_store)
+        artifact_event = _interactive_report_artifact_event(
+            enriched,
+            session_id=effective_thread_id,
+            turn_id=resolved_turn_id,
+            interactive_report_store=interactive_report_store,
+        )
         if artifact_event:
             yield artifact_event
     if not saw_terminal_event:
-        yield _missing_terminal_event(session_id=session_id, turn_id=turn_id)
+        yield _missing_terminal_event(session_id=session_id, turn_id=resolved_turn_id)
 
 
 def _accumulate_projection(
