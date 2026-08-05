@@ -30,6 +30,9 @@ services:
     env_file:
       - .env
     environment:
+      GENBI_BACKEND_WORKERS: "1"
+      UVICORN_WORKERS: "1"
+      WEB_CONCURRENCY: "1"
       GENBI_CORS_ORIGINS: ${GENBI_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://192.168.101.12:3000}
       NEXT_PUBLIC_GENBI_API_BASE_URL: ${GENBI_PUBLIC_API_BASE_URL:-http://192.168.101.12:8000}
       GENBI_FINEREPORT_ROOT: ${GENBI_FINEREPORT_ROOT:-/app/资源库/finereport/报表画像}
@@ -53,9 +56,7 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
-    command: ["sh", "-c", "npm install && npm run prisma:migrate && NODE_ENV=production npm run build && mkdir -p .next/standalone/.next && cp -R .next/static .next/standalone/.next/static && cp -R public .next/standalone/public && HOSTNAME=0.0.0.0 PORT=3000 NODE_ENV=production node .next/standalone/server.js"]
-    env_file:
-      - .env
+    command: ["sh", "-c", "npm run prisma:migrate && NODE_ENV=production npm run build && mkdir -p .next/standalone/.next && cp -R .next/static .next/standalone/.next/static && cp -R public .next/standalone/public && HOSTNAME=0.0.0.0 PORT=3000 NODE_ENV=production node .next/standalone/server.js"]
     environment:
       AUTH_DATABASE_URL: ${AUTH_DATABASE_URL:-postgresql://agentic_genbi:agentic_genbi_dev_password@postgres:5432/agentic_genbi?schema=public}
       AUTH_URL: ${AUTH_URL:-http://localhost:3000}
