@@ -1762,6 +1762,209 @@ class TurnCancellationTest(unittest.TestCase):
         self.assertEqual(session.status, "archived")
 
 
+class PrincipalSessionIsolationTest(unittest.TestCase):
+    """Session APIs must authorize by server-side Principal, not body user_id."""
+
+    OWNER_HEADERS = {
+        "X-GenBI-Tenant-Id": "tenant_a",
+        "X-GenBI-User-Id": "owner_1",
+        "X-GenBI-Workspace-Id": "workspace_a",
+    }
+    OTHER_USER_HEADERS = {
+        "X-GenBI-Tenant-Id": "tenant_a",
+        "X-GenBI-User-Id": "other_1",
+        "X-GenBI-Workspace-Id": "workspace_a",
+    }
+    OTHER_TENANT_HEADERS = {
+        "X-GenBI-Tenant-Id": "tenant_b",
+        "X-GenBI-User-Id": "owner_1",
+        "X-GenBI-Workspace-Id": "workspace_a",
+    }
+    OTHER_WORKSPACE_HEADERS = {
+        "X-GenBI-Tenant-Id": "tenant_a",
+        "X-GenBI-User-Id": "owner_1",
+        "X-GenBI-Workspace-Id": "workspace_b",
+    }
+
+    def _build_app(self) -> tuple[TestClient, ThreadStore, _FakeCodexRuntime]:
+        thread_store = ThreadStore(Path(tempfile.mkdtemp()) / "thread-store.jsonl")
+        runtime = _FakeCodexRuntime()
+        app = create_app(
+            analysis_runtime=runtime,  # type: ignore[arg-type]
+            thread_store=thread_store,
+        )
+        return TestClient(app), thread_store, runtime
+
+    def _create_owner_session(self, client: TestClient, message: str = "first") -> str:
+        response = client.post(
+            "/api/analysis/sessions/turns",
+            headers=self.OWNER_HEADERS,
+            json={"message": message, "user_id": "spoofed_body_user"},
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()["session_id"]
+
+    def test_start_session_uses_principal_instead_of_body_user_id(self) -> None:
+        client, thread_store, _ = self._build_app()
+
+        session_id = self._create_owner_session(client)
+
+        session = thread_store.session_catalog.get_session(session_id)
+        assert session is not None
+        self.assertEqual(session.userId, "owner_1")
+        self.assertEqual(session.tenantId, "tenant_a")
+        self.assertEqual(session.workspaceId, "workspace_a")
+
+    def test_report_created_session_uses_principal_instead_of_body_user_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                interactive_report_store=report_store,
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+            saved = client.post(
+                "/api/analysis/reports",
+                json={
+                    "id": "principal_report",
+                    "title": "Principal Report",
+                    "subtitle": "snapshot",
+                    "artifactType": "interactive_report",
+                    "renderer": "puck",
+                    "ownerId": "owner_1",
+                    "source": {"threadId": "source_thread", "turnId": "source_turn"},
+                    "document": {"content": [], "root": {"props": {}}},
+                },
+            )
+            self.assertEqual(saved.status_code, 200)
+
+            response = client.post(
+                "/api/analysis/reports/principal_report/sessions",
+                headers=self.OWNER_HEADERS,
+                json={"userId": "spoofed_body_user", "title": "from report"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            session_id = response.json()["session"]["id"]
+            session = thread_store.session_catalog.get_session(session_id)
+            assert session is not None
+            self.assertEqual(session.userId, "owner_1")
+            self.assertEqual(session.tenantId, "tenant_a")
+            self.assertEqual(session.workspaceId, "workspace_a")
+
+    def test_list_sessions_only_returns_principal_owned_sessions(self) -> None:
+        client, thread_store, _ = self._build_app()
+        owner_session_id = self._create_owner_session(client, "owner")
+        thread_store.create_thread(
+            thread_id="codex_thread_other",
+            product_kind="analysis_task",
+            title="other",
+            user_id="other_1",
+            metadata={"tenant_id": "tenant_a", "workspace_id": "workspace_a"},
+        )
+
+        response = client.get("/api/analysis/sessions", headers=self.OWNER_HEADERS)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [session["id"] for session in response.json()["sessions"]],
+            [owner_session_id],
+        )
+
+    def test_session_read_write_and_cancel_reject_wrong_principal(self) -> None:
+        client, thread_store, _ = self._build_app()
+        session_id = self._create_owner_session(client)
+        thread_store.create_turn_only(
+            thread_id=session_id,
+            turn_id="codex_turn_running",
+        )
+
+        for headers in (
+            self.OTHER_USER_HEADERS,
+            self.OTHER_TENANT_HEADERS,
+            self.OTHER_WORKSPACE_HEADERS,
+        ):
+            with self.subTest(headers=headers):
+                self.assertEqual(
+                    client.get(f"/api/analysis/sessions/{session_id}", headers=headers).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    client.patch(
+                        f"/api/analysis/sessions/{session_id}",
+                        headers=headers,
+                        json={"title": "stolen"},
+                    ).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    client.delete(f"/api/analysis/sessions/{session_id}", headers=headers).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    client.post(
+                        f"/api/analysis/sessions/{session_id}/turns",
+                        headers=headers,
+                        json={"message": "continue"},
+                    ).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    client.post(
+                        f"/api/analysis/sessions/{session_id}/turns/codex_turn_running/cancel",
+                        headers=headers,
+                    ).status_code,
+                    404,
+                )
+
+        session = thread_store.session_catalog.get_session(session_id)
+        assert session is not None
+        self.assertIsNone(session.title)
+        self.assertEqual(session.status, "active")
+
+    def test_owner_can_read_continue_patch_delete_and_cancel(self) -> None:
+        client, thread_store, _ = self._build_app()
+        session_id = self._create_owner_session(client)
+        thread_store.create_turn_only(
+            thread_id=session_id,
+            turn_id="codex_turn_running",
+        )
+
+        self.assertEqual(
+            client.get(f"/api/analysis/sessions/{session_id}", headers=self.OWNER_HEADERS).status_code,
+            200,
+        )
+        self.assertEqual(
+            client.patch(
+                f"/api/analysis/sessions/{session_id}",
+                headers=self.OWNER_HEADERS,
+                json={"title": "owned"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            client.post(
+                f"/api/analysis/sessions/{session_id}/turns",
+                headers=self.OWNER_HEADERS,
+                json={"message": "continue"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            client.post(
+                f"/api/analysis/sessions/{session_id}/turns/codex_turn_running/cancel",
+                headers=self.OWNER_HEADERS,
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            client.delete(f"/api/analysis/sessions/{session_id}", headers=self.OWNER_HEADERS).status_code,
+            200,
+        )
+
+
 class SessionContinuationBodyContractTest(unittest.TestCase):
     """Locks the user spec that the continuation body must NOT
     carry a ``sessionId`` field, and that ``turn_kind`` is

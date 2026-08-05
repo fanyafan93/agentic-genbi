@@ -430,7 +430,15 @@ class CodexTurnRunner:
                 and self._catalog.get_session(effective_thread_id) is None
             ):
                 try:
-                    await runtime.thread_start(session_id=effective_thread_id, catalog=self._catalog)
+                    self._catalog.register_session(
+                        session_id=effective_thread_id,
+                        product_kind="analysis_task",
+                        title=None,
+                        user_id=request.user_id,
+                        status="active",
+                        metadata=dict(request.metadata or {}),
+                        codex_session_id=runtime_codex_session_id or effective_thread_id,
+                    )
                 except Exception:
                     LOGGER.warning("session_registration_failed", extra={"session_id": effective_thread_id})
             if (
@@ -561,9 +569,14 @@ class CodexTurnRunner:
         codex_session_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Stream turn N+1 of an existing (already provisioned) session."""
+        request = (
+            body
+            if isinstance(body, AnalysisTurnRequest)
+            else _analysis_request_from_body(body, session_id=session_id)
+        )
         return _ContinuationTurnStream(
             self,
-            _analysis_request_from_body(body, session_id=session_id),
+            request,
             session_id=session_id,
             codex_session_id=codex_session_id,
         )

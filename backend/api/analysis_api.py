@@ -93,7 +93,7 @@ def create_app(
         codex_projection_store = codex_projection_store or getattr(thread_store, "codex_projection_store", None)
     load_project_env()
     try:
-        from fastapi import Body, FastAPI, HTTPException, Query
+        from fastapi import Body, FastAPI, HTTPException, Query, Request
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import Response, StreamingResponse
         from pydantic import BaseModel, ConfigDict, Field
@@ -210,6 +210,80 @@ def create_app(
         """
         title: str | None = None
         status: str | None = None
+
+    @dataclass(frozen=True)
+    class Principal:
+        tenant_id: str
+        user_id: str
+        workspace_id: str
+        roles: tuple[str, ...] = ()
+
+    def _header_text(request: Request, name: str) -> str | None:
+        value = request.headers.get(name)
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def _principal_from_request(request: Request) -> Principal | None:
+        tenant_id = _header_text(request, "X-GenBI-Tenant-Id")
+        user_id = _header_text(request, "X-GenBI-User-Id")
+        workspace_id = _header_text(request, "X-GenBI-Workspace-Id")
+        roles_header = _header_text(request, "X-GenBI-Roles")
+        if not any((tenant_id, user_id, workspace_id, roles_header)):
+            return None
+        if not tenant_id or not user_id or not workspace_id:
+            raise HTTPException(
+                status_code=401,
+                detail="principal_required: tenant, user, and workspace headers are required.",
+            )
+        roles = tuple(
+            role.strip().lower()
+            for role in str(roles_header or "").replace(";", ",").split(",")
+            if role.strip()
+        )
+        return Principal(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            roles=roles,
+        )
+
+    def _metadata_with_principal(metadata: dict[str, Any], principal: Principal | None) -> dict[str, Any]:
+        merged = dict(metadata or {})
+        if principal is None:
+            return merged
+        merged["tenant_id"] = principal.tenant_id
+        merged["user_id"] = principal.user_id
+        merged["workspace_id"] = principal.workspace_id
+        merged["roles"] = list(principal.roles)
+        return merged
+
+    def _principal_can_access_session(principal: Principal | None, session: SessionRecord) -> bool:
+        if principal is None:
+            return True
+        if "admin" in principal.roles:
+            return True
+        return (
+            session.tenantId == principal.tenant_id
+            and session.userId == principal.user_id
+            and session.workspaceId == principal.workspace_id
+        )
+
+    def _require_principal_view(
+        session_id: str,
+        principal: Principal | None,
+        *,
+        active: bool = False,
+    ) -> SessionView:
+        view = (
+            configured_session_service.require_active_view(session_id)
+            if active
+            else configured_session_service.require_view(session_id)
+        )
+        if not _principal_can_access_session(principal, view.session):
+            raise SessionNotFoundError(session_id)
+        return view
 
 
     class KnowledgeBody(BaseModel):
@@ -358,6 +432,7 @@ def create_app(
 
     @app.get("/api/analysis/sessions")
     def list_analysis_sessions(
+        request: Request,
         limit: int = Query(default=50, ge=1, le=200),
         status: str | None = Query(default=None),
     ) -> dict[str, Any]:
@@ -372,6 +447,7 @@ def create_app(
         The HTTP layer only validates the ``limit`` / ``status`` query
         parameters and maps ``ValueError`` from the service to 400.
         """
+        principal = _principal_from_request(request)
         try:
             views = configured_session_service.list_sessions(
                 limit=limit,
@@ -383,11 +459,15 @@ def create_app(
             "sessions": [
                 _session_view_to_thread_dict(view, configured_codex_projection_store)
                 for view in views
+                if _principal_can_access_session(principal, view.session)
             ]
         }
 
     @app.post("/api/analysis/sessions/turns")
-    async def start_session_first_turn(body: AnalysisSessionStartBody = Body(...)) -> dict[str, Any]:
+    async def start_session_first_turn(
+        request: Request,
+        body: AnalysisSessionStartBody = Body(...),
+    ) -> dict[str, Any]:
         """Start the very first turn of a brand-new session.
 
         The session id is allocated by the Codex Runtime (via
@@ -395,13 +475,14 @@ def create_app(
         mints one. The runtime is *required* here; we do not fall back
         to writing a caller-supplied synthetic row.
         """
-        metadata = dict(body.metadata or {})
+        principal = _principal_from_request(request)
+        metadata = _metadata_with_principal(dict(body.metadata or {}), principal)
         metadata.setdefault("domain", ANALYSIS_PRODUCT_KIND)
         metadata.setdefault("thread_root", True)
         turn_request = AnalysisTurnRequest(
             question=body.message.strip(),
             session_id="",
-            user_id=body.user_id,
+            user_id=principal.user_id if principal is not None else body.user_id,
             turn_kind="start",
             metadata=metadata,
         )
@@ -421,14 +502,16 @@ def create_app(
         )
 
     @app.get("/api/analysis/sessions/{session_id}")
-    def get_analysis_session(session_id: str) -> dict[str, Any]:
+    def get_analysis_session(request: Request, session_id: str) -> dict[str, Any]:
         """Return the full session detail (turns + Codex item projections).
 
         ``SessionService.get_session_detail`` is authoritative; we only
         map ``SessionNotFoundError`` to HTTP 404 so the service layer
         stays HTTP-agnostic.
         """
+        principal = _principal_from_request(request)
         try:
+            _require_principal_view(session_id, principal)
             detail = configured_session_service.get_session_detail(session_id)
         except SessionNotFoundError:
             raise HTTPException(status_code=404, detail="analysis_session_not_found")
@@ -478,6 +561,7 @@ def create_app(
 
     @app.patch("/api/analysis/sessions/{session_id}")
     def patch_analysis_session(
+        request: Request,
         session_id: str,
         body: AnalysisSessionUpdateBody = Body(default_factory=AnalysisSessionUpdateBody),
     ) -> dict[str, Any]:
@@ -487,7 +571,9 @@ def create_app(
         HTTP layer validates the enum and maps
         ``SessionNotFoundError`` → 404.
         """
+        principal = _principal_from_request(request)
         try:
+            _require_principal_view(session_id, principal)
             if body.title is not None:
                 configured_session_service.rename_session(session_id, title=body.title)
             if body.status is not None:
@@ -503,7 +589,7 @@ def create_app(
         return {"session": _session_view_to_thread_dict(refreshed, configured_codex_projection_store)}
 
     @app.delete("/api/analysis/sessions/{session_id}")
-    def delete_analysis_session(session_id: str) -> dict[str, Any]:
+    def delete_analysis_session(request: Request, session_id: str) -> dict[str, Any]:
         """Soft-delete a session by archiving it.
 
         ``SessionService.archive_session`` owns the mutation; the
@@ -512,7 +598,9 @@ def create_app(
         See ``SessionService.archive_session`` for the "why no
         physical delete" rationale.
         """
+        principal = _principal_from_request(request)
         try:
+            _require_principal_view(session_id, principal)
             archived = configured_session_service.archive_session(session_id)
         except SessionNotFoundError:
             raise HTTPException(status_code=404, detail="analysis_session_not_found")
@@ -529,6 +617,7 @@ def create_app(
 
     @app.post("/api/analysis/sessions/{session_id}/turns")
     async def create_session_turn(
+        request: Request,
         session_id: str,
         body: AnalysisSessionContinuationBody = Body(default_factory=AnalysisSessionContinuationBody),
     ) -> dict[str, Any]:
@@ -543,8 +632,9 @@ def create_app(
         """
         if not session_id.strip():
             raise HTTPException(status_code=400, detail="session_id_required")
+        principal = _principal_from_request(request)
         try:
-            view = configured_session_service.require_active_view(session_id)
+            view = _require_principal_view(session_id, principal, active=True)
         except SessionNotFoundError:
             raise HTTPException(status_code=404, detail="analysis_session_not_found")
         except SessionArchivedError:
@@ -558,14 +648,14 @@ def create_app(
         request = AnalysisTurnRequest(
             question=body.message.strip(),
             session_id=canonical_session_id,
-            user_id=body.user_id,
+            user_id=principal.user_id if principal is not None else body.user_id,
             turn_kind=str(body.turn_kind or "message").strip().lower() or "message",  # type: ignore[arg-type]
-            metadata={
+            metadata=_metadata_with_principal({
                 **(body.metadata or {}),
                 "domain": ANALYSIS_PRODUCT_KIND,
                 "session_id": canonical_session_id,
                 "codex_session_id": codex_session_id,
-            },
+            }, principal),
         )
         return await configured_turn_runner.run_turn_buffered(
             request,
@@ -574,7 +664,10 @@ def create_app(
         )
 
     @app.post("/api/analysis/sessions/turns/stream")
-    async def stream_session_first_turn(body: AnalysisSessionStartBody = Body(...)) -> Any:
+    async def stream_session_first_turn(
+        request: Request,
+        body: AnalysisSessionStartBody = Body(...),
+    ) -> Any:
         """Stream the very first turn of a brand-new session.
 
         Returns a ``StreamingResponse`` whose generator is built by
@@ -589,13 +682,14 @@ def create_app(
             )
         from fastapi.responses import StreamingResponse
 
-        metadata = dict(body.metadata or {})
+        principal = _principal_from_request(request)
+        metadata = _metadata_with_principal(dict(body.metadata or {}), principal)
         metadata.setdefault("domain", ANALYSIS_PRODUCT_KIND)
         metadata.setdefault("thread_root", True)
         turn_request = AnalysisTurnRequest(
             question=body.message.strip(),
             session_id="",
-            user_id=body.user_id,
+            user_id=principal.user_id if principal is not None else body.user_id,
             turn_kind="start",
             metadata=metadata,
         )
@@ -609,6 +703,7 @@ def create_app(
 
     @app.post("/api/analysis/sessions/{session_id}/turns/stream")
     async def stream_session_continuation_turn(
+        request: Request,
         session_id: str,
         body: AnalysisSessionContinuationBody = Body(default_factory=AnalysisSessionContinuationBody),
     ) -> Any:
@@ -620,8 +715,9 @@ def create_app(
         """
         if not session_id.strip():
             raise HTTPException(status_code=400, detail="session_id_required")
+        principal = _principal_from_request(request)
         try:
-            view = configured_session_service.require_active_view(session_id)
+            view = _require_principal_view(session_id, principal, active=True)
         except SessionNotFoundError:
             raise HTTPException(status_code=404, detail="analysis_session_not_found")
         except SessionArchivedError:
@@ -634,8 +730,20 @@ def create_app(
 
         canonical_session_id = view.session.id
         codex_session_id = view.session.codexSessionId or view.session.id
+        turn_request = AnalysisTurnRequest(
+            question=body.message.strip(),
+            session_id=canonical_session_id,
+            user_id=principal.user_id if principal is not None else body.user_id,
+            turn_kind=str(body.turn_kind or "message").strip().lower() or "message",  # type: ignore[arg-type]
+            metadata=_metadata_with_principal({
+                **(body.metadata or {}),
+                "domain": ANALYSIS_PRODUCT_KIND,
+                "session_id": canonical_session_id,
+                "codex_session_id": codex_session_id,
+            }, principal),
+        )
         stream_iter = configured_turn_runner.stream_continuation_turn(
-            body,
+            turn_request,
             session_id=canonical_session_id,
             codex_session_id=codex_session_id,
         )
@@ -647,7 +755,7 @@ def create_app(
         return StreamingResponse(_sse_iter(), media_type="text/event-stream")
 
     @app.post("/api/analysis/sessions/{session_id}/cancel")
-    def cancel_session(session_id: str) -> dict[str, Any]:
+    def cancel_session(request: Request, session_id: str) -> dict[str, Any]:
         """Archive a session (legacy endpoint; does NOT cancel a turn).
 
         Maps 1:1 onto ``SessionService.archive_session`` (with
@@ -655,7 +763,9 @@ def create_app(
         renders the back-compat envelope. Turn-level interrupt uses
         the dedicated ``turns/{turn_id}/cancel`` endpoint below.
         """
+        principal = _principal_from_request(request)
         try:
+            _require_principal_view(session_id, principal)
             configured_session_service.archive_session(session_id)
             refreshed = configured_session_service.require_view(session_id)
         except SessionNotFoundError:
@@ -663,7 +773,7 @@ def create_app(
         return {"session": _session_view_to_thread_dict(refreshed, configured_codex_projection_store)}
 
     @app.post("/api/analysis/sessions/{session_id}/turns/{turn_id}/cancel")
-    async def cancel_session_turn(session_id: str, turn_id: str) -> dict[str, Any]:
+    async def cancel_session_turn(request: Request, session_id: str, turn_id: str) -> dict[str, Any]:
         """Interrupt the live Codex Turn for ``(session_id, turn_id)``.
 
         Owned by ``CodexTurnRunner.interrupt_turn``: it writes the
@@ -674,9 +784,12 @@ def create_app(
         """
         if not turn_id.strip():
             raise HTTPException(status_code=400, detail="turn_id_required")
-        canonical_session_id = configured_session_service.resolve_session_id(session_id)
-        if canonical_session_id is None:
+        principal = _principal_from_request(request)
+        try:
+            view = _require_principal_view(session_id, principal)
+        except SessionNotFoundError:
             raise HTTPException(status_code=404, detail="analysis_session_not_found")
+        canonical_session_id = view.session.id
         handled, info = await configured_turn_runner.interrupt_turn(
             session_id=canonical_session_id, turn_id=turn_id
         )
@@ -822,7 +935,11 @@ def create_app(
         return {"report": asdict_report(report), "version": asdict(version)}
 
     @app.post("/api/analysis/reports/{report_id}/sessions")
-    async def create_session_from_report(report_id: str, body: ReportAnalysisSessionBody = Body(default_factory=ReportAnalysisSessionBody)) -> dict[str, Any]:
+    async def create_session_from_report(
+        request: Request,
+        report_id: str,
+        body: ReportAnalysisSessionBody = Body(default_factory=ReportAnalysisSessionBody),
+    ) -> dict[str, Any]:
         """Create a brand-new analysis session anchored to a saved report.
 
         The session id comes from the Codex runtime; the body never
@@ -831,6 +948,7 @@ def create_app(
         result = configured_interactive_report_store.get_report(report_id)
         if not result:
             raise HTTPException(status_code=404, detail="interactive_report_not_found")
+        principal = _principal_from_request(request)
         report, version = result
         title = (body.title or f"{report.title} 新分析").strip()
         report_payload = interactive_report_payload(report, version)
@@ -851,10 +969,10 @@ def create_app(
             session_id=session_id,
             product_kind=ANALYSIS_PRODUCT_KIND,
             title=title,
-            user_id=body.userId,
+            user_id=principal.user_id if principal is not None else body.userId,
             status="active",
             codex_session_id=session_id,
-            metadata={
+            metadata=_metadata_with_principal({
                 "domain": ANALYSIS_PRODUCT_KIND,
                 "session_id": session_id,
                 "codex_session_id": session_id,
@@ -862,7 +980,7 @@ def create_app(
                 "initial_report_id": report.id,
                 "initial_report_version": version.version,
                 "initial_report_artifact": report_payload,
-            },
+            }, principal),
         )
         view = configured_session_service.require_view(session_id)
         return {
