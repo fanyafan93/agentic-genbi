@@ -169,6 +169,31 @@ def test_validation_rejects_missing_layout_reference(tmp_path: Path) -> None:
     assert exc_info.value.path == "layout.content.1.props.chartId"
 
 
+def test_validation_rejects_write_sql_and_unbound_placeholders(
+    tmp_path: Path,
+) -> None:
+    store = ReportStore(tmp_path / "reports.json")
+    write_query = report_config()
+    write_query["queries"]["sales-query"]["sql"] = (
+        "UPDATE sales SET amount = 0"
+    )
+    missing_binding = report_config()
+    missing_binding["queries"]["sales-query"]["sql"] += (
+        " HAVING SUM(amount) > :minimum"
+    )
+
+    with pytest.raises(ReportValidationError) as write_error:
+        store.create_report(write_query, owner_id="user-1")
+    with pytest.raises(ReportValidationError) as binding_error:
+        store.create_report(missing_binding, owner_id="user-1")
+
+    assert write_error.value.path == "queries.sales-query.sql"
+    assert (
+        binding_error.value.path
+        == "queries.sales-query.parameters"
+    )
+
+
 def test_sharing_keeps_one_record_and_supports_existing_permissions(
     tmp_path: Path,
 ) -> None:
@@ -193,4 +218,3 @@ def test_sharing_keeps_one_record_and_supports_existing_permissions(
     assert updated is not None
     assert len(center["sharedWithMe"]) == 1
     assert center["sharedWithMe"][0]["permission"] == "view_and_reuse"
-

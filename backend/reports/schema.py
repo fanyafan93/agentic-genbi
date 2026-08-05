@@ -3,6 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from backend.reports.query_service import (
+    UnsafeReportQuery,
+    query_parameter_names,
+)
+
 
 FILTER_TYPES = {"select", "multiSelect", "date", "dateRange"}
 LEGACY_REPORT_FIELDS = {
@@ -113,11 +118,24 @@ def _validate_queries(
             raise ReportValidationError(path, "query must be an object.")
         _require_nested_text(value, "dataSource", path)
         _require_nested_text(value, "sql", path)
+        try:
+            placeholder_names = query_parameter_names(str(value["sql"]))
+        except UnsafeReportQuery as exc:
+            raise ReportValidationError(
+                f"{path}.sql",
+                str(exc),
+            ) from exc
         parameters = value.get("parameters", {})
         if not isinstance(parameters, dict):
             raise ReportValidationError(
                 f"{path}.parameters",
                 "query parameters must be an object.",
+            )
+        parameter_names = {str(name) for name in parameters}
+        if placeholder_names != parameter_names:
+            raise ReportValidationError(
+                f"{path}.parameters",
+                "query parameters must match SQL placeholders.",
             )
         if not isinstance(value.get("pagination", False), bool):
             raise ReportValidationError(
