@@ -119,8 +119,17 @@ class LoadCodexMcpServersFromEnvTest(unittest.TestCase):
         server = payload["servers"][0]  # type: ignore[index]
         self.assertEqual(server["name"], "GenBI_report")
         self.assertEqual(server["approval"], "trusted")
-        self.assertEqual(server["permission"], "artifact.write")
-        self.assertEqual(server["tools"][0]["name"], "create_interactive_report")
+        self.assertEqual(server["permission"], "report.write")
+        self.assertEqual(
+            [tool["name"] for tool in server["tools"]],
+            ["create_report", "update_report"],
+        )
+        self.assertTrue(
+            all(
+                tool["permission"] == "report.write"
+                for tool in server["tools"]
+            )
+        )
 
     def test_can_test_configured_mcp_server(self) -> None:
         result = run_codex_mcp_server_test("GenBI_report", {

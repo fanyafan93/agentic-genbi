@@ -26,7 +26,7 @@ Turn 预创建 / Projection 累积 / Turn 状态计算 / Artifact 投影 /
 
 This module handles the Session *lifecycle* slice of that list.
 The turn execution slice lives in ``CodexTurnRunner``; the artifact
-projection slice lives in ``ArtifactProjector``.
+Report projection lives in ``ReportProjector``.
 """
 
 from __future__ import annotations

@@ -241,7 +241,7 @@ def _trusted_server(server: CodexMcpServer, *, env: dict[str, str]) -> bool:
 
 def _server_permission(server: CodexMcpServer) -> str:
     if server.name == "GenBI_report":
-        return "artifact.write"
+        return "report.write"
     if "mysql" in " ".join([server.command, *server.args]).lower() or "doris" in server.name.lower():
         return "database.readonly"
     return "tool.external"
@@ -251,27 +251,15 @@ def _known_tools(server: CodexMcpServer, *, trusted: bool) -> list[CodexMcpTool]
     if server.name == "GenBI_report":
         return [
             CodexMcpTool(
-                name="create_interactive_report",
-                description="Create a GenBI interactive_report artifact from verified rows for the right-side Puck panel.",
-                permission="artifact.write",
+                name="create_report",
+                description="Create a complete query-backed GenBI Report.",
+                permission="report.write",
                 trusted=trusted,
             ),
             CodexMcpTool(
-                name="validate_interactive_report",
-                description="Validate a GenBI ReportArtifact without saving it.",
-                permission="artifact.validate",
-                trusted=trusted,
-            ),
-            CodexMcpTool(
-                name="update_interactive_report",
-                description="Planned: update an existing interactive_report artifact.",
-                permission="artifact.write",
-                trusted=trusted,
-            ),
-            CodexMcpTool(
-                name="get_interactive_report",
-                description="Planned: read an existing interactive_report artifact.",
-                permission="artifact.read",
+                name="update_report",
+                description="Replace an existing GenBI Report configuration.",
+                permission="report.write",
                 trusted=trusted,
             ),
         ]

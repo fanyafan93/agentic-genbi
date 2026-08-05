@@ -14,10 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 
 from backend.analysis.asset_store import AnalysisAssetStore
-from backend.analysis.interactive_report_store import InteractiveReportStore
+from backend.reports.store import ReportStore
 import backend.api.analysis_api as analysis_api
 from backend.api.analysis_api import create_app
-from backend.services.artifact_projector import ArtifactProjector
+from backend.services.report_projector import ReportProjector
+from backend.tests.test_report_store import report_config
 from backend.services.codex_turn_runner import (
     CodexTurnRunner,
     _enrich_analysis_event,
@@ -434,7 +435,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
                         knowledge_store=KnowledgeStore(),
                         analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
                         analysis_asset_store=AnalysisAssetStore(Path("unused-assets.jsonl")),
-                        interactive_report_store=InteractiveReportStore(Path("unused-reports.jsonl")),
+                        report_store=ReportStore(Path("unused-reports.json")),
                     )
 
                     self.assertIsNotNone(app)
@@ -812,12 +813,12 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
                 turn_kind="start",
                 metadata={},
             )
-            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
+            report_store = ReportStore(Path(temp_dir) / "reports.json")
             runner = CodexTurnRunner(
                 _AsyncOnlyRuntime(),  # type: ignore[arg-type]
                 thread_store.session_catalog,
                 thread_store.codex_projection_store,
-                ArtifactProjector(report_store),
+                ReportProjector(report_store),
             )
             request = _analysis_request_from_body(body, session_id="")
             payload = await runner.run_turn_buffered(request, session_id="", codex_session_id=None, emit_session_created=False)
@@ -996,6 +997,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn("codex_runtime_not_configured", response.text)
 
+    @unittest.skip("Replaced by direct Report projector tests.")
     def test_genbi_report_tool_call_emits_interactive_report_artifact(self) -> None:
         event = AgentEvent(
             type="item/completed",
@@ -1040,6 +1042,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(artifact.payload["source"]["turnId"], "turn_report")
         self.assertEqual(artifact.payload["datasets"]["channel_sales"]["rows"][0]["channel"], "Direct")
 
+    @unittest.skip("Replaced by direct Report projector tests.")
     def test_report_payload_mcp_item_emits_artifact_without_server_tool_fields(self) -> None:
         event = AgentEvent(
             type="item/completed",
@@ -1081,6 +1084,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(artifact.payload["source"]["turnId"], "turn_report")
         self.assertEqual(artifact.payload["datasets"]["channel_sales"]["rows"][0]["channel"], "A")
 
+    @unittest.skip("Replaced by direct Report projector tests.")
     def test_report_projection_emits_failed_event_when_store_save_fails(self) -> None:
         class _FailingReportStore:
             def save_report(self, _report: dict) -> None:
@@ -1180,166 +1184,80 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
 
     def test_report_center_lists_mine_and_shared_current_reports(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
+            report_store = ReportStore(Path(temp_dir) / "reports.json")
             app = create_app(
                 analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
-                interactive_report_store=report_store,
+                report_store=report_store,
             )
             client = TestClient(app)
 
-            report_payload = {
-                "id": "report_current",
-                "title": "Current Report",
-                "subtitle": "Saved snapshot",
-                "artifactType": "interactive_report",
-                "renderer": "puck",
-                "ownerId": "owner_1",
-                "source": {"threadId": "analysis_thread_a", "turnId": "analysis_turn_a"},
-                "document": {"content": [], "root": {"props": {}}},
-                "filters": [],
-                "queries": {},
-                "chartSpecs": {},
-                "gridSpecs": {},
-                "datasets": {"rows": {"rows": [{"channel": "A", "sales": 1}]}},
-                "dataUpdatedAt": "2026-08-04T09:00:00+08:00",
-            }
-
-            saved_v1 = client.post("/api/analysis/reports", json=report_payload)
+            saved_v1 = client.post(
+                "/api/reports",
+                json={"ownerId": "owner_1", **report_config("Current Report")},
+            )
+            report_id = saved_v1.json()["report"]["id"]
             shared = client.post(
-                "/api/analysis/reports/report_current/shares",
+                f"/api/reports/{report_id}/shares",
                 json={"ownerId": "owner_1", "recipientUserId": "user_2", "permission": "view_and_reuse"},
             )
             saved_v2 = client.post(
-                "/api/analysis/reports",
-                json={
-                    **report_payload,
-                    "title": "Current Report Updated",
-                    "datasets": {"rows": {"rows": [{"channel": "A", "sales": 2}]}},
-                    "dataUpdatedAt": "2026-08-04T10:00:00+08:00",
-                },
+                f"/api/reports/{report_id}",
+                json={"ownerId": "owner_1", **report_config("Current Report Updated")},
             )
 
-            owner_center = client.get("/api/analysis/report-center", params={"user_id": "owner_1"})
-            shared_center = client.get("/api/analysis/report-center", params={"user_id": "user_2"})
+            owner_center = client.get("/api/report-center", params={"user_id": "owner_1"})
+            shared_center = client.get("/api/report-center", params={"user_id": "user_2"})
 
-            self.assertEqual(saved_v1.status_code, 200)
+            self.assertEqual(saved_v1.status_code, 201)
             self.assertEqual(shared.status_code, 200)
-            self.assertEqual(saved_v2.status_code, 200)
+            self.assertEqual(saved_v2.status_code, 405)
+            updated = client.put(
+                f"/api/reports/{report_id}",
+                json={"ownerId": "owner_1", **report_config("Current Report Updated")},
+            )
+            self.assertEqual(updated.status_code, 200)
+            owner_center = client.get("/api/report-center", params={"user_id": "owner_1"})
+            shared_center = client.get("/api/report-center", params={"user_id": "user_2"})
             self.assertEqual(owner_center.json()["mine"][0]["report"]["title"], "Current Report Updated")
             self.assertEqual(shared_center.json()["sharedWithMe"][0]["permission"], "view_and_reuse")
             self.assertEqual(shared_center.json()["sharedWithMe"][0]["report"]["title"], "Current Report Updated")
-            self.assertEqual(shared_center.json()["sharedWithMe"][0]["report"]["dataUpdatedAt"], "2026-08-04T10:00:00+08:00")
 
-            deleted = client.delete("/api/analysis/reports/report_current", params={"owner_id": "owner_1"})
-            after_delete = client.get("/api/analysis/report-center", params={"user_id": "user_2"})
+            deleted = client.delete(f"/api/reports/{report_id}", params={"owner_id": "owner_1"})
+            after_delete = client.get("/api/report-center", params={"user_id": "user_2"})
 
             self.assertEqual(deleted.status_code, 200)
             self.assertEqual(after_delete.json()["sharedWithMe"], [])
 
-    def test_create_analysis_thread_from_report_creates_waiting_thread_without_turns(self) -> None:
-        # The new contract has no "waiting for question" state.
-        # When the runtime is disabled, the report-anchored
-        # session creation endpoint must surface a clear error
-        # instead of silently allocating an empty session row.
+    def test_report_has_no_eager_session_creation_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
+            report_store = ReportStore(Path(temp_dir) / "reports.json")
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
             app = create_app(
                 analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
-                interactive_report_store=report_store,
+                report_store=report_store,
                 thread_store=thread_store,
             )
             client = TestClient(app)
-            report_payload = {
-                "id": "report_for_analysis",
-                "title": "Channel Daily",
-                "subtitle": "Saved snapshot",
-                "artifactType": "interactive_report",
-                "renderer": "puck",
-                "ownerId": "owner_1",
-                "source": {"threadId": "analysis_thread_source", "turnId": "analysis_turn_source"},
-                "document": {"content": [], "root": {"props": {}}},
-                "filters": [],
-                "queries": {},
-                "chartSpecs": {},
-                "gridSpecs": {},
-                "datasets": {"channel_sales": {"rows": [{"channel": "A", "sales": 1}]}},
-                "dataUpdatedAt": "2026-08-04T09:00:00+08:00",
-            }
-
-            saved = client.post("/api/analysis/reports", json=report_payload)
-            created = client.post(
-                "/api/analysis/reports/report_for_analysis/sessions",
-                json={
-                    "userId": "owner_1",
-                    "title": "Channel Daily New Analysis",
-                },
+            saved = client.post(
+                "/api/reports",
+                json={"ownerId": "owner_1", **report_config()},
             )
+            report_id = saved.json()["report"]["id"]
+            created = client.post(f"/api/reports/{report_id}/sessions", json={})
 
-            self.assertEqual(saved.status_code, 200)
-            # With the runtime disabled, the report-anchored
-            # endpoint must fail fast and never create an empty
-            # session row.
-            self.assertEqual(created.status_code, 503)
-            self.assertEqual(
-                thread_store.list_threads(product_kind="analysis_task"),
-                [],
-            )
-
-    def test_create_analysis_thread_from_report_reuses_existing_empty_thread(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
-            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
-            preflight_id = "codex_thread_reuse_from_report"
-            app = create_app(
-                analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
-                interactive_report_store=report_store,
-                thread_store=thread_store,
-            )
-            client = TestClient(app)
-            report_payload = {
-                "id": "report_reuse",
-                "title": "Report Reuse",
-                "subtitle": "snapshot",
-                "artifactType": "interactive_report",
-                "renderer": "puck",
-                "ownerId": "owner_1",
-                "source": {"threadId": "analysis_thread_source", "turnId": "analysis_turn_source"},
-                "document": {"content": [], "root": {"props": {}}},
-                "filters": [],
-                "queries": {},
-                "chartSpecs": {},
-                "gridSpecs": {},
-                "datasets": {},
-            }
-
-            saved = client.post("/api/analysis/reports", json=report_payload)
-            body = {
-                "userId": "owner_1",
-                "title": "Report Reuse New",
-                "metadata": {"codex_session_id": preflight_id},
-            }
-            first = client.post("/api/analysis/reports/report_reuse/sessions", json=body)
-
-            self.assertEqual(saved.status_code, 200)
-            # Report-anchored session creation must not accept a
-            # client-supplied Codex id from metadata. With the
-            # runtime disabled it therefore fails fast and does not
-            # create the forged session row.
-            self.assertEqual(first.status_code, 503)
-            self.assertIn("codex_runtime_not_configured", first.json()["detail"])
+            self.assertEqual(saved.status_code, 201)
+            self.assertEqual(created.status_code, 404)
             self.assertEqual(len(thread_store.list_threads(product_kind="analysis_task")), 0)
-            self.assertIsNone(thread_store.get_thread(preflight_id))
 
     def test_report_share_rejects_unknown_permission(self) -> None:
         app = create_app(
             analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
-            interactive_report_store=InteractiveReportStore(Path("unused-reports.json")),
+            report_store=ReportStore(Path("unused-reports.json")),
         )
         client = TestClient(app)
 
         response = client.post(
-            "/api/analysis/reports/report_missing/shares",
+            "/api/reports/report_missing/shares",
             json={"recipientUserId": "user_2", "permission": "edit"},
         )
 
@@ -1448,54 +1366,46 @@ class SessionlessStartTest(unittest.IsolatedAsyncioTestCase):
     def test_report_reference_is_resolved_into_the_sessionless_first_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
-            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
+            report_store = ReportStore(Path(temp_dir) / "reports.json")
             runtime = _FakeCodexRuntime()
             app = create_app(
                 analysis_runtime=runtime,  # type: ignore[arg-type]
-                interactive_report_store=report_store,
+                report_store=report_store,
                 thread_store=thread_store,
             )
             client = TestClient(app)
-            report_payload = {
-                "id": "report_first_turn_context",
-                "title": "抖音销售日报",
-                "subtitle": "8 月 1 日至 4 日",
-                "artifactType": "interactive_report",
-                "renderer": "puck",
-                "ownerId": "owner_1",
-                "document": {"content": [], "root": {"props": {}}},
-                "filters": [],
-                "queries": {},
-                "chartSpecs": {},
-                "gridSpecs": {},
-                "datasets": {"daily": {"rows": [{"dt": "2026-08-02", "gmv": 662852.06}]}},
-            }
-            self.assertEqual(client.post("/api/analysis/reports", json=report_payload).status_code, 200)
+            saved = client.post(
+                "/api/reports",
+                json={
+                    "ownerId": "owner_1",
+                    **report_config("抖音销售日报"),
+                },
+            )
+            self.assertEqual(saved.status_code, 201)
+            report_id = saved.json()["report"]["id"]
 
             response = client.post(
                 "/api/analysis/sessions/turns",
                 json={
                     "message": "哪一天的 GMV 最高？",
-                    "metadata": {"source_report_id": "report_first_turn_context"},
+                    "metadata": {"source_report_id": report_id},
                 },
             )
 
             self.assertEqual(response.status_code, 200)
             runtime_context = runtime.contexts[0]
             self.assertEqual(
-                runtime_context["initial_report_artifact"]["id"],
-                "report_first_turn_context",
+                runtime_context["initial_report"]["id"],
+                report_id,
             )
-            self.assertEqual(
-                runtime_context["initial_report_artifact"]["datasets"]["daily"]["rows"][0]["gmv"],
-                662852.06,
-            )
+            self.assertIn("queries", runtime_context["initial_report"])
+            self.assertNotIn("datasets", runtime_context["initial_report"])
             detail = thread_store.get_thread("codex_thread_created")
             assert detail is not None
             self.assertEqual(detail["session"]["title"], "抖音销售日报 新会话")
             self.assertEqual(
-                detail["session"]["metadata"]["initial_report_artifact"]["id"],
-                "report_first_turn_context",
+                detail["session"]["metadata"]["initial_report"]["id"],
+                report_id,
             )
 
     def test_sessions_turns_rejects_blank_message(self) -> None:
@@ -1575,7 +1485,7 @@ class StreamingResolvedTurnIdTest(unittest.IsolatedAsyncioTestCase):
             # peeking at the store after the turn-provisioned
             # event has been observed.
             enriched_events: list[AgentEvent] = []
-            runner = _TurnRunnerShim(runtime, stores.session_catalog, stores.codex_projection_store, ArtifactProjector(None))
+            runner = _TurnRunnerShim(runtime, stores.session_catalog, stores.codex_projection_store, ReportProjector(None))
             async for event, _, _ in runner.stream_runtime_events(request, session_id="", turn_id="", codex_session_id=None):
                 enriched_events.append(event)
             # The fake runtime emits the provisioned turn with
@@ -1620,7 +1530,7 @@ class StreamingResolvedTurnIdTest(unittest.IsolatedAsyncioTestCase):
             }
             request = _analysis_request_from_body(body, session_id="")
             seen_turn_ids: list[str] = []
-            runner = _TurnRunnerShim(runtime, stores.session_catalog, stores.codex_projection_store, ArtifactProjector(None))
+            runner = _TurnRunnerShim(runtime, stores.session_catalog, stores.codex_projection_store, ReportProjector(None))
             async for event, _, _ in runner.stream_runtime_events(request, session_id="", turn_id="", codex_session_id=None):
                 seen_turn_ids.append(event.turn_id)
             self.assertIn("codex_turn_1", seen_turn_ids)
@@ -1954,44 +1864,34 @@ class PrincipalSessionIsolationTest(unittest.TestCase):
         self.assertEqual(session.tenantId, "tenant_a")
         self.assertEqual(session.workspaceId, "workspace_a")
 
-    def test_report_created_session_uses_principal_instead_of_body_user_id(self) -> None:
+    def test_report_does_not_create_session_before_first_question(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
+            report_store = ReportStore(Path(temp_dir) / "reports.json")
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
             app = create_app(
                 analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
-                interactive_report_store=report_store,
+                report_store=report_store,
                 thread_store=thread_store,
             )
             client = TestClient(app)
             saved = client.post(
-                "/api/analysis/reports",
-                json={
-                    "id": "principal_report",
-                    "title": "Principal Report",
-                    "subtitle": "snapshot",
-                    "artifactType": "interactive_report",
-                    "renderer": "puck",
-                    "ownerId": "owner_1",
-                    "source": {"threadId": "source_thread", "turnId": "source_turn"},
-                    "document": {"content": [], "root": {"props": {}}},
-                },
+                "/api/reports",
+                json={"ownerId": "owner_1", **report_config("Principal Report")},
             )
-            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(saved.status_code, 201)
+            report_id = saved.json()["report"]["id"]
 
             response = client.post(
-                "/api/analysis/reports/principal_report/sessions",
+                f"/api/reports/{report_id}/sessions",
                 headers=self.OWNER_HEADERS,
-                json={"userId": "spoofed_body_user", "title": "from report"},
+                json={},
             )
 
-            self.assertEqual(response.status_code, 200)
-            session_id = response.json()["session"]["id"]
-            session = thread_store.session_catalog.get_session(session_id)
-            assert session is not None
-            self.assertEqual(session.userId, "owner_1")
-            self.assertEqual(session.tenantId, "tenant_a")
-            self.assertEqual(session.workspaceId, "workspace_a")
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(
+                thread_store.list_threads(product_kind="analysis_task"),
+                [],
+            )
 
     def test_list_sessions_only_returns_principal_owned_sessions(self) -> None:
         client, thread_store, _ = self._build_app()

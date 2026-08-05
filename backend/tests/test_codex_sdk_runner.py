@@ -343,14 +343,15 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
             async for event in runtime.async_stream(
                 "哪一天的 GMV 最高？",
                 context={
-                    "initial_report_artifact": {
+                    "initial_report": {
                         "id": "report_context",
                         "title": "抖音销售日报",
-                        "datasets": {
-                            "daily": {
-                                "rows": [{"dt": "2026-08-02", "gmv": 662852.06}],
-                            },
-                        },
+                        "subtitle": "当前配置",
+                        "layout": {},
+                        "filters": {},
+                        "charts": {},
+                        "tables": {},
+                        "queries": {},
                     },
                 },
             ):
@@ -364,7 +365,8 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertIsInstance(turn_input, list)
         self.assertEqual(turn_input[0].text, "哪一天的 GMV 最高？")
         self.assertIn('"id":"report_context"', turn_input[1].text)
-        self.assertIn('"gmv":662852.06', turn_input[1].text)
+        self.assertIn('"queries":{}', turn_input[1].text)
+        self.assertNotIn("datasets", turn_input[1].text)
 
     def test_interrupt_turn_awaits_async_sdk_interrupt(self) -> None:
         class _AsyncInterruptTurn:

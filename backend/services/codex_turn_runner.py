@@ -12,9 +12,8 @@ The new boundary is:
   HTTP/SSE formatting. It validates inputs and hands work off.
 * ``SessionService`` — session create / read / list / archive /
   rename. Owns the session catalog + projection store read side.
-* ``ArtifactProjector`` — turns an ``item/completed`` event with a
-  create_interactive_report payload into an ``genbi/artifact/updated``
-  event (and a saved report, when a store is configured).
+* ``ReportProjector`` — persists completed create/update Report tool calls
+  and emits direct Report events.
 * ``CodexTurnRunner`` — this module. It:
   - Starts or resumes a turn via ``CodexSdkAnalysisRuntime.async_stream``
   - Parses ``genbi/thread/provisioned`` + ``genbi/turn/provisioned``
@@ -22,7 +21,7 @@ The new boundary is:
   - Precreates the turn row in ``running`` state
   - Folds each event into ``CodexProjectionStore`` on the fly
   - Enriches session/turn ids into event payloads (``_enrich_analysis_event``)
-  - Asks ``ArtifactProjector`` to project artifact events
+  - Asks ``ReportProjector`` to project Report events
   - Compensates a missing ``turn/completed`` with a synthetic terminal event
   - On SSE cancelation, appends ``status=interrupted`` so the store is
     never stuck on ``running``.
@@ -45,7 +44,7 @@ from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
 from backend.harness.analysis_runtime import InMemoryCodexAnalysisRuntime, turn_status_from_events
 from backend.harness.events import AgentEvent
 from backend.harness.session_catalog import SessionCatalog
-from backend.services.artifact_projector import ArtifactProjector
+from backend.services.report_projector import ReportProjector
 
 
 LOGGER = logging.getLogger(__name__)
@@ -298,12 +297,12 @@ class CodexTurnRunner:
         analysis_runtime: CodexSdkAnalysisRuntime,
         session_catalog: SessionCatalog,
         codex_projection_store: CodexProjectionStore,
-        artifact_projector: ArtifactProjector,
+        report_projector: ReportProjector,
     ) -> None:
         self._runtime = analysis_runtime
         self._catalog = session_catalog
         self._projections = codex_projection_store
-        self._artifacts = artifact_projector
+        self._reports = report_projector
         # Bind the session catalog → latest-turn-provider seam so its
         # views expose the latest-turn status without circular imports.
         self._catalog.bind_latest_turn_provider(self._projections)
@@ -323,8 +322,8 @@ class CodexTurnRunner:
         return self._runtime
 
     @property
-    def artifacts(self) -> ArtifactProjector:
-        return self._artifacts
+    def reports(self) -> ReportProjector:
+        return self._reports
 
     # -- context + save primitives -------------------------------------
 
@@ -346,9 +345,9 @@ class CodexTurnRunner:
             "codex_session_id": codex_session_id,
             "codex_thread_id": codex_session_id,
         }
-        initial_report = request.metadata.get("initial_report_artifact")
+        initial_report = request.metadata.get("initial_report")
         if isinstance(initial_report, dict):
-            context["initial_report_artifact"] = initial_report
+            context["initial_report"] = initial_report
         return context
 
     def save_turn(
@@ -487,13 +486,24 @@ class CodexTurnRunner:
             if enriched.type == "turn/completed":
                 saw_terminal_event = True
             yield enriched, effective_thread_id, resolved_turn_id
-            artifact_event = self._artifacts.project_interactive_report(
+            session = (
+                self._catalog.get_session(effective_thread_id)
+                if effective_thread_id
+                else None
+            )
+            owner_id = (
+                _string_or_none(request.user_id)
+                or _string_or_none(getattr(session, "userId", None))
+                or "local-user"
+            )
+            report_event = self._reports.project_report(
                 enriched,
                 session_id=effective_thread_id,
                 turn_id=resolved_turn_id,
+                owner_id=owner_id,
             )
-            if artifact_event:
-                yield artifact_event, effective_thread_id, resolved_turn_id
+            if report_event:
+                yield report_event, effective_thread_id, resolved_turn_id
         if not saw_terminal_event:
             yield _missing_terminal_event(session_id=session_id, turn_id=resolved_turn_id), effective_thread_id, resolved_turn_id
 

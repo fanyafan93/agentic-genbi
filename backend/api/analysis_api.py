@@ -58,7 +58,7 @@ from backend.business_semantics.knowledge_store import KnowledgeStore
 #                                   terminal-event compensation.
 #   * ``ArtifactProjector``       — artifact projection: interactive
 #                                   reports saved + artifact events.
-from backend.services.artifact_projector import ArtifactProjector, interactive_report_payload
+from backend.services.report_projector import ReportProjector
 from backend.services.codex_turn_runner import (
     AnalysisTurnRequest,
     CodexTurnRunner,
@@ -87,7 +87,6 @@ def create_app(
     analysis_asset_store: AnalysisAssetStore | None = None,
     report_store: Any | None = None,
     report_query_service: ReportQueryService | None = None,
-    interactive_report_store: Any | None = None,
     session_catalog: SessionCatalog | None = None,
     codex_projection_store: CodexProjectionStore | None = None,
     # Legacy shim: older tests (and external callers) still pass a
@@ -371,7 +370,6 @@ def create_app(
     configured_analysis_asset_store = analysis_asset_store or _build_default_analysis_asset_store()
     configured_report_store = (
         report_store
-        or interactive_report_store
         or _build_default_report_store()
     )
     configured_report_query_service = (
@@ -382,12 +380,12 @@ def create_app(
     configured_codex_projection_store = codex_projection_store or _build_default_codex_projection_store()
     # P2-3: instantiate the service triad once per app. The rest of the
     # routes only touch the services, not the raw stores directly.
-    configured_artifact_projector = ArtifactProjector(configured_report_store)
+    configured_report_projector = ReportProjector(configured_report_store)
     configured_turn_runner = CodexTurnRunner(
         analysis_runtime=configured_analysis_runtime,
         session_catalog=configured_session_catalog,
         codex_projection_store=configured_codex_projection_store,
-        artifact_projector=configured_artifact_projector,
+        report_projector=configured_report_projector,
     )
     configured_session_service = SessionService(
         session_catalog=configured_session_catalog,
