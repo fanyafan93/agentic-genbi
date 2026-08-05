@@ -6,7 +6,7 @@
 
 - 当前分支：`feature/report-editing`
 - 基线：`Agentic-GenBI`
-- 工作区存在本轮 Report 收尾改动，以及此前尚未提交的分析工作台布局改动；未覆盖或重置这些改动。
+- 工作区存在此前尚未提交的分析工作台布局改动；本轮未覆盖或重置这些改动。
 
 ## 当前实现
 
@@ -55,6 +55,8 @@
   - passed；Docker CLI 仍报告本机 `config.json` 读取权限警告，不影响配置结果。
 - 容器运行
   - frontend、backend、postgres 均已重建并运行。
+  - 标准命令 `docker compose --progress plain build --pull=false backend` 已完整构建成功；新 backend 容器的镜像 ID 与 `agentic-genbi-backend:latest` 一致。
+  - 标准镜像内发行包版本：`PyMySQL==1.2.0`、`sqlglot==30.15.0`、`openai-codex==0.144.4`；Codex CLI 为 `0.146.0`。
   - frontend production build 与 TypeScript 检查通过。
   - `GET /analysis/new` 返回 200。
   - `GET /health` 返回 `{"status":"ok"}`。
@@ -69,7 +71,6 @@
 
 ## 风险与待验证
 
-- 标准 backend Docker build 曾因 `files.pythonhosted.org` 下载 128.8 MB Codex CLI wheel 超时；最终基于现有同版本 backend 镜像安装本轮新增的 `PyMySQL==1.2.0`、`sqlglot==30.15.0` 并覆盖源码，运行态验证通过。网络恢复后仍应再跑一次标准 `docker compose build --pull=false backend`。
 - 真实数据源查询依赖运行环境的数据源配置和只读账号；本轮只验证了查询服务单元测试和 API 装载，未对生产业务表执行查询。
 - 有来源 Report 的双按钮行为已有前端回归测试；本轮数据库按“不迁移旧 Report”清空后没有来源 Report 可做同等页面 smoke。
 
@@ -77,4 +78,3 @@
 
 1. 通过代码或 Agent 生成包含多 Chart、多 Table 和筛选绑定的示例 Report。
 2. 使用真实只读数据源做筛选、分页和刷新数据的页面验证。
-3. 网络稳定后补跑标准 backend 镜像全量构建。
