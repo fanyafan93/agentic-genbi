@@ -522,6 +522,62 @@ describe("analysis backend client event mapping", () => {
     expect(completedThread?.latestTurnStatus).toBe("completed");
   });
 
+  test("replay is projection-only (no GenBI Item rows required)", () => {
+    // The user spec removes the GenBI ``Item`` projection entirely.
+    // Restoring a session must depend solely on the turn row plus
+    // the Codex item projection — not on a parallel ``items`` list.
+    // We feed the renderer with a payload that only contains the two
+    // approved surfaces and assert it produces user + agent nodes.
+    const detail = {
+      thread: { id: "thread_replay" },
+      turns: [
+        {
+          id: "turn_replay",
+          // ``inputText`` is the canonical field; we still surface
+          // the legacy ``question`` for back-compat.
+          question: "what was last week's GMV?",
+          inputText: "what was last week's GMV?",
+          status: "completed",
+          createdAt: "2026-08-05T10:00:00Z",
+          startedAt: "2026-08-05T10:00:00Z",
+          completedAt: "2026-08-05T10:00:02Z",
+        },
+      ],
+      codexItemProjections: [
+        {
+          codexItemId: "msg_replay",
+          genbiTurnId: "turn_replay",
+          codexThreadId: "thread_replay",
+          codexTurnId: "turn_replay",
+          itemType: "agentMessage",
+          status: "completed",
+          sequence: 0,
+          payload: { content: "GMV was 1.2M." },
+          createdAt: "2026-08-05T10:00:01Z",
+        },
+        {
+          codexItemId: "sql_replay",
+          genbiTurnId: "turn_replay",
+          codexThreadId: "thread_replay",
+          codexTurnId: "turn_replay",
+          itemType: "sql",
+          status: "completed",
+          sequence: 1,
+          payload: { path: "queries/gmv.sql" },
+          createdAt: "2026-08-05T10:00:02Z",
+        },
+      ],
+    };
+    const nodes = flowNodesFromBackendThread(detail as Parameters<typeof flowNodesFromBackendThread>[0]);
+    const userNode = nodes.find((node) => node.role === "user");
+    const agentNode = nodes.find((node) => node.role === "agent");
+    expect(userNode?.content).toBe("what was last week's GMV?");
+    expect(agentNode?.content).toBe("GMV was 1.2M.");
+    // The new shape carries the ``codexItemId`` we surfaced through
+    // the projection; the legacy GenBI Item id never appears.
+    expect(JSON.stringify(nodes)).not.toContain("genbi_item_id");
+  });
+
   test("keeps sending new questions after a failed turn on the same session", async () => {
     // The session stays ``active`` after a turn failure; the user can
     // keep sending follow-up turns on the same session id. The

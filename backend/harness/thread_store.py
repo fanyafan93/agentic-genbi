@@ -27,7 +27,7 @@ TurnInputKind = Literal["start", "message", "reply"]
 
 SESSION_STATES = ("active", "archived")
 TURN_STATES = ("running", "completed", "failed", "cancelled", "needs_input")
-_TURN_TERMINAL_STATES = ("completed", "failed", "cancelled")
+TURN_TERMINAL_STATES = ("completed", "failed", "cancelled")
 
 
 @dataclass(frozen=True)
@@ -50,24 +50,20 @@ class TurnRecord:
     id: str
     threadId: str
     inputKind: TurnInputKind
+    # ``question`` is the historical field name for the user input;
+    # ``inputText`` is the canonical field per the latest spec. We
+    # keep both in sync so the canonical name always wins on read
+    # while legacy rows still round-trip cleanly.
     question: str
+    inputText: str
     status: str
     createdAt: str
     updatedAt: str
+    startedAt: str | None
+    completedAt: str | None
     metadata: dict[str, Any] = field(default_factory=dict)
     codexThreadId: str | None = None
     codexTurnId: str | None = None
-
-
-@dataclass(frozen=True)
-class ItemRecord:
-    id: str
-    threadId: str
-    turnId: str
-    kind: str
-    eventType: str
-    payload: dict[str, Any]
-    createdAt: str
 
 
 @dataclass(frozen=True)
@@ -77,6 +73,11 @@ class CodexItemProjectionRecord:
     codexTurnId: str | None
     itemType: str
     status: str
+    # ``sequence`` is the dense ordering of the projection in the
+    # turn's timeline. The realtime stream assigns it as the items
+    # arrive; historical replay rebuilds it by sorting
+    # ``createdAt`` and renumbering from zero.
+    sequence: int
     payload: dict[str, Any]
     createdAt: str
     completedAt: str | None = None
@@ -242,14 +243,22 @@ class ThreadStore:
             turn_status = existing_turn.status
         else:
             turn_status = "running"
+        # ``create_turn_only`` runs as soon as Codex provisions the
+        # turn; the user input has not been resolved yet. We still
+        # keep the canonical ``inputText`` field but the real value
+        # is set in ``save_turn``.
+        placeholder_input = existing_turn.inputText if existing_turn and existing_turn.inputText else ""
         turn = TurnRecord(
             id=turn_id,
             threadId=thread_id,
             inputKind="start",
-            question="",
+            question=placeholder_input,
+            inputText=placeholder_input,
             status=turn_status,
             createdAt=existing_turn.createdAt if existing_turn else now,
             updatedAt=now,
+            startedAt=existing_turn.startedAt if existing_turn else now,
+            completedAt=existing_turn.completedAt if existing_turn else None,
             metadata=merged_metadata,
             codexThreadId=thread.codexThreadId,
             codexTurnId=effective_codex_turn_id,
@@ -318,7 +327,11 @@ class ThreadStore:
             merged_metadata["codex_thread_id"] = codex_thread_id
         if codex_turn_id:
             merged_metadata["codex_turn_id"] = codex_turn_id
-        item_records = _items_from_events(events, thread_id=thread_id, turn_id=turn_id)
+        # The user input lives on the turn row (``inputText``); we
+        # never reconstruct a fake "GenBI User Item" from the
+        # Codex events. The question parameter remains the
+        # authoritative source for what the user actually asked.
+        canonical_input = question.strip() or (existing_turn.inputText if existing_turn else "")
         codex_item_projections = _codex_item_projections_from_events(
             events,
             thread_id=thread_id,
@@ -353,18 +366,22 @@ class ThreadStore:
             id=turn_id,
             threadId=thread_id,
             inputKind=input_kind,
-            question=question,
+            question=canonical_input,
+            # ``inputText`` is the canonical name per the latest
+            # spec; keep ``question`` in sync so legacy readers
+            # still see what the user asked.
+            inputText=canonical_input,
             status=turn_status,
             createdAt=existing_turn.createdAt if existing_turn else (started_at or now),
             updatedAt=now,
+            startedAt=started_at or (existing_turn.startedAt if existing_turn else None),
+            completedAt=completed_at if turn_status in TURN_TERMINAL_STATES else (existing_turn.completedAt if existing_turn else None),
             metadata={**(existing_turn.metadata if existing_turn else {}), **merged_metadata},
             codexThreadId=codex_thread_id or (existing_turn.codexThreadId if existing_turn else None),
             codexTurnId=codex_turn_id or (existing_turn.codexTurnId if existing_turn else None),
         )
         state["threads"][thread_id] = thread
         state["turns"][turn_id] = turn
-        state["items"] = [item for item in state["items"] if not (item.threadId == thread_id and item.turnId == turn_id)]
-        state["items"].extend(item_records)
         state["codex_item_projections"] = [
             item for item in state["codex_item_projections"] if not (item.genbiThreadId == thread_id and item.genbiTurnId == turn_id)
         ]
@@ -373,7 +390,6 @@ class ThreadStore:
         return {
             "thread": asdict(thread),
             "turn": asdict(turn),
-            "items": [asdict(item) for item in item_records],
             "codexItemProjections": [asdict(item) for item in codex_item_projections],
         }
 
@@ -384,8 +400,6 @@ class ThreadStore:
             return None
         turns = [turn for turn in state["turns"].values() if turn.threadId == thread_id]
         turns.sort(key=lambda item: item.createdAt)
-        items = [item for item in state["items"] if item.threadId == thread_id]
-        items.sort(key=lambda item: item.createdAt)
         codex_item_projections = [item for item in state["codex_item_projections"] if item.genbiThreadId == thread_id]
         codex_item_projections.sort(key=lambda item: item.createdAt)
         thread_row = asdict(thread)
@@ -394,7 +408,6 @@ class ThreadStore:
         return {
             "thread": thread_row,
             "turns": [asdict(item) for item in turns],
-            "items": [asdict(item) for item in items],
             "codexItemProjections": [asdict(item) for item in codex_item_projections],
         }
 
@@ -404,8 +417,6 @@ class ThreadStore:
         turn = state["turns"].get(turn_id)
         if not thread or not turn or turn.threadId != thread_id:
             return None
-        items = [item for item in state["items"] if item.turnId == turn_id and item.threadId == thread_id]
-        items.sort(key=lambda item: item.createdAt)
         codex_item_projections = [
             item
             for item in state["codex_item_projections"]
@@ -415,7 +426,6 @@ class ThreadStore:
         return {
             "thread": asdict(thread),
             "turn": asdict(turn),
-            "items": [asdict(item) for item in items],
             "codexItemProjections": [asdict(item) for item in codex_item_projections],
         }
 
@@ -466,18 +476,22 @@ class ThreadStore:
         }
 
     def get_turn_events(self, turn_id: str) -> list[dict[str, Any]]:
+        """Return the Codex projection timeline for a turn.
+
+        The historical implementation surfaced the GenBI
+        ``ItemRecord`` row; the new contract returns the same
+        projection shape the live SSE stream produces. The realtime
+        stream and historical replay therefore share one normalised
+        ``CodexItemProjectionRecord`` shape.
+        """
         state = self._read_state()
-        items = [item for item in state["items"] if item.turnId == turn_id]
-        items.sort(key=lambda item: item.createdAt)
-        return [
-            {
-                "type": item["eventType"],
-                "turn_id": item["turnId"],
-                "payload": item["payload"],
-                "created_at": item["createdAt"],
-            }
-            for item in [asdict(item) for item in items]
+        projections = [
+            item
+            for item in state["codex_item_projections"]
+            if item.genbiTurnId == turn_id
         ]
+        projections.sort(key=lambda item: (item.createdAt, item.codexItemId))
+        return [_projection_to_event_dict(item, index) for index, item in enumerate(projections)]
 
     def list_threads(self, *, limit: int = 50, product_kind: ThreadProductKind | None = None) -> list[dict[str, Any]]:
         """Return the most-recently-updated threads.
@@ -525,7 +539,6 @@ class ThreadStore:
             return False
         state["threads"].pop(thread_id, None)
         state["turns"] = {key: turn for key, turn in state["turns"].items() if turn.threadId != thread_id}
-        state["items"] = [item for item in state["items"] if item.threadId != thread_id]
         state["codex_item_projections"] = [
             item for item in state["codex_item_projections"] if item.genbiThreadId != thread_id
         ]
@@ -539,7 +552,10 @@ class ThreadStore:
         return count
 
     def _read_state(self) -> dict[str, Any]:
-        state = {"threads": {}, "turns": {}, "items": [], "codex_item_projections": []}
+        # The legacy ``item`` record is no longer produced. The
+        # ``codex_item_projection`` table is the single source of
+        # truth for the turn's projection timeline.
+        state = {"threads": {}, "turns": {}, "codex_item_projections": []}
         for record in self._read_raw():
             record_type = record.get("record_type")
             payload = dict(record.get("payload") or {})
@@ -551,10 +567,11 @@ class ThreadStore:
                 payload = _normalize_turn_payload(payload)
                 item = TurnRecord(**payload)
                 state["turns"][item.id] = item
-            elif record_type == "item":
-                state["items"].append(ItemRecord(**payload))
             elif record_type == "codex_item_projection":
                 state["codex_item_projections"].append(CodexItemProjectionRecord(**payload))
+            # Legacy ``item`` records are intentionally ignored: we
+            # never wrote them after the GenBI Item was removed and
+            # we don't surface them through the API surface.
         return state
 
     def _read_raw(self) -> list[dict[str, Any]]:
@@ -573,8 +590,6 @@ class ThreadStore:
                 _write_record(file, "thread", asdict(item))
             for item in sorted(state["turns"].values(), key=lambda value: value.createdAt):
                 _write_record(file, "turn", asdict(item))
-            for item in sorted(state["items"], key=lambda value: value.createdAt):
-                _write_record(file, "item", asdict(item))
             for item in sorted(state["codex_item_projections"], key=lambda value: value.createdAt):
                 _write_record(file, "codex_item_projection", asdict(item))
 
@@ -584,30 +599,37 @@ def _write_record(file: Any, record_type: str, payload: dict[str, Any]) -> None:
     file.write("\n")
 
 
-def _items_from_events(
-    events: list["AgentEvent"],
-    *,
-    thread_id: str,
-    turn_id: str,
-) -> list[ItemRecord]:
-    items = []
-    for event in events:
-        item_id = event.payload.get("item_id")
-        item_kind = event.payload.get("item_kind")
-        if not item_id or not item_kind:
-            continue
-        items.append(
-            ItemRecord(
-                id=str(item_id),
-                threadId=str(event.payload.get("thread_id") or thread_id),
-                turnId=str(event.payload.get("turn_id") or turn_id),
-                kind=str(item_kind),
-                eventType=event.type,
-                payload=dict(event.payload),
-                createdAt=event.created_at,
-            )
-        )
-    return items
+def _projection_to_event_dict(
+    projection: CodexItemProjectionRecord,
+    index: int,
+) -> dict[str, Any]:
+    """Serialise a projection row into the unified turn-event shape.
+
+    The realtime SSE stream and the historical replay endpoint
+    (``get_turn_events``) both surface the same shape so the
+    frontend can replay a session with a single rendering path.
+    The shape mirrors what the live stream emits (type, turn_id,
+    payload, created_at) plus a stable ``sequence`` so the client
+    can dedupe arrivals.
+    """
+    return {
+        # ``codexItemProjections`` store an opaque ``itemType`` from
+        # Codex; the historical stream surfaced an explicit ``type``
+        # field per event, so we mirror the same key. The frontend
+        # can branch on ``itemType`` inside the payload if it needs
+        # the original Codex type.
+        "type": f"codex/{projection.itemType}",
+        "turn_id": projection.codexTurnId or projection.genbiTurnId,
+        "codex_thread_id": projection.codexThreadId or projection.genbiThreadId,
+        "codex_turn_id": projection.codexTurnId,
+        "codex_item_id": projection.codexItemId,
+        "item_type": projection.itemType,
+        "status": projection.status,
+        "sequence": projection.sequence,
+        "payload": dict(projection.payload or {}),
+        "created_at": projection.createdAt,
+        "completed_at": projection.completedAt,
+    }
 
 
 def _codex_item_projections_from_events(
@@ -635,13 +657,29 @@ def _codex_item_projections_from_events(
             codexTurnId=codex_turn_id,
             itemType=item_type,
             status=status,
+            sequence=existing.sequence if existing else 0,
             payload=payload,
             createdAt=existing.createdAt if existing else event.created_at,
             completedAt=event.created_at if completed else (existing.completedAt if existing else None),
             genbiThreadId=thread_id,
             genbiTurnId=turn_id,
         )
-    return list(projections.values())
+    # Renumber the projections in arrival order. The realtime
+    # stream emits events in the order Codex produced them, so a
+    # stable sort by ``createdAt`` is good enough to recover the
+    # dense ``sequence`` value. ``codexItemId`` is the tie-breaker
+    # so two projections that share a timestamp keep a stable order
+    # between live and replay.
+    ordered = sorted(
+        projections.values(),
+        key=lambda item: (item.createdAt, item.codexItemId),
+    )
+    return [
+        CodexItemProjectionRecord(
+            **{**asdict(item), "sequence": index},
+        )
+        for index, item in enumerate(ordered)
+    ]
 
 
 def _turn_status(events: list["AgentEvent"]) -> str:

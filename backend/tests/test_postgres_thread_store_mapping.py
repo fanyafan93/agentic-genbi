@@ -63,9 +63,12 @@ class PostgresThreadStoreMappingTest(unittest.TestCase):
             threadId="analysis_thread_1",
             inputKind="message",
             question="继续分析",
+            inputText="继续分析",
             status="completed",
             createdAt="2026-08-02T10:00:00Z",
             updatedAt="2026-08-02T10:01:00Z",
+            startedAt="2026-08-02T10:00:00Z",
+            completedAt="2026-08-02T10:01:00Z",
             codexThreadId="codex_thread_1",
             codexTurnId="codex_turn_1",
             metadata={"codex_turn_id": "codex_turn_1"},
@@ -79,9 +82,12 @@ class PostgresThreadStoreMappingTest(unittest.TestCase):
                 "thread_id": "analysis_thread_1",
                 "input_kind": "message",
                 "question": "继续分析",
+                "input_text": "继续分析",
                 "status": "completed",
                 "created_at": "2026-08-02T10:00:00Z",
                 "updated_at": "2026-08-02T10:01:00Z",
+                "started_at": "2026-08-02T10:00:00Z",
+                "completed_at": "2026-08-02T10:01:00Z",
                 "codex_thread_id": "codex_thread_1",
                 "codex_turn_id": "codex_turn_1",
                 "metadata": {},
@@ -90,8 +96,14 @@ class PostgresThreadStoreMappingTest(unittest.TestCase):
 
         self.assertEqual(params["codex_thread_id"], "codex_thread_1")
         self.assertEqual(params["codex_turn_id"], "codex_turn_1")
+        self.assertEqual(params["input_text"], "继续分析")
+        self.assertEqual(params["started_at"], "2026-08-02T10:00:00Z")
+        self.assertEqual(params["completed_at"], "2026-08-02T10:01:00Z")
         self.assertEqual(row_record.codexThreadId, "codex_thread_1")
         self.assertEqual(row_record.codexTurnId, "codex_turn_1")
+        self.assertEqual(row_record.inputText, "继续分析")
+        self.assertEqual(row_record.startedAt, "2026-08-02T10:00:00Z")
+        self.assertEqual(row_record.completedAt, "2026-08-02T10:01:00Z")
 
 
 if __name__ == "__main__":

@@ -40,31 +40,41 @@ class ThreadStoreTest(unittest.TestCase):
             self.assertEqual(detail["thread"]["metadata"]["source_report_id"], "report_1")
             self.assertEqual(detail["turns"], [])
 
-    def test_store_saves_thread_turn_and_items(self) -> None:
+    def test_store_saves_thread_turn_and_projections(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
             events = [
                 AgentEvent(
-                    type="turn/started",
+                    type="item/agentMessage/delta",
                     turn_id="codex_turn_1",
                     payload={
-                        "thread_id": "codex_thread_1",
-                        "turn_id": "codex_turn_1",
-                        "question": "analyze GMV",
-                        "item_id": "item_1",
-                        "item_kind": "message",
+                        "codex_thread_id": "codex_thread_1",
+                        "codex_turn_id": "codex_turn_1",
+                        "codex_item_id": "item_1",
+                        "codex_item_type": "agentMessage",
+                        "delta": "hello",
+                    },
+                ),
+                AgentEvent(
+                    type="item/completed",
+                    turn_id="codex_turn_1",
+                    payload={
+                        "codex_thread_id": "codex_thread_1",
+                        "codex_turn_id": "codex_turn_1",
+                        "codex_item_id": "item_1",
+                        "codex_item_type": "agentMessage",
+                        "content": "Hello there",
                     },
                 ),
                 AgentEvent(
                     type="genbi/artifact/created",
                     turn_id="codex_turn_1",
                     payload={
-                        "thread_id": "codex_thread_1",
-                        "turn_id": "codex_turn_1",
+                        "codex_thread_id": "codex_thread_1",
+                        "codex_turn_id": "codex_turn_1",
+                        "codex_item_id": "item_2",
+                        "codex_item_type": "sql",
                         "path": "queries/query.sql",
-                        "kind": "sql",
-                        "item_id": "item_2",
-                        "item_kind": "sql",
                     },
                 ),
                 AgentEvent(type="turn/completed", turn_id="codex_turn_1", payload={"status": "completed"}),
@@ -92,12 +102,34 @@ class ThreadStoreTest(unittest.TestCase):
             self.assertEqual(thread["thread"]["id"], "codex_thread_1")
             self.assertEqual(thread["thread"]["title"], "analyze GMV")
             self.assertEqual(thread["turns"][0]["id"], "codex_turn_1")
-            self.assertNotIn("runs", thread)
-            self.assertEqual([item["kind"] for item in thread["items"]], ["message", "sql"])
+            # The GenBI ``items`` field is gone; the only projection
+            # store is the Codex one.
+            self.assertNotIn("items", thread)
+            self.assertEqual(
+                [item["codexItemId"] for item in thread["codexItemProjections"]],
+                ["item_1", "item_2"],
+            )
+            self.assertEqual(
+                [item["sequence"] for item in thread["codexItemProjections"]],
+                [0, 1],
+            )
             self.assertEqual(turn["turn"]["id"], "codex_turn_1")
-            self.assertNotIn("executionAttempts", turn)
-            self.assertEqual([item["kind"] for item in turn["items"]], ["message", "sql"])
-            self.assertEqual([event["type"] for event in turn_events], ["turn/started", "genbi/artifact/created"])
+            self.assertNotIn("items", turn)
+            # The turn row carries the canonical ``inputText`` field
+            # in addition to the legacy ``question`` column so both
+            # new and old readers see the same value.
+            self.assertEqual(turn["turn"]["inputText"], "analyze GMV")
+            self.assertEqual(turn["turn"]["question"], "analyze GMV")
+            self.assertIsNotNone(turn["turn"]["startedAt"])
+            self.assertIsNotNone(turn["turn"]["completedAt"])
+            # ``get_turn_events`` is the unified replay shape: it
+            # reads from the Codex projection store and assigns a
+            # stable ``sequence``.
+            self.assertEqual(len(turn_events), 2)
+            self.assertEqual(
+                [(event["codex_item_id"], event["sequence"]) for event in turn_events],
+                [("item_1", 0), ("item_2", 1)],
+            )
 
     def test_store_reads_runtime_thread_id_from_thread_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

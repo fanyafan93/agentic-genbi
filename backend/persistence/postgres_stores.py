@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-from backend.harness.thread_store import CodexItemProjectionRecord, ItemRecord, ThreadProductKind, ThreadRecord, ThreadStore, TurnRecord
+from backend.harness.thread_store import CodexItemProjectionRecord, ThreadProductKind, ThreadRecord, ThreadStore, TurnRecord
 from backend.analysis.asset_store import (
     AnalysisAssetRecord,
     AnalysisAssetReopenContext,
@@ -32,7 +32,6 @@ from backend.business_semantics.knowledge_store import KnowledgeRecord, Knowledg
 POSTGRES_KNOWLEDGE_TABLE = "verified_knowledge"
 POSTGRES_THREAD_TABLE = "analysis_threads"
 POSTGRES_TURN_TABLE = "analysis_turns"
-POSTGRES_ITEM_TABLE = "analysis_items"
 POSTGRES_CODEX_ITEM_PROJECTION_TABLE = "analysis_codex_item_projections"
 POSTGRES_ANALYSIS_ASSET_TABLE = "analysis_assets"
 POSTGRES_ARTIFACT_LINEAGE_TABLE = "analysis_artifact_lineage"
@@ -229,28 +228,15 @@ class PostgresThreadStore(ThreadStore):
                     """,
                     _turn_params(turn),
                 )
-            for item in state["items"]:
-                conn.execute(
-                    f"""
-                    INSERT INTO {POSTGRES_ITEM_TABLE} (id, thread_id, turn_id, kind, event_type, payload, created_at)
-                    VALUES (%(id)s, %(thread_id)s, %(turn_id)s, %(kind)s, %(event_type)s, %(payload)s, %(created_at)s)
-                    ON CONFLICT (id) DO UPDATE SET
-                        kind = EXCLUDED.kind,
-                        event_type = EXCLUDED.event_type,
-                        payload = EXCLUDED.payload,
-                        created_at = EXCLUDED.created_at
-                    """,
-                    _item_params(item),
-                )
             for item in state["codex_item_projections"]:
                 conn.execute(
                     f"""
                     INSERT INTO {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
-                        codex_item_id, codex_thread_id, codex_turn_id, item_type, status, payload,
+                        codex_item_id, codex_thread_id, codex_turn_id, item_type, status, sequence, payload,
                         created_at, completed_at, genbi_thread_id, genbi_turn_id
                     )
                     VALUES (
-                        %(codex_item_id)s, %(codex_thread_id)s, %(codex_turn_id)s, %(item_type)s, %(status)s, %(payload)s,
+                        %(codex_item_id)s, %(codex_thread_id)s, %(codex_turn_id)s, %(item_type)s, %(status)s, %(sequence)s, %(payload)s,
                         %(created_at)s, %(completed_at)s, %(genbi_thread_id)s, %(genbi_turn_id)s
                     )
                     ON CONFLICT (codex_item_id) DO UPDATE SET
@@ -258,6 +244,7 @@ class PostgresThreadStore(ThreadStore):
                         codex_turn_id = EXCLUDED.codex_turn_id,
                         item_type = EXCLUDED.item_type,
                         status = EXCLUDED.status,
+                        sequence = EXCLUDED.sequence,
                         payload = EXCLUDED.payload,
                         completed_at = EXCLUDED.completed_at,
                         genbi_thread_id = EXCLUDED.genbi_thread_id,
@@ -276,12 +263,11 @@ class PostgresThreadStore(ThreadStore):
                 str(row["id"]): _turn_record_from_row(row)
                 for row in conn.execute(f"SELECT * FROM {POSTGRES_TURN_TABLE}").fetchall()
             }
-            items = [_item_record_from_row(row) for row in conn.execute(f"SELECT * FROM {POSTGRES_ITEM_TABLE}").fetchall()]
             codex_item_projections = [
                 _codex_item_projection_from_row(row)
                 for row in conn.execute(f"SELECT * FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}").fetchall()
             ]
-        return {"threads": threads, "turns": turns, "items": items, "codex_item_projections": codex_item_projections}
+        return {"threads": threads, "turns": turns, "codex_item_projections": codex_item_projections}
 
     def clear(self) -> int:
         with _connect(self.database_url) as conn:
@@ -1164,25 +1150,19 @@ def _turn_params(record: TurnRecord) -> dict[str, Any]:
         "id": record.id,
         "thread_id": record.threadId,
         "input_kind": record.inputKind,
+        # ``inputText`` is the canonical field per the latest spec;
+        # we still write ``question`` for legacy backends that read
+        # the historical column name.
         "question": record.question,
+        "input_text": record.inputText,
         "status": record.status,
         "created_at": record.createdAt,
         "updated_at": record.updatedAt,
+        "started_at": record.startedAt,
+        "completed_at": record.completedAt,
         "codex_thread_id": record.codexThreadId,
         "codex_turn_id": record.codexTurnId,
         "metadata": _jsonb(record.metadata),
-    }
-
-
-def _item_params(record: ItemRecord) -> dict[str, Any]:
-    return {
-        "id": record.id,
-        "thread_id": record.threadId,
-        "turn_id": record.turnId,
-        "kind": record.kind,
-        "event_type": record.eventType,
-        "payload": _jsonb(record.payload),
-        "created_at": record.createdAt,
     }
 
 
@@ -1193,6 +1173,7 @@ def _codex_item_projection_params(record: CodexItemProjectionRecord) -> dict[str
         "codex_turn_id": record.codexTurnId,
         "item_type": record.itemType,
         "status": record.status,
+        "sequence": record.sequence,
         "payload": _jsonb(record.payload),
         "created_at": record.createdAt,
         "completed_at": record.completedAt,
@@ -1293,44 +1274,45 @@ def _thread_record_from_row(row: dict[str, Any]) -> ThreadRecord:
 
 
 def _turn_record_from_row(row: dict[str, Any]) -> TurnRecord:
+    raw_question = str(row.get("question") or "")
+    # Prefer the canonical ``input_text`` column; fall back to
+    # ``question`` for legacy rows that pre-date the spec change.
+    input_text = row.get("input_text")
+    if input_text in (None, ""):
+        input_text = raw_question
     return TurnRecord(
         id=str(row["id"]),
         threadId=str(row["thread_id"]),
         inputKind=str(row["input_kind"]),  # type: ignore[arg-type]
-        question=str(row["question"]),
+        question=raw_question,
+        inputText=str(input_text),
         status=str(row["status"]),
         createdAt=_iso(row.get("created_at")) or "",
         updatedAt=_iso(row.get("updated_at")) or "",
+        startedAt=_iso(row.get("started_at")),
+        completedAt=_iso(row.get("completed_at")),
         codexThreadId=row.get("codex_thread_id"),
         codexTurnId=row.get("codex_turn_id"),
         metadata=dict(row.get("metadata") or {}),
     )
 
 
-def _item_record_from_row(row: dict[str, Any]) -> ItemRecord:
-    return ItemRecord(
-        id=str(row["id"]),
-        threadId=str(row["thread_id"]),
-        turnId=str(row["turn_id"]),
-        kind=str(row["kind"]),
-        eventType=str(row["event_type"]),
-        payload=dict(row.get("payload") or {}),
-        createdAt=_iso(row.get("created_at")) or "",
-    )
-
-
 def _codex_item_projection_from_row(row: dict[str, Any]) -> CodexItemProjectionRecord:
+    raw_sequence = row.get("sequence")
+    sequence = int(raw_sequence) if raw_sequence is not None else 0
     return CodexItemProjectionRecord(
         codexItemId=str(row["codex_item_id"]),
         codexThreadId=row.get("codex_thread_id"),
         codexTurnId=row.get("codex_turn_id"),
         itemType=str(row["item_type"]),
         status=str(row["status"]),
+        sequence=sequence,
         payload=dict(row.get("payload") or {}),
         createdAt=_iso(row.get("created_at")) or "",
         completedAt=_iso(row.get("completed_at")),
         genbiThreadId=row.get("genbi_thread_id"),
-        genbiTurnId=row.get("genbi_turn_id"),    )
+        genbiTurnId=row.get("genbi_turn_id"),
+    )
 
 
 def _analysis_asset_from_row(row: dict[str, Any]) -> AnalysisAssetRecord:

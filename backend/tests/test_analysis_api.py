@@ -1314,6 +1314,243 @@ class SessionTurnStateDecouplingTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(refreshed["thread"]["status"], "active")
 
 
+class NoGenBIItemTest(unittest.IsolatedAsyncioTestCase):
+    """Locks the user spec that the GenBI ``Item`` projection is gone.
+
+    Restoring a session must only depend on the turn row plus the
+    Codex item projection. Real-time streaming and historical replay
+    share the same shape (turn events = sorted Codex projections).
+    The user input lives on the turn (``input_text``); no fake GenBI
+    User Item is fabricated from Codex events.
+    """
+
+    def test_thread_and_turn_detail_drop_legacy_items_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            thread_store.create_thread(
+                thread_id="codex_thread_no_item",
+                product_kind="analysis_task",
+                title="history only",
+                user_id=None,
+                status="active",
+            )
+            thread_store.save_turn(
+                thread_id="codex_thread_no_item",
+                turn_id="codex_turn_no_item",
+                question="first question",
+                input_kind="start",
+                product_kind="analysis_task",
+                user_id=None,
+                events=[
+                    AgentEvent(
+                        type="item/agentMessage/delta",
+                        turn_id="codex_turn_no_item",
+                        payload={
+                            "codex_thread_id": "codex_thread_no_item",
+                            "codex_turn_id": "codex_turn_no_item",
+                            "codex_item_id": "item_a",
+                            "codex_item_type": "agentMessage",
+                            "delta": "hi",
+                        },
+                    ),
+                    AgentEvent(
+                        type="item/completed",
+                        turn_id="codex_turn_no_item",
+                        payload={
+                            "codex_thread_id": "codex_thread_no_item",
+                            "codex_turn_id": "codex_turn_no_item",
+                            "codex_item_id": "item_a",
+                            "codex_item_type": "agentMessage",
+                            "content": "hi back",
+                        },
+                    ),
+                    AgentEvent(type="turn/completed", turn_id="codex_turn_no_item", payload={"status": "complete"}),
+                ],
+            )
+
+            detail = thread_store.get_thread("codex_thread_no_item")
+            turn = thread_store.get_turn("codex_thread_no_item", "codex_turn_no_item")
+            assert detail is not None and turn is not None
+            self.assertNotIn("items", detail)
+            self.assertNotIn("items", turn)
+            # Only Codex projections are surfaced.
+            self.assertEqual(len(detail["codexItemProjections"]), 1)
+            self.assertEqual(detail["codexItemProjections"][0]["codexItemId"], "item_a")
+            # User input lives on the turn row.
+            self.assertEqual(detail["turns"][0]["inputText"], "first question")
+            self.assertEqual(detail["turns"][0]["question"], "first question")
+            self.assertIsNotNone(detail["turns"][0]["startedAt"])
+            self.assertIsNotNone(detail["turns"][0]["completedAt"])
+
+    def test_get_turn_events_returns_normalised_projection_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            thread_store.create_thread(
+                thread_id="codex_thread_replay",
+                product_kind="analysis_task",
+                title="replay",
+                user_id=None,
+                status="active",
+            )
+            # Two Codex items arrive in the opposite order they end up
+            # in after the dense ``sequence`` renumbering; the replay
+            # path must assign 0/1 by ``createdAt`` (then ``codexItemId``)
+            # so the live and historical projections agree.
+            thread_store.save_turn(
+                thread_id="codex_thread_replay",
+                turn_id="codex_turn_replay",
+                question="replay me",
+                input_kind="start",
+                product_kind="analysis_task",
+                user_id=None,
+                events=[
+                    AgentEvent(
+                        type="item/agentMessage/delta",
+                        turn_id="codex_turn_replay",
+                        created_at="2026-08-05T10:00:00Z",
+                        payload={
+                            "codex_thread_id": "codex_thread_replay",
+                            "codex_turn_id": "codex_turn_replay",
+                            "codex_item_id": "item_1",
+                            "codex_item_type": "agentMessage",
+                            "delta": "hello",
+                        },
+                    ),
+                    AgentEvent(
+                        type="item/completed",
+                        turn_id="codex_turn_replay",
+                        created_at="2026-08-05T10:00:01Z",
+                        payload={
+                            "codex_thread_id": "codex_thread_replay",
+                            "codex_turn_id": "codex_turn_replay",
+                            "codex_item_id": "item_1",
+                            "codex_item_type": "agentMessage",
+                            "content": "hello back",
+                        },
+                    ),
+                    AgentEvent(
+                        type="genbi/artifact/created",
+                        turn_id="codex_turn_replay",
+                        created_at="2026-08-05T10:00:02Z",
+                        payload={
+                            "codex_thread_id": "codex_thread_replay",
+                            "codex_turn_id": "codex_turn_replay",
+                            "codex_item_id": "item_2",
+                            "codex_item_type": "sql",
+                            "path": "queries/q.sql",
+                        },
+                    ),
+                    AgentEvent(type="turn/completed", turn_id="codex_turn_replay", payload={"status": "complete"}),
+                ],
+            )
+            replay = thread_store.get_turn_events("codex_turn_replay")
+            self.assertEqual(len(replay), 2)
+            # Dense sequence starts at 0 in arrival order.
+            self.assertEqual([event["sequence"] for event in replay], [0, 1])
+            # Codex item type is exposed in the unified shape.
+            self.assertEqual(
+                [(event["codex_item_id"], event["item_type"]) for event in replay],
+                [("item_1", "agentMessage"), ("item_2", "sql")],
+            )
+            # Each event carries the same fields a live SSE event
+            # would, including the turn id and the projected status.
+            for event in replay:
+                self.assertEqual(event["turn_id"], "codex_turn_replay")
+                self.assertIn("payload", event)
+                self.assertIn("created_at", event)
+                self.assertIn("status", event)
+
+    def test_no_fake_user_item_is_constructed_for_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            thread_store.create_thread(
+                thread_id="codex_thread_user",
+                product_kind="analysis_task",
+                title="no fake user item",
+                user_id=None,
+                status="active",
+            )
+            # Codex never sends a user item; only ``turn/started``
+            # with the question embedded. The store must NOT
+            # manufacture a GenBI "User Item" from the events.
+            thread_store.save_turn(
+                thread_id="codex_thread_user",
+                turn_id="codex_turn_user",
+                question="what was GMV last week?",
+                input_kind="start",
+                product_kind="analysis_task",
+                user_id=None,
+                events=[
+                    AgentEvent(
+                        type="turn/started",
+                        turn_id="codex_turn_user",
+                        payload={
+                            "codex_thread_id": "codex_thread_user",
+                            "codex_turn_id": "codex_turn_user",
+                            "question": "what was GMV last week?",
+                        },
+                    ),
+                    AgentEvent(type="turn/completed", turn_id="codex_turn_user", payload={"status": "complete"}),
+                ],
+            )
+            detail = thread_store.get_thread("codex_thread_user")
+            assert detail is not None
+            # No projection at all because Codex never emitted an item.
+            self.assertEqual(detail["codexItemProjections"], [])
+            self.assertNotIn("items", detail)
+            # The turn row still records the user input.
+            self.assertEqual(detail["turns"][0]["inputText"], "what was GMV last week?")
+
+    def test_projection_sequence_renumbers_after_save(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            thread_store.create_thread(
+                thread_id="codex_thread_seq",
+                product_kind="analysis_task",
+                title="seq",
+                user_id=None,
+                status="active",
+            )
+            thread_store.save_turn(
+                thread_id="codex_thread_seq",
+                turn_id="codex_turn_seq",
+                question="seq",
+                input_kind="start",
+                product_kind="analysis_task",
+                user_id=None,
+                events=[
+                    AgentEvent(
+                        type="item/agentMessage/delta",
+                        turn_id="codex_turn_seq",
+                        created_at="2026-08-05T11:00:00Z",
+                        payload={
+                            "codex_thread_id": "codex_thread_seq",
+                            "codex_turn_id": "codex_turn_seq",
+                            "codex_item_id": "item_1",
+                            "codex_item_type": "agentMessage",
+                            "delta": "a",
+                        },
+                    ),
+                    AgentEvent(
+                        type="item/agentMessage/delta",
+                        turn_id="codex_turn_seq",
+                        created_at="2026-08-05T11:00:01Z",
+                        payload={
+                            "codex_thread_id": "codex_thread_seq",
+                            "codex_turn_id": "codex_turn_seq",
+                            "codex_item_id": "item_2",
+                            "codex_item_type": "agentMessage",
+                            "delta": "b",
+                        },
+                    ),
+                ],
+            )
+            detail = thread_store.get_thread("codex_thread_seq")
+            assert detail is not None
+            sequences = [item["sequence"] for item in detail["codexItemProjections"]]
+            self.assertEqual(sequences, [0, 1])
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -83,6 +83,20 @@
     - 后端 `SessionTurnStateDecouplingTest` 5 个用例（fresh session active、拒绝 legacy session 状态、turn status 终态化、turn failed 后 session 仍 active 可续传、列表带 latestTurnStatus、archive/reactivate）。
     - 前端 `analysis-backend-client.test.ts` 新增 `forwards the latestTurnStatus signal from the backend sidebar` 与 `keeps sending new questions after a failed turn on the same session`。
   - 后端 115/115、前端 94/94、tsc 全过。
+- **删除 GenBI 自研 Item**（用户规范）：会话恢复只依赖 Turn + Codex Item Projection，实时流与历史恢复用同一种标准化投影结构。
+  - ThreadStore 删除 `ItemRecord`、`state["items"]` 读写、`_items_from_events()`、`_item_params` / `_item_record_from_row`。
+  - TurnRecord 增加 `inputText` / `startedAt` / `completedAt` 字段；`question` 字段保留以兼容旧数据。
+  - CodexItemProjectionRecord 增加 `sequence` 字段（realtime 顺序保持 + 历史 replay 时按 `createdAt`/`codexItemId` 重排成密集索引）。
+  - `get_thread` / `get_turn` 不再返回 `items` 字段；`get_turn_events` 改为从 `codex_item_projections` 重建统一 shape（type/turn_id/payload/created_at + sequence + codex_* + item_type + status），与实时 SSE 流形状一致。
+  - 用户输入存于 `analysis_turns.input_text`；不再从 Codex 事件伪造 GenBI User Item。
+  - postgres_stores 删除 `POSTGRES_ITEM_TABLE` 与对应 `_item_*` helper；`analysis_turns` 表加 `input_text` / `started_at` / `completed_at` 列；`analysis_codex_item_projections` 加 `sequence` 列。
+  - 验收：
+    - `test_thread_and_turn_detail_drop_legacy_items_field`：`get_thread` / `get_turn` 不带 `items` 字段，仅 `codexItemProjections`；turn 行的 `inputText` / `startedAt` / `completedAt` 已落库。
+    - `test_get_turn_events_returns_normalised_projection_shape`：replay 返回的 events 含 `codex_item_id` / `item_type` / `status` / `sequence`，与 live stream 形状对齐。
+    - `test_no_fake_user_item_is_constructed_for_turn`：Codex 没发 item 时 `codexItemProjections` 为空，但 `turn.inputText` 仍存在。
+    - `test_projection_sequence_renumbers_after_save`：replay 时 sequence 重新按 createdAt 顺序编号为 0/1。
+  - 测试：后端 `NoGenBIItemTest` 4 个用例；前端 `analysis-backend-client.test.ts` 新增 `replay is projection-only (no GenBI Item rows required)`。
+  - 后端 119/119、前端 95/95、tsc 全过。
 - 恢复主开发分支到 `29c0e0f merge: feature/report-artifact-design → Agentic-GenBI`。
 - 确认 `119e4c5 fix(frontend): align flow.start/send/reply signature with AgentInput threadId` 内容已包含在恢复点中，cherry-pick 为空补丁。
 - 修复 FineReport 报表画像加载：
