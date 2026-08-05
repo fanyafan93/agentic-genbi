@@ -6,8 +6,8 @@
 
 - 本轮开发分支：`feature/docker-runtime-cleanup`
 - 基线：`Agentic-GenBI`
-- 合并状态：`feature/session-management` 已通过 merge commit `53a857c` 合入 `Agentic-GenBI`，并已推送到 Gitee / 同步到 GitHub。
-- 本轮目标：在 Docker runtime 清理分支上完成当前运行问题收口，并追加可真实持久化、受服务端权限保护的系统管理 V1。
+- 合并状态：`feature/docker-runtime-cleanup` 已合入 `Agentic-GenBI`；开发分支保留在远端。
+- 本轮结果：完成 Docker runtime 清理、分析运行问题收口、Report 单记录与草稿新会话链路，以及可真实持久化、受服务端权限保护的系统管理 V1。
 
 ## 本轮已处理
 
@@ -366,7 +366,7 @@
   - `npm.cmd test`：24 test files、141 tests passed。
   - frontend 容器生产构建与 TypeScript 检查通过，服务进入 Ready。
   - 内置浏览器直接打开 `019fd1bb-9b83-7f03-ae9a-9399ac369a5b` 后地址替换为 `/analysis/new`；连续刷新后归档任务仍未出现在列表，页面显示“当前任务尚无报告”而非“报告加载中”。
-- 合入 `Agentic-GenBI` 前全量门禁：
+- feature 分支及合并后的 `Agentic-GenBI` 全量门禁：
   - `npm.cmd test`：24 test files、141 tests passed。
   - `python -m pytest backend/tests -q -p no:cacheprovider`：194 passed，3 subtests passed。
   - `docker compose config --quiet`：passed。
