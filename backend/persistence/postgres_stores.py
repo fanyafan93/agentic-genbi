@@ -77,7 +77,7 @@ def build_postgres_session_catalog() -> SessionCatalog:
     if not database_url:
         raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres SessionCatalog persistence.")
     backend = PostgresSessionCatalogBackend(database_url)
-    return SessionCatalog.from_backend(backend)  # type: ignore[attr-defined]
+    return SessionCatalog(backend=backend)
 
 
 def build_postgres_codex_projection_store() -> CodexProjectionStore:
@@ -135,12 +135,25 @@ class PostgresSessionCatalogBackend:
             conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS workspace_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS codex_session_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS codex_thread_id TEXT")
+            # Backfill the new canonical column from the legacy
+            # ``codex_thread_id`` column. Idempotent: only fires
+            # on rows where the new column is still null. The
+            # ``id == codex_session_id`` invariant does not hold
+            # for legacy rows (one row may carry a GenBI id AND
+            # a Codex-issued id); the read path tolerates that.
+            conn.execute(
+                f"""
+                UPDATE {POSTGRES_THREAD_TABLE}
+                SET codex_session_id = codex_thread_id
+                WHERE codex_session_id IS NULL AND codex_thread_id IS NOT NULL
+                """
+            )
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_updated ON {POSTGRES_THREAD_TABLE} (updated_at DESC NULLS LAST)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_product ON {POSTGRES_THREAD_TABLE} (product_kind)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_codex ON {POSTGRES_THREAD_TABLE} (codex_session_id)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_tenant_user ON {POSTGRES_THREAD_TABLE} (tenant_id, user_id)")
 
-    def _write_state(self, state: dict[str, SessionRecord]) -> None:
+    def write_state(self, state: dict[str, SessionRecord]) -> None:
         with _connect(self.database_url) as conn:
             for record in state.values():
                 conn.execute(
@@ -167,7 +180,7 @@ class PostgresSessionCatalogBackend:
                     _session_params(record),
                 )
 
-    def _read_state(self) -> dict[str, SessionRecord]:
+    def read_state(self) -> dict[str, SessionRecord]:
         with _connect(self.database_url) as conn:
             records = {
                 str(row["id"]): _session_record_from_row(row)
@@ -213,11 +226,32 @@ class PostgresCodexProjectionBackend:
                 )
                 """
             )
+            # Legacy schema: ``analysis_turns.thread_id`` (NOT NULL,
+            # FK to ``analysis_threads.id``) and no ``session_id``
+            # column at all. We add the canonical column and
+            # backfill it from the legacy one so the new code
+            # path (which writes ``session_id``) keeps working on
+            # existing databases without losing data.
+            conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS session_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS codex_session_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS codex_turn_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS input_text TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ")
             conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ")
+            conn.execute(
+                f"""
+                UPDATE {POSTGRES_TURN_TABLE}
+                SET session_id = thread_id
+                WHERE session_id IS NULL AND thread_id IS NOT NULL
+                """
+            )
+            conn.execute(
+                f"""
+                UPDATE {POSTGRES_TURN_TABLE}
+                SET codex_session_id = codex_thread_id
+                WHERE codex_session_id IS NULL AND codex_thread_id IS NOT NULL
+                """
+            )
             conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
@@ -240,12 +274,28 @@ class PostgresCodexProjectionBackend:
             conn.execute(f"ALTER TABLE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} ADD COLUMN IF NOT EXISTS genbi_session_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} ADD COLUMN IF NOT EXISTS genbi_turn_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} ADD COLUMN IF NOT EXISTS sequence INTEGER NOT NULL DEFAULT 0")
+            # Backfill canonical columns from the legacy aliases.
+            # Idempotent.
+            conn.execute(
+                f"""
+                UPDATE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
+                SET codex_session_id = codex_thread_id
+                WHERE codex_session_id IS NULL AND codex_thread_id IS NOT NULL
+                """
+            )
+            conn.execute(
+                f"""
+                UPDATE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
+                SET genbi_session_id = genbi_thread_id
+                WHERE genbi_session_id IS NULL AND genbi_thread_id IS NOT NULL
+                """
+            )
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_session ON {POSTGRES_TURN_TABLE} (session_id, created_at)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_codex ON {POSTGRES_TURN_TABLE} (codex_session_id, codex_turn_id)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_session ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (genbi_session_id, created_at)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_turn ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (codex_session_id, codex_turn_id)")
 
-    def _write_state(self, state: dict[str, Any]) -> None:
+    def write_state(self, state: dict[str, Any]) -> None:
         with _connect(self.database_url) as conn:
             for turn in state["turns"].values():
                 conn.execute(
@@ -299,7 +349,7 @@ class PostgresCodexProjectionBackend:
                     _codex_item_projection_params(item),
                 )
 
-    def _read_state(self) -> dict[str, Any]:
+    def read_state(self) -> dict[str, Any]:
         with _connect(self.database_url) as conn:
             turns = {
                 str(row["id"]): _turn_record_from_row(row)

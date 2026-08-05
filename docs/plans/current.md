@@ -132,6 +132,49 @@
       `GET / PATCH / DELETE / cancel / continuation` 全部用
       GenBI alias 也 200，且 `session_id` response 是 canonical。
   - 验收：后端 129/129、前端 93/93、tsc 全过。
+- **PostgreSQL P0 修复**（用户规范）：旧 `analysis_threads` /
+  `analysis_turns` / `analysis_codex_item_projections` 的 schema
+  跟新代码 contract 不对齐，三个 P0 bug 必须第一批修：
+  1. `build_postgres_session_catalog()` 调了不存在的方法
+     `SessionCatalog.from_backend(backend)`。
+  2. Postgres backend 实现的是 `_read_state` / `_write_state`，
+     catalog / projection store 调的是 `read_state` / `write_state`。
+  3. 旧 DB 缺 `session_id` / `codex_session_id` 列，新 INSERT
+     会失败。
+  修复：
+  * `SessionCatalog.from_backend(backend)` → `SessionCatalog(backend=backend)`
+    （catalog 自己的构造函数支持 `backend=`）。
+  * Postgres backend 公开 `read_state` / `write_state`（public
+    名字）；underscored 名字不再被使用。
+  * `ensure_schema` 加 idempotent 迁移：
+    - `analysis_threads`：加 `codex_session_id`，backfill
+      `codex_session_id = codex_thread_id`。
+    - `analysis_turns`：加 `session_id` 与 `codex_session_id`，
+      backfill `session_id = thread_id` /
+      `codex_session_id = codex_thread_id`。
+    - `analysis_codex_item_projections`：加 `codex_session_id`
+      与 `genbi_session_id`，backfill
+      `codex_session_id = codex_thread_id` /
+      `genbi_session_id = genbi_thread_id`。
+  * 新 INSERT 不会因为旧 schema 缺列而失败；旧 row 仍然可读
+    （含 `id != codex_session_id` 的 legacy 形态，跟
+    `SessionCatalog.resolve_session_id` 配合）。
+  验证（真实 docker postgres，134 sessions / 166 turns / 905 projections）：
+  * `ALTER` + `UPDATE` 全部成功（166 turns 全部 backfill）。
+  * 重建 backend image 后 `GET /api/analysis/sessions/{id}` 用
+    GenBI id 跟 Codex id 都能 resolve 到同一行；2 turns 跟 6
+    codex item projections 完整 round-trip。
+  测试（新增 `test_postgres_p0_compat.py`，6 用例）：
+  * `build_postgres_session_catalog` 走 public 构造函数，不再调
+    不存在的 `from_backend`。
+  * Postgres backend 暴露 public `read_state` / `write_state`。
+  * `codex_thread_id` → `codex_session_id` backfill。
+  * `thread_id` → `session_id` backfill，且新 write path 走
+    canonical `session_id` 列。
+  * `build_postgres_codex_projection_store` 走 public 构造函数。
+  * Turn / projection round-trip 走 fake connection。
+  验收：后端 135/135、前端 93/93、tsc 全过；docker compose up 后
+  legacy session 双 id 都能 round-trip。
 - **统一 API**（用户规范）：保留 7 个 `/api/analysis/sessions/*`
   路由，body 永不携带 session id。
   - `GET    /api/analysis/sessions`
