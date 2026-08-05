@@ -446,24 +446,25 @@ export function AnalysisWorkspace() {
   }
 
   async function handleSendMessage(content: string) {
-    // The session id is the only durable id we send to the agent
-    // client. When the user is in "new" mode (no session yet) it is
-    // ``null`` and the backend runs the sessionless first-turn flow.
-    // Once a Codex-issued id has been adopted we always pass that same
-    // id explicitly, including for continuations.
+    // The session id is now owned *only* by the useFlow hook instance
+    // itself — it was constructed as ``useFlow(currentAnalysisTaskId, …)``
+    // and start/send/reply no longer take a second ``sessionId``
+    // parameter. This eliminates the "two session id entry points"
+    // bug (P2-1) where ``useFlow(A)`` + ``flow.send(msg, B)`` could
+    // route a message to the wrong session.
     if (isNewAnalysisTask || localNewSession) {
       setSelectedAnalysisTask(taskTitleFromQuestion(content));
       setInitialFlowMessages([]);
       setOpenedReportId(null);
       setOpenedReportThreadId(null);
       setMobilePane("analysisTask");
-      void flow.start(content, currentAnalysisTaskId);
+      void flow.start(content);
     } else {
       if (isWaitingForFirstQuestion) {
         markCurrentThreadAsStarted(content);
-        void flow.start(content, currentAnalysisTaskId);
+        void flow.start(content);
       } else {
-        flow.send(content, currentAnalysisTaskId);
+        flow.send(content);
       }
     }
   }
@@ -475,7 +476,7 @@ export function AnalysisWorkspace() {
       setOpenedReportId(null);
       setOpenedReportThreadId(null);
       setMobilePane("analysisTask");
-      void flow.start(question, currentAnalysisTaskId);
+      void flow.start(question);
       return;
     }
     // Sessionless first-turn for a suggestion as well.
@@ -485,7 +486,7 @@ export function AnalysisWorkspace() {
     setOpenedReportThreadId(null);
     setMobilePane("analysisTask");
     setLocalNewSession(true);
-    void flow.start(question, currentAnalysisTaskId);
+    void flow.start(question);
   }
 
   async function handleSaveReport(saved: SavedInteractiveReport): Promise<SavedInteractiveReport> {

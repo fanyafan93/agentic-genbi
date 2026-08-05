@@ -50,6 +50,22 @@ export function useFlow(
 ) {
   const agent = useMemo(() => getAgentClient(), []);
   const initialSignature = useMemo(() => flowNodeSignature(initial), [initial]);
+  // The frontend keeps exactly one durable id per session: the
+  // ``sessionId`` parameter the page router handed into this hook.
+  // It is ``null`` on the first turn of a brand-new session
+  // (``/analysis/new`` → sessionless first turn) and becomes the
+  // Codex-issued id after the ``session/created`` event routes the
+  // user to ``/analysis/{codex_thread_id}``.
+  //
+  // The three public actions (``start`` / ``send`` / ``reply``) do
+  // NOT re-expose this id as a parameter on their signature — they
+  // always close over the hook instance's own id so the caller can
+  // never "dial" another session by accident (e.g. ``useFlow(A)``
+  // then ``flow.send(msg, B)``). See P2: "前端仍有两个 Session ID入口".
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
   // The frontend keeps exactly one durable id per session: ``sessionId``,
   // which the page router owns. We do NOT keep a parallel ``threadId`` —
   // the agent client only learns the id from the ``session/created``
@@ -63,6 +79,11 @@ export function useFlow(
   const [codexLineage, setCodexLineage] = useState<FlowCodexLineage>({});
   const [running, setRunning] = useState(false);
   const runningRef = useRef(false);
+  // ``cancelled`` used to be a module-level ``let cancelled = false``.
+  // When a page mounted two useFlow hooks (or switched sessions rapidly)
+  // one hook's cleanup / stop call could cancel the other hook's in-
+  // flight consume loop. Each instance now owns an independent ref.
+  const cancelledRef = useRef(false);
   const onSessionCreatedRef = useRef(options.onSessionCreated);
   useEffect(() => {
     onSessionCreatedRef.current = options.onSessionCreated;
@@ -70,7 +91,7 @@ export function useFlow(
 
   useEffect(() => {
     if (runningRef.current) return;
-    cancelled = false;
+    cancelledRef.current = false;
     setCurrentTurnId(null);
     setNodes([...initial]);
     setArtifacts([]);
@@ -79,7 +100,10 @@ export function useFlow(
     setRunning(false);
     runningRef.current = false;
     agent.cancel?.();
-    return () => { cancelled = true; };
+    // Session-switch cleanup: only cancel *this* instance. The old
+    // code wrote to a module-level variable which poisoned every
+    // other mounted useFlow in the page (P2-2 cancelled 全局变量).
+    return () => { cancelledRef.current = true; };
   }, [agent, sessionId, initialSignature]);
 
   const applyEvent = useCallback((event: AgentEvent, currentNodes: FlowNode[]): FlowNode[] => {
@@ -359,19 +383,34 @@ export function useFlow(
     return currentNodes;
   }, []);
 
-  const consume = useCallback(async (input: AgentInput) => {
-    if (cancelled) return;
+  // Intentionally use a hand-written discriminated union instead of
+  // ``Omit<AgentInput, "sessionId">`` because ``Omit`` collapses
+  // union-specific fields (``question`` / ``content`` / ``optionId``)
+  // into a shared shape, breaking the per-branch property check
+  // described in P2-1. This union is 1:1 with ``AgentInput`` branches
+  // but strips ``sessionId`` from every arm so callers cannot smuggle
+  // a different session id than the one the hook was constructed with.
+  type HookScopedInput =
+    | { kind: "start"; suggestionId?: string; question?: string }
+    | { kind: "message"; content: string }
+    | { kind: "reply"; optionId: string }
+    | { kind: "reset" };
+
+  const consume = useCallback(async (input: HookScopedInput) => {
+    // The only durable id is the one the hook was constructed with.
+    // Callers *cannot* override the id on a per-action basis — see
+    // P2-1 "前端仍有两个 Session ID入口". This explicit construction
+    // also guarantees the AgentClient sees the correct sessionId even
+    // if sessionId was swapped out while a turn was queued.
+    const fullInput: AgentInput = { ...input, sessionId: sessionIdRef.current } as AgentInput;
+    if (cancelledRef.current) return;
     setRunning(true);
     runningRef.current = true;
-    let snapshot: FlowNode[] = withOptimisticTurn(nodes, input);
+    let snapshot: FlowNode[] = withOptimisticTurn(nodes, fullInput);
     if (snapshot !== nodes) setNodes(snapshot);
     try {
-      // The agent client is session-agnostic. The caller must pass an
-      // explicit ``sessionId`` (``null`` for the very first turn of a
-      // brand-new session, the page-routed id otherwise). We never
-      // backfill a previous id from internal state.
-      for await (const event of agent.send(input)) {
-        if (cancelled) break;
+      for await (const event of agent.send(fullInput)) {
+        if (cancelledRef.current) break;
         snapshot = applyEvent(event, snapshot);
       }
     } finally {
@@ -381,15 +420,19 @@ export function useFlow(
   }, [agent, applyEvent, nodes]);
 
   const start = useCallback(
-    (question?: string, sessionId: string | null = null) => consume({ kind: "start", question, sessionId }),
+    // ``sessionId`` is not exposed: it is always the hook's own id
+    // (null on the first turn of a brand-new session). Closing over
+    // the hook instance id prevents the "useFlow(A) + send(msg, B)"
+    // cross-session leakage bug described in P2-1.
+    (question?: string) => consume({ kind: "start", question }),
     [consume],
   );
   const send = useCallback(
-    (content: string, sessionId: string | null = null) => consume({ kind: "message", content, sessionId }),
+    (content: string) => consume({ kind: "message", content }),
     [consume],
   );
   const reply = useCallback(
-    (optionId: string, sessionId: string | null = null) => consume({ kind: "reply", optionId, sessionId }),
+    (optionId: string) => consume({ kind: "reply", optionId }),
     [consume],
   );
   const stop = useCallback(() => {
@@ -403,14 +446,21 @@ export function useFlow(
     // before the user spec was applied, the cancel button only
     // aborted the HTTP fetch, so the Codex turn kept running
     // until its own timeout.
+    //
+    // We also flip ``cancelledRef`` so if any event loop is still
+    // running in this instance (e.g. a microtask between SSE
+    // messages) it stops applying events immediately. Previously
+    // it mutated a module-level boolean which could also cancel
+    // sibling hook instances — see P2-2 cancelled 全局变量.
+    cancelledRef.current = true;
     agent.cancel?.();
-    if (sessionId && currentTurnId && typeof agent.cancelTurn === "function") {
-      void agent.cancelTurn(sessionId, currentTurnId);
+    if (sessionIdRef.current && currentTurnId && typeof agent.cancelTurn === "function") {
+      void agent.cancelTurn(sessionIdRef.current, currentTurnId);
     }
     runningRef.current = false;
     setRunning(false);
     setNodes((current) => current.filter((node) => node.id !== "agent-pending"));
-  }, [agent, sessionId, currentTurnId]);
+  }, [agent, currentTurnId]);
 
   return {
     currentTurnId,
@@ -425,8 +475,6 @@ export function useFlow(
     stop,
   };
 }
-
-let cancelled = false;
 
 function isDuplicateAgentContent(currentContent: string, nextContent: string): boolean {
   return Boolean(currentContent && nextContent && currentContent.includes(nextContent));
@@ -443,7 +491,11 @@ function flowNodeSignature(nodes: FlowNode[]): string {
 }
 
 function cleanDisplayText(value: string): string {
-  return value.replace(/\uFFFD+/g, "");
+  // Strict UTF-8 contract: no runtime mojibake stripping. If � appears
+  // the source data is corrupted and should be fixed at rest, not patched
+  // on render. Previously this stripped \uFFFD, which masked encoding
+  // bugs at the database / persistence layer.
+  return value;
 }
 
 function withOptimisticTurn(nodes: FlowNode[], input: AgentInput): FlowNode[] {

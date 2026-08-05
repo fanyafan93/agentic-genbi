@@ -217,7 +217,11 @@ describe("analysis task product language", () => {
     expect(backendClientSource).toContain("session/created");
     // New-session contract: "click new" never pre-allocates a backend
     // thread; the first message drives the sessionless flow.
-    expect(workspaceSource).toContain("flow.start(content, currentAnalysisTaskId)");
+    // P2-1 fix: start/send/reply no longer take a redundant sessionId
+    // argument; the id is captured once inside useFlow(sessionId, ...)
+    // so callers cannot accidentally route to a different session.
+    expect(workspaceSource).toContain("flow.start(content)");
+    expect(workspaceSource).not.toContain("flow.start(content, currentAnalysisTaskId)");
     expect(workspaceSource).toContain("setLocalNewSession(true)");
     expect(workspaceSource).toContain("window.history.pushState");
     expect(workspaceSource).toContain("/analysis/new");
