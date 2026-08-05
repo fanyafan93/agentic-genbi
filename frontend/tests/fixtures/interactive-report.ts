@@ -7,6 +7,7 @@ export const interactiveReportFixture: InteractiveReport = {
   title: "渠道销售分析",
   subtitle: "测试报告",
   renderer: "puck",
+  originType: "codex",
   source: {
     threadId: "thread_test_channel_sales",
     turnId: "turn_test_channel_sales",

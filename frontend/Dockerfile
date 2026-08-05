@@ -3,6 +3,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 COPY prisma ./prisma
 RUN npm install
+RUN npx prisma generate
 
 FROM node:24-alpine AS runner
 WORKDIR /app

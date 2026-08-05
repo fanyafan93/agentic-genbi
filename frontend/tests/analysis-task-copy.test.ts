@@ -80,8 +80,13 @@ const interactiveReportSource = readFileSync(
   "utf8",
 );
 
-const systemMcpPageSource = readFileSync(
-  resolve(process.cwd(), "src/modules/analysis/components/SystemMcpPage.tsx"),
+const systemAdminPageSource = readFileSync(
+  resolve(process.cwd(), "src/modules/system/components/SystemAdminPage.tsx"),
+  "utf8",
+);
+
+const systemMcpPanelSource = readFileSync(
+  resolve(process.cwd(), "src/modules/system/components/SystemMcpPanel.tsx"),
   "utf8",
 );
 
@@ -99,7 +104,7 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain(">分析结果</button>");
     expect(workspaceSource).toContain("新分析");
     expect(workspaceSource).toContain("InteractiveReportPanel");
-    expect(workspaceSource).toContain("SystemMcpPage");
+    expect(workspaceSource).toContain("SystemAdminPage");
 
     expect(workspaceSource).not.toContain('label: "会话"');
     expect(workspaceSource).not.toContain('label: "KnowledgeBaseLegacy"');
@@ -177,14 +182,17 @@ describe("analysis task product language", () => {
     expect(agentTypesSource).not.toContain('"analysis-task-init"');
   });
 
-  test("adds a system MCP server management page", () => {
-    expect(systemMcpPageSource).toContain("MCP Servers 管理");
-    expect(systemMcpPageSource).toContain("listBackendMcpServers");
-    expect(systemMcpPageSource).toContain("testBackendMcpServer");
-    expect(systemMcpPageSource).toContain("测试连接");
-    expect(systemMcpPageSource).toContain("server.approval");
-    expect(globalStylesSource).toContain(".system-mcp-page");
-    expect(globalStylesSource).toContain(".mcp-tool-table");
+  test("adds a unified system management console with MCP controls", () => {
+    expect(systemAdminPageSource).toContain("用户与权限");
+    expect(systemAdminPageSource).toContain("MCP 服务");
+    expect(systemAdminPageSource).toContain("系统提示词");
+    expect(systemAdminPageSource).toContain("模型与运行策略");
+    expect(systemMcpPanelSource).toContain("listManagedMcpServers");
+    expect(systemMcpPanelSource).toContain("testManagedMcpServer");
+    expect(systemMcpPanelSource).toContain("运行检查");
+    expect(systemMcpPanelSource).toContain("current.approval");
+    expect(globalStylesSource).toContain(".system-console");
+    expect(globalStylesSource).toContain(".system-tool-list");
   });
 
   test("keeps analysis task inputs free of removed mode and data-egress controls", () => {
@@ -220,7 +228,9 @@ describe("analysis task product language", () => {
     // P2-1 fix: start/send/reply no longer take a redundant sessionId
     // argument; the id is captured once inside useFlow(sessionId, ...)
     // so callers cannot accidentally route to a different session.
-    expect(workspaceSource).toContain("flow.start(content)");
+    expect(workspaceSource).toContain(
+      "flow.start(content, sourceReportId ? { sourceReportId } : undefined)",
+    );
     expect(workspaceSource).not.toContain("flow.start(content, currentAnalysisTaskId)");
     expect(workspaceSource).toContain("setLocalNewSession(true)");
     expect(workspaceSource).toContain("window.history.pushState");
@@ -305,11 +315,16 @@ describe("analysis task product language", () => {
       expect(interactiveReportSource).not.toContain("INTERACTIVE RESULT · v");
   });
 
-  test("creates a real backend analysis thread from a saved report and carries its report snapshot", () => {
+  test("opens a saved report as a sessionless draft and carries it into the first turn", () => {
     expect(workspaceSource).toContain("handleCreateAnalysisFromReport");
-    expect(workspaceSource).toContain("createAnalysisThreadFromReportBackend");
-    expect(workspaceSource).toContain("setCurrentAnalysisTaskId(created.thread.id)");
-    expect(workspaceSource).toContain("setOpenedReportThreadId(created.thread.id)");
+    expect(workspaceSource).toContain("draftReportIdRef.current = saved.report.id");
+    expect(workspaceSource).toContain(
+      'window.history.pushState({ analysisSessionId: "new" }, "", "/analysis/new")',
+    );
+    expect(workspaceSource).toContain(
+      "flow.start(content, sourceReportId ? { sourceReportId } : undefined)",
+    );
+    expect(workspaceSource).not.toContain("createAnalysisThreadFromReportBackend");
     expect(workspaceSource).toContain("savedReportFromThreadMetadata");
     expect(workspaceSource).not.toContain("draftReportIds");
     expect(workspaceSource).not.toContain("draft_report_");
@@ -396,7 +411,7 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain("}, []);");
     expect(workspaceSource).toContain("if (!currentAnalysisTaskId || !selectedAnalysisTask) return;");
     expect(workspaceSource).toContain("const sessionId = currentAnalysisTaskId;");
-    expect(workspaceSource).toContain("当前任务正在分析，停止回答后再切换任务。");
+    expect(workspaceSource).not.toContain("当前任务正在分析，停止回答后再切换任务。");
     expect(workspaceSource).toContain("const shouldSyncThread = flow.running || hadLocalRunningFlow;");
     expect(workspaceSource).toContain("if (!shouldSyncThread) return threads;");
     expect(workspaceSource).not.toContain("setCurrentAnalysisTaskId(threadId);");

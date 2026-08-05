@@ -15,7 +15,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-function backendReportPayload(version = 1) {
+function backendReportPayload() {
   return {
     report: {
       id: interactiveReportFixture.id,
@@ -24,17 +24,9 @@ function backendReportPayload(version = 1) {
       artifactType: "interactive_report",
       renderer: "puck",
       ownerId: "local-user",
-      sourceThreadId: interactiveReportFixture.source.threadId,
-      sourceTurnId: interactiveReportFixture.source.turnId,
-      latestVersion: version,
-      createdAt: "2026-08-01T08:00:00.000Z",
-      updatedAt: "2026-08-01T08:00:00.000Z",
-    },
-    version: {
-      reportId: interactiveReportFixture.id,
-      version,
-      sourceThreadId: interactiveReportFixture.source.threadId,
-      sourceTurnId: interactiveReportFixture.source.turnId,
+      originType: "codex",
+      sourceThreadId: interactiveReportFixture.source!.threadId,
+      sourceTurnId: interactiveReportFixture.source!.turnId,
       document: interactiveReportFixture.document,
       filters: interactiveReportFixture.filters,
       queries: interactiveReportFixture.queries,
@@ -42,14 +34,15 @@ function backendReportPayload(version = 1) {
       gridSpecs: interactiveReportFixture.gridSpecs,
       datasets: { channel_sales: { rows: [{ channel: "direct", salesAmount: 1000 }] } },
       createdAt: "2026-08-01T08:00:00.000Z",
+      updatedAt: "2026-08-01T08:00:00.000Z",
     },
   };
 }
 
 describe("interactive report backend API client", () => {
-  test("saves Puck report JSON and returns the server-assigned version", async () => {
+  test("saves Puck report JSON without a version contract", async () => {
     vi.stubEnv("NEXT_PUBLIC_GENBI_API_BASE_URL", "http://192.168.101.12:8000");
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(backendReportPayload(1)), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(backendReportPayload()), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
     const saved = await saveInteractiveReportToBackend(interactiveReportFixture);
@@ -58,25 +51,25 @@ describe("interactive report backend API client", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     expect(body.document).toEqual(interactiveReportFixture.document);
     expect(body.expectedVersion).toBeUndefined();
-    expect(saved.version).toBe(1);
+    expect(saved).not.toHaveProperty("version");
     expect(saved.report.source).toEqual({
-      threadId: interactiveReportFixture.source.threadId,
-      turnId: interactiveReportFixture.source.turnId,
+      threadId: interactiveReportFixture.source!.threadId,
+      turnId: interactiveReportFixture.source!.turnId,
     });
     expect(saved.report.datasets?.channel_sales.rows[0].salesAmount).toBe(1000);
   });
 
-  test("opens a requested server report version", async () => {
+  test("opens the current server report", async () => {
     vi.stubEnv("NEXT_PUBLIC_GENBI_API_BASE_URL", "http://192.168.101.12:8000");
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(backendReportPayload(1)), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(backendReportPayload()), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const opened = await getInteractiveReportFromBackend(interactiveReportFixture.id, 1);
+    const opened = await getInteractiveReportFromBackend(interactiveReportFixture.id);
 
-    expect(fetchMock.mock.calls[0][0]).toBe(`http://192.168.101.12:8000/api/analysis/reports/${interactiveReportFixture.id}/versions/1`);
-    expect(opened.version).toBe(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(`http://192.168.101.12:8000/api/analysis/reports/${interactiveReportFixture.id}`);
+    expect(opened).not.toHaveProperty("version");
     expect(opened.report.document).toEqual(interactiveReportFixture.document);
-    expect(opened.report.source.turnId).toBe(interactiveReportFixture.source.turnId);
+    expect(opened.report.source?.turnId).toBe(interactiveReportFixture.source!.turnId);
   });
 
   test("lists report center as mine and shared reports", async () => {
@@ -84,23 +77,18 @@ describe("interactive report backend API client", () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
         mine: [
-          { report: backendReportPayload(2).report },
+          { report: backendReportPayload().report },
         ],
         sharedWithMe: [
-          { reportId: "report_shared", recipientUserId: "local-user", permission: "view_and_reuse", createdAt: "2026-08-01T10:00:00.000Z", report: { ...backendReportPayload(1).report, id: "report_shared", title: "共享日报" } },
+          { reportId: "report_shared", recipientUserId: "local-user", permission: "view_and_reuse", createdAt: "2026-08-01T10:00:00.000Z", report: { ...backendReportPayload().report, id: "report_shared", title: "共享日报" } },
         ],
-      }), { status: 200, headers: { "Content-Type": "application/json" } }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(backendReportPayload(2)), { status: 200, headers: { "Content-Type": "application/json" } }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        ...backendReportPayload(1),
-        report: { ...backendReportPayload(1).report, id: "report_shared", title: "共享日报" },
-        version: { ...backendReportPayload(1).version, reportId: "report_shared" },
       }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
     const center = await listReportCenterFromBackend("local-user");
 
     expect(fetchMock.mock.calls[0][0]).toBe("http://192.168.101.12:8000/api/analysis/report-center?user_id=local-user");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(center.mine[0].report.title).toBe(interactiveReportFixture.title);
     expect(center.sharedWithMe[0].permission).toBe("view_and_reuse");
     expect(center.sharedWithMe[0].report.title).toBe("共享日报");
@@ -109,7 +97,7 @@ describe("interactive report backend API client", () => {
   test("renames deletes and shares current report assets", async () => {
     vi.stubEnv("NEXT_PUBLIC_GENBI_API_BASE_URL", "http://192.168.101.12:8000");
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ report: { ...backendReportPayload(1).report, title: "新标题" } }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ report: { ...backendReportPayload().report, title: "新标题" } }), { status: 200, headers: { "Content-Type": "application/json" } }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ share: { reportId: interactiveReportFixture.id, recipientUserId: "user_2", permission: "view", createdAt: "2026-08-01T10:00:00.000Z" } }), { status: 200, headers: { "Content-Type": "application/json" } }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ deleted: true, report_id: interactiveReportFixture.id }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
@@ -139,7 +127,7 @@ describe("interactive report backend API client", () => {
         updatedAt: "2026-08-04T10:00:00.000Z",
         latestQuestion: null,
       },
-      report: backendReportPayload(3),
+      report: backendReportPayload(),
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -153,7 +141,7 @@ describe("interactive report backend API client", () => {
     });
     expect(created.thread.id).toBe("analysis_session_report123");
     expect(created.thread.status).toBe("active");
-    expect(created.saved.version).toBe(3);
+    expect(created.saved).not.toHaveProperty("version");
     expect(created.saved.report.document).toEqual(interactiveReportFixture.document);
   });
 });

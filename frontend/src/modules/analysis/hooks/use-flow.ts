@@ -1,8 +1,8 @@
 ﻿"use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { getAgentClient } from "@/modules/analysis/agentClients";
-import type { AgentEvent, AgentInput } from "@/modules/analysis/agentClients";
+import type { AgentClient, AgentEvent, AgentInput } from "@/modules/analysis/agentClients";
 import type { ArtifactFolder, ArtifactKind } from "../types/artifact";
 import type { InteractiveReport } from "../types/interactive-report";
 
@@ -10,10 +10,11 @@ export type FlowRole = "user" | "agent" | "ask";
 
 export type FlowActivity =
   | { kind: "message"; content: string; itemId?: string }
+  | { kind: "reasoning"; content: string; itemId: string }
   | {
       kind: "tool";
       label: string;
-      state: "queued" | "running" | "done";
+      state: "queued" | "running" | "done" | "failed";
       detail?: string;
       details?: string[];
       itemId?: string;
@@ -28,9 +29,12 @@ export type FlowNode =
       content: string;
       mode?: "replace" | "delta";
       thinking?: boolean;
-      steps?: { label: string; state: "queued" | "running" | "done"; detail?: string; itemId?: string }[];
+      steps?: { label: string; state: "queued" | "running" | "done" | "failed"; detail?: string; itemId?: string }[];
       activity?: FlowActivity[];
       activeItemId?: string;
+      processRunning?: boolean;
+      processStartedAt?: string;
+      processCompletedAt?: string;
       debug?: { title: string; content: string }[];
     }
   | { id: string; role: "ask"; question: string; options: { id: string; label: string }[]; current?: boolean };
@@ -41,73 +45,192 @@ export type FlowCodexLineage = {
   sourceCodexItemId?: string;
 };
 
+type FlowSessionSnapshot = {
+  currentTurnId: string | null;
+  nodes: FlowNode[];
+  artifacts: ArtifactFolder[];
+  reportArtifact: InteractiveReport | null;
+  codexLineage: FlowCodexLineage;
+  running: boolean;
+};
+
+const NEW_FLOW_SESSION_KEY = "__new_analysis_session__";
+
 export const STEP_INITIAL = ["识别业务口径", "查询可用数据表", "生成并校验 SQL", "整理图表与结论"];
 
 export function useFlow(
   sessionId: string | null,
   initial: FlowNode[] = [],
-  options: { onSessionCreated?: (sessionId: string) => void } = {},
+  options: {
+    onSessionCreated?: (sessionId: string) => void;
+    onTurnSettled?: (sessionId: string) => Promise<FlowNode[] | undefined>;
+  } = {},
 ) {
-  const agent = useMemo(() => getAgentClient(), []);
   const initialSignature = useMemo(() => flowNodeSignature(initial), [initial]);
-  // The frontend keeps exactly one durable id per session: the
-  // ``sessionId`` parameter the page router handed into this hook.
-  // It is ``null`` on the first turn of a brand-new session
-  // (``/analysis/new`` → sessionless first turn) and becomes the
-  // Codex-issued id after the ``session/created`` event routes the
-  // user to ``/analysis/{codex_thread_id}``.
-  //
-  // The three public actions (``start`` / ``send`` / ``reply``) do
-  // NOT re-expose this id as a parameter on their signature — they
-  // always close over the hook instance's own id so the caller can
-  // never "dial" another session by accident (e.g. ``useFlow(A)``
-  // then ``flow.send(msg, B)``). See P2: "前端仍有两个 Session ID入口".
+  const firstSessionKey = flowSessionKey(sessionId);
   const sessionIdRef = useRef(sessionId);
-  useEffect(() => {
-    sessionIdRef.current = sessionId;
-  }, [sessionId]);
-  // The frontend keeps exactly one durable id per session: ``sessionId``,
-  // which the page router owns. We do NOT keep a parallel ``threadId`` —
-  // the agent client only learns the id from the ``session/created``
-  // event payload, and continuation turns are always issued against the
-  // route's id. ``currentTurnId`` is the only per-turn field we keep and
-  // it is set strictly from ``turn/started`` events.
-  const [currentTurnId, setCurrentTurnId] = useState<string | null>(null);
-  const [nodes, setNodes] = useState<FlowNode[]>(initial);
-  const [artifacts, setArtifacts] = useState<ArtifactFolder[]>([]);
-  const [reportArtifact, setReportArtifact] = useState<InteractiveReport | null>(null);
-  const [codexLineage, setCodexLineage] = useState<FlowCodexLineage>({});
-  const [running, setRunning] = useState(false);
-  const runningRef = useRef(false);
-  // ``cancelled`` used to be a module-level ``let cancelled = false``.
-  // When a page mounted two useFlow hooks (or switched sessions rapidly)
-  // one hook's cleanup / stop call could cancel the other hook's in-
-  // flight consume loop. Each instance now owns an independent ref.
-  const cancelledRef = useRef(false);
+  const activeSessionKeyRef = useRef(firstSessionKey);
+  const mutationSessionKeyRef = useRef<string | null>(null);
+  const sessionSnapshotsRef = useRef<Map<string, FlowSessionSnapshot>>(new Map([
+    [firstSessionKey, createFlowSessionSnapshot(initial)],
+  ]));
+  const sessionAgentsRef = useRef<Map<string, AgentClient>>(new Map());
+  const activeRunTokensRef = useRef<Map<string, symbol>>(new Map());
+  const cancelledRunTokensRef = useRef<Set<symbol>>(new Set());
+  const stoppingPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+
+  const [currentTurnId, setDisplayedCurrentTurnId] = useState<string | null>(null);
+  const [nodes, setDisplayedNodes] = useState<FlowNode[]>(initial);
+  const [artifacts, setDisplayedArtifacts] = useState<ArtifactFolder[]>([]);
+  const [reportArtifact, setDisplayedReportArtifact] = useState<InteractiveReport | null>(null);
+  const [codexLineage, setDisplayedCodexLineage] = useState<FlowCodexLineage>({});
+  const [running, setDisplayedRunning] = useState(false);
+
+  const displaySnapshot = useCallback((snapshot: FlowSessionSnapshot) => {
+    setDisplayedCurrentTurnId(snapshot.currentTurnId);
+    setDisplayedNodes(snapshot.nodes);
+    setDisplayedArtifacts(snapshot.artifacts);
+    setDisplayedReportArtifact(snapshot.reportArtifact);
+    setDisplayedCodexLineage(snapshot.codexLineage);
+    setDisplayedRunning(snapshot.running);
+  }, []);
+
+  const updateSessionSnapshot = useCallback((
+    sessionKey: string,
+    update: (snapshot: FlowSessionSnapshot) => FlowSessionSnapshot,
+  ): FlowSessionSnapshot => {
+    const current = sessionSnapshotsRef.current.get(sessionKey) ?? createFlowSessionSnapshot([]);
+    const next = update(current);
+    sessionSnapshotsRef.current.set(sessionKey, next);
+    if (activeSessionKeyRef.current === sessionKey) displaySnapshot(next);
+    return next;
+  }, [displaySnapshot]);
+
+  const mutationKey = useCallback(
+    () => mutationSessionKeyRef.current ?? activeSessionKeyRef.current,
+    [],
+  );
+  const setCurrentTurnId = useCallback((update: SetStateAction<string | null>) => {
+    const key = mutationKey();
+    updateSessionSnapshot(key, (snapshot) => ({
+      ...snapshot,
+      currentTurnId: resolveStateAction(update, snapshot.currentTurnId),
+    }));
+  }, [mutationKey, updateSessionSnapshot]);
+  const setNodes = useCallback((update: SetStateAction<FlowNode[]>) => {
+    const key = mutationKey();
+    updateSessionSnapshot(key, (snapshot) => ({
+      ...snapshot,
+      nodes: resolveStateAction(update, snapshot.nodes),
+    }));
+  }, [mutationKey, updateSessionSnapshot]);
+  const setArtifacts = useCallback((update: SetStateAction<ArtifactFolder[]>) => {
+    const key = mutationKey();
+    updateSessionSnapshot(key, (snapshot) => ({
+      ...snapshot,
+      artifacts: resolveStateAction(update, snapshot.artifacts),
+    }));
+  }, [mutationKey, updateSessionSnapshot]);
+  const setReportArtifact = useCallback((update: SetStateAction<InteractiveReport | null>) => {
+    const key = mutationKey();
+    updateSessionSnapshot(key, (snapshot) => ({
+      ...snapshot,
+      reportArtifact: resolveStateAction(update, snapshot.reportArtifact),
+    }));
+  }, [mutationKey, updateSessionSnapshot]);
+  const setCodexLineage = useCallback((update: SetStateAction<FlowCodexLineage>) => {
+    const key = mutationKey();
+    updateSessionSnapshot(key, (snapshot) => ({
+      ...snapshot,
+      codexLineage: resolveStateAction(update, snapshot.codexLineage),
+    }));
+  }, [mutationKey, updateSessionSnapshot]);
+  const setRunning = useCallback((update: SetStateAction<boolean>) => {
+    const key = mutationKey();
+    updateSessionSnapshot(key, (snapshot) => ({
+      ...snapshot,
+      running: resolveStateAction(update, snapshot.running),
+    }));
+  }, [mutationKey, updateSessionSnapshot]);
+
+  const getSessionAgent = useCallback((sessionKey: string): AgentClient => {
+    let agent = sessionAgentsRef.current.get(sessionKey);
+    if (!agent) {
+      agent = getAgentClient(sessionKey);
+      sessionAgentsRef.current.set(sessionKey, agent);
+    }
+    return agent;
+  }, []);
+
+  const rekeySession = useCallback((fromKey: string, toSessionId: string): string => {
+    const toKey = flowSessionKey(toSessionId);
+    if (fromKey === toKey) return toKey;
+    const snapshot = sessionSnapshotsRef.current.get(fromKey);
+    if (snapshot) {
+      sessionSnapshotsRef.current.set(toKey, snapshot);
+      sessionSnapshotsRef.current.delete(fromKey);
+    }
+    const agent = sessionAgentsRef.current.get(fromKey);
+    if (agent) {
+      sessionAgentsRef.current.set(toKey, agent);
+      sessionAgentsRef.current.delete(fromKey);
+    }
+    const activeRunToken = activeRunTokensRef.current.get(fromKey);
+    if (activeRunToken) {
+      activeRunTokensRef.current.set(toKey, activeRunToken);
+      activeRunTokensRef.current.delete(fromKey);
+    }
+    const stoppingPromise = stoppingPromisesRef.current.get(fromKey);
+    if (stoppingPromise) {
+      stoppingPromisesRef.current.set(toKey, stoppingPromise);
+      stoppingPromisesRef.current.delete(fromKey);
+    }
+    if (activeSessionKeyRef.current === fromKey) {
+      activeSessionKeyRef.current = toKey;
+      if (snapshot) displaySnapshot(snapshot);
+    }
+    return toKey;
+  }, [displaySnapshot]);
+
   const onSessionCreatedRef = useRef(options.onSessionCreated);
+  const onTurnSettledRef = useRef(options.onTurnSettled);
   useEffect(() => {
     onSessionCreatedRef.current = options.onSessionCreated;
-  }, [options.onSessionCreated]);
+    onTurnSettledRef.current = options.onTurnSettled;
+  }, [options.onSessionCreated, options.onTurnSettled]);
 
   useEffect(() => {
-    if (runningRef.current) return;
-    cancelledRef.current = false;
-    setCurrentTurnId(null);
-    setNodes([...initial]);
-    setArtifacts([]);
-    setReportArtifact(null);
-    setCodexLineage({});
-    setRunning(false);
-    runningRef.current = false;
-    agent.cancel?.();
-    // Session-switch cleanup: only cancel *this* instance. The old
-    // code wrote to a module-level variable which poisoned every
-    // other mounted useFlow in the page (P2-2 cancelled 全局变量).
-    return () => { cancelledRef.current = true; };
-  }, [agent, sessionId, initialSignature]);
+    sessionIdRef.current = sessionId;
+    const sessionKey = flowSessionKey(sessionId);
+    activeSessionKeyRef.current = sessionKey;
+    mutationSessionKeyRef.current = null;
+    const existing = sessionSnapshotsRef.current.get(sessionKey);
+    const shouldHydrateHistory = Boolean(
+      existing
+      && !existing.running
+      && initial.length > 0
+      && flowNodeSignature(existing.nodes) !== initialSignature
+    );
+    const snapshot = existing
+      ? (shouldHydrateHistory ? { ...existing, nodes: [...initial] } : existing)
+      : createFlowSessionSnapshot(initial);
+    sessionSnapshotsRef.current.set(sessionKey, snapshot);
+    displaySnapshot(snapshot);
+  }, [displaySnapshot, initial, initialSignature, sessionId]);
+
+  useEffect(() => () => {
+    for (const [sessionKey, agent] of sessionAgentsRef.current.entries()) {
+      const activeRunToken = activeRunTokensRef.current.get(sessionKey);
+      if (activeRunToken) cancelledRunTokensRef.current.add(activeRunToken);
+      agent.cancel?.();
+    }
+  }, []);
 
   const applyEvent = useCallback((event: AgentEvent, currentNodes: FlowNode[]): FlowNode[] => {
-    updateCodexLineage(event, setCodexLineage);
+    const lineage = codexLineageFromEvent(event);
+    if (Object.keys(lineage).length > 0) {
+      setCodexLineage((current) => ({ ...current, ...lineage }));
+    }
 
     if (event.type === "session/created") {
       // Informational event from the sessionless flow. Surface the
@@ -175,6 +298,70 @@ export function useFlow(
           steps: [],
           activity: [],
           activeItemId: getAgentEventItemId(event),
+        });
+      }
+      setNodes(next);
+      return next;
+    }
+
+    if (event.type === "process") {
+      const next: FlowNode[] = currentNodes.map((node) => ({ ...node }) as FlowNode);
+      const pendingIndex = next.findIndex((node) => node.id === "agent-pending");
+      const exactIndex = next.findIndex((node) => node.id === event.nodeId && node.role === "agent");
+      const reverseIndex = [...next].reverse().findIndex((node) => node.role === "agent");
+      const targetIndex = exactIndex >= 0
+        ? exactIndex
+        : pendingIndex >= 0
+          ? pendingIndex
+          : reverseIndex >= 0
+            ? next.length - 1 - reverseIndex
+            : -1;
+      const itemId = `${getAgentEventItemId(event) ?? event.nodeId}:${event.summaryIndex}`;
+      const now = new Date().toISOString();
+
+      if (targetIndex >= 0) {
+        const target = next[targetIndex];
+        if (target.role === "agent") {
+          const withArchivedMessage = target.id === "agent-pending"
+            ? { ...target, content: "", activity: [] }
+            : archiveAgentMessage(target);
+          const activity = [...(withArchivedMessage.activity ?? [])];
+          const activityIndex = activity.findIndex((item) => item.kind === "reasoning" && item.itemId === itemId);
+          const currentText = activityIndex >= 0 && activity[activityIndex].kind === "reasoning"
+            ? activity[activityIndex].content
+            : "";
+          const reasoningActivity: Extract<FlowActivity, { kind: "reasoning" }> = {
+            kind: "reasoning",
+            itemId,
+            content: cleanDisplayText(event.mode === "delta" ? currentText + event.text : event.text),
+          };
+          if (activityIndex >= 0) activity[activityIndex] = reasoningActivity;
+          else activity.push(reasoningActivity);
+          next[targetIndex] = {
+            ...withArchivedMessage,
+            id: event.nodeId,
+            thinking: false,
+            activity,
+            processRunning: true,
+            processStartedAt: withArchivedMessage.processStartedAt ?? now,
+            processCompletedAt: undefined,
+          };
+        }
+      } else {
+        next.push({
+          id: event.nodeId,
+          role: "agent",
+          content: "",
+          mode: "replace",
+          thinking: false,
+          steps: [],
+          activity: [{
+            kind: "reasoning",
+            itemId,
+            content: cleanDisplayText(event.text),
+          }],
+          processRunning: true,
+          processStartedAt: now,
         });
       }
       setNodes(next);
@@ -321,7 +508,16 @@ export function useFlow(
           };
           if (activityIndex >= 0) activity[activityIndex] = toolActivity;
           else appendToolActivity(activity, toolActivity);
-          next[targetIndex] = { ...withArchivedMessage, id: event.nodeId ?? target.id, steps, activity };
+          next[targetIndex] = {
+            ...withArchivedMessage,
+            id: event.nodeId ?? target.id,
+            thinking: false,
+            steps,
+            activity,
+            processRunning: true,
+            processStartedAt: withArchivedMessage.processStartedAt ?? new Date().toISOString(),
+            processCompletedAt: undefined,
+          };
         }
       } else if (event.nodeId) {
         next.push({
@@ -331,6 +527,8 @@ export function useFlow(
           mode: "delta",
           steps: [{ label: event.label, state: event.state, detail: event.detail, itemId: event.itemId }],
           activity: [{ kind: "tool", label: event.label, state: event.state, detail: event.detail, itemId: event.itemId }],
+          processRunning: true,
+          processStartedAt: new Date().toISOString(),
         });
       }
       setNodes(next);
@@ -370,6 +568,31 @@ export function useFlow(
       return currentNodes;
     }
 
+    if (event.type === "done") {
+      const next = currentNodes
+        .filter((node) => !(
+          node.role === "agent"
+          && node.thinking
+          && !node.content.trim()
+          && (node.activity?.length ?? 0) === 0
+          && (node.steps?.length ?? 0) === 0
+        ))
+        .map((node) => {
+          if (node.role !== "agent") return node;
+          const hasProcess = (node.activity?.length ?? 0) > 0 || (node.steps?.length ?? 0) > 0;
+          return {
+            ...node,
+            thinking: node.thinking ? false : node.thinking,
+            ...(hasProcess ? {
+              processRunning: false,
+              processCompletedAt: node.processCompletedAt ?? new Date().toISOString(),
+            } : {}),
+          };
+        });
+      setNodes(next);
+      return next;
+    }
+
     if (event.type === "error") {
       const errorNode: FlowNode = { id: `agent-error-${Date.now()}`, role: "agent", content: cleanDisplayText(event.message), mode: "replace" };
       const pendingIndex = currentNodes.findIndex((node) => node.id === "agent-pending");
@@ -381,7 +604,7 @@ export function useFlow(
     }
 
     return currentNodes;
-  }, []);
+  }, [setArtifacts, setCodexLineage, setCurrentTurnId, setNodes, setReportArtifact]);
 
   // Intentionally use a hand-written discriminated union instead of
   // ``Omit<AgentInput, "sessionId">`` because ``Omit`` collapses
@@ -391,40 +614,83 @@ export function useFlow(
   // but strips ``sessionId`` from every arm so callers cannot smuggle
   // a different session id than the one the hook was constructed with.
   type HookScopedInput =
-    | { kind: "start"; suggestionId?: string; question?: string }
+    | {
+        kind: "start";
+        suggestionId?: string;
+        question?: string;
+        context?: { sourceReportId?: string };
+      }
     | { kind: "message"; content: string }
     | { kind: "reply"; optionId: string }
     | { kind: "reset" };
 
   const consume = useCallback(async (input: HookScopedInput) => {
-    // The only durable id is the one the hook was constructed with.
-    // Callers *cannot* override the id on a per-action basis — see
-    // P2-1 "前端仍有两个 Session ID入口". This explicit construction
-    // also guarantees the AgentClient sees the correct sessionId even
-    // if sessionId was swapped out while a turn was queued.
-    const fullInput: AgentInput = { ...input, sessionId: sessionIdRef.current } as AgentInput;
-    if (cancelledRef.current) return;
+    let sessionKey = activeSessionKeyRef.current;
+    let resolvedSessionId = sessionIdRef.current;
+    const fullInput: AgentInput = { ...input, sessionId: resolvedSessionId } as AgentInput;
+    const agent = getSessionAgent(sessionKey);
+    mutationSessionKeyRef.current = sessionKey;
+    const sessionSnapshot = sessionSnapshotsRef.current.get(sessionKey) ?? createFlowSessionSnapshot([]);
+    let snapshot: FlowNode[] = withOptimisticTurn(sessionSnapshot.nodes, fullInput);
+    if (snapshot !== sessionSnapshot.nodes) setNodes(snapshot);
+    // A stop cancels one native Codex Turn, not the whole Session.
+    // Keep the user's next message visible immediately, but do not
+    // start its Turn until the preceding interrupt request settles.
+    // This prevents the old stream's terminal cleanup from racing the
+    // new Turn and clearing its running state.
+    const stoppingPromise = stoppingPromisesRef.current.get(sessionKey);
+    if (stoppingPromise) await stoppingPromise;
+    const runToken = Symbol(sessionKey);
+    activeRunTokensRef.current.set(sessionKey, runToken);
+    mutationSessionKeyRef.current = sessionKey;
     setRunning(true);
-    runningRef.current = true;
-    let snapshot: FlowNode[] = withOptimisticTurn(nodes, fullInput);
-    if (snapshot !== nodes) setNodes(snapshot);
+    let sawError = false;
     try {
       for await (const event of agent.send(fullInput)) {
-        if (cancelledRef.current) break;
+        if (cancelledRunTokensRef.current.has(runToken)) break;
+        if (event.type === "error") sawError = true;
+        if (event.type === "session/created") {
+          const provisionedSessionId = event.codexThreadId || event.sessionId;
+          if (provisionedSessionId) {
+            sessionKey = rekeySession(sessionKey, provisionedSessionId);
+            resolvedSessionId = provisionedSessionId;
+          }
+        }
+        mutationSessionKeyRef.current = sessionKey;
         snapshot = applyEvent(event, snapshot);
       }
     } finally {
-      setRunning(false);
-      runningRef.current = false;
+      mutationSessionKeyRef.current = sessionKey;
+      const wasCancelled = cancelledRunTokensRef.current.has(runToken);
+      if (!wasCancelled && resolvedSessionId && onTurnSettledRef.current) {
+        try {
+          const reconciledNodes = await onTurnSettledRef.current(resolvedSessionId);
+          mutationSessionKeyRef.current = sessionKey;
+          if (reconciledNodes && !(sawError && reconciledNodes.length === 0)) {
+            snapshot = reconciledNodes;
+            setNodes(reconciledNodes);
+          }
+        } catch {
+          // The live stream remains the fallback when the terminal
+          // database reconciliation request is temporarily unavailable.
+        }
+      }
+      mutationSessionKeyRef.current = sessionKey;
+      if (activeRunTokensRef.current.get(sessionKey) === runToken) {
+        activeRunTokensRef.current.delete(sessionKey);
+        setRunning(false);
+      }
+      cancelledRunTokensRef.current.delete(runToken);
+      mutationSessionKeyRef.current = null;
     }
-  }, [agent, applyEvent, nodes]);
+  }, [applyEvent, getSessionAgent, rekeySession, setNodes, setRunning]);
 
   const start = useCallback(
     // ``sessionId`` is not exposed: it is always the hook's own id
     // (null on the first turn of a brand-new session). Closing over
     // the hook instance id prevents the "useFlow(A) + send(msg, B)"
     // cross-session leakage bug described in P2-1.
-    (question?: string) => consume({ kind: "start", question }),
+    (question?: string, context?: { sourceReportId?: string }) => consume({ kind: "start", question, context }),
     [consume],
   );
   const send = useCallback(
@@ -436,7 +702,9 @@ export function useFlow(
     [consume],
   );
   const stop = useCallback(() => {
-    if (!runningRef.current) return;
+    const sessionKey = activeSessionKeyRef.current;
+    const snapshot = sessionSnapshotsRef.current.get(sessionKey);
+    if (!snapshot?.running) return;
     // Two actions, run together: abort the SSE stream locally so
     // the UI stops consuming events, AND ask the backend to
     // interrupt the live Codex turn so the CLI actually stops
@@ -447,20 +715,48 @@ export function useFlow(
     // aborted the HTTP fetch, so the Codex turn kept running
     // until its own timeout.
     //
-    // We also flip ``cancelledRef`` so if any event loop is still
-    // running in this instance (e.g. a microtask between SSE
-    // messages) it stops applying events immediately. Previously
-    // it mutated a module-level boolean which could also cancel
-    // sibling hook instances — see P2-2 cancelled 全局变量.
-    cancelledRef.current = true;
+    // Cancellation is scoped to the selected Session key. Other
+    // native Codex Turn streams in the workspace continue consuming
+    // events while the user views or stops a different Session.
+    const activeRunToken = activeRunTokensRef.current.get(sessionKey);
+    if (activeRunToken) cancelledRunTokensRef.current.add(activeRunToken);
+    mutationSessionKeyRef.current = sessionKey;
+    const agent = getSessionAgent(sessionKey);
     agent.cancel?.();
-    if (sessionIdRef.current && currentTurnId && typeof agent.cancelTurn === "function") {
-      void agent.cancelTurn(sessionIdRef.current, currentTurnId);
+    if (sessionIdRef.current && snapshot.currentTurnId && typeof agent.cancelTurn === "function") {
+      const interruptPromise = Promise.resolve(
+        agent.cancelTurn(sessionIdRef.current, snapshot.currentTurnId),
+      ).catch(() => undefined);
+      stoppingPromisesRef.current.set(sessionKey, interruptPromise);
+      void interruptPromise.finally(() => {
+        for (const [key, pending] of stoppingPromisesRef.current.entries()) {
+          if (pending === interruptPromise) stoppingPromisesRef.current.delete(key);
+        }
+      });
     }
-    runningRef.current = false;
     setRunning(false);
-    setNodes((current) => current.filter((node) => node.id !== "agent-pending"));
-  }, [agent, currentTurnId]);
+    setCurrentTurnId(null);
+    setNodes((current) => current.flatMap<FlowNode>((node) => {
+      if (node.id === "agent-pending") return [];
+      if (node.role !== "agent") return [node];
+      const hasVisibleProcess = Boolean(
+        node.content.trim()
+        || (node.steps?.length ?? 0) > 0
+        || (node.activity?.length ?? 0) > 0
+        || (node.debug?.length ?? 0) > 0
+      );
+      if (!hasVisibleProcess) return [];
+      return [{
+        ...node,
+        thinking: false,
+        processRunning: false,
+        processCompletedAt: node.processStartedAt
+          ? (node.processCompletedAt ?? new Date().toISOString())
+          : node.processCompletedAt,
+      }];
+    }));
+    mutationSessionKeyRef.current = null;
+  }, [getSessionAgent, setCurrentTurnId, setNodes, setRunning]);
 
   return {
     currentTurnId,
@@ -474,6 +770,27 @@ export function useFlow(
     reply,
     stop,
   };
+}
+
+function flowSessionKey(sessionId: string | null): string {
+  return sessionId || NEW_FLOW_SESSION_KEY;
+}
+
+function createFlowSessionSnapshot(nodes: FlowNode[]): FlowSessionSnapshot {
+  return {
+    currentTurnId: null,
+    nodes: [...nodes],
+    artifacts: [],
+    reportArtifact: null,
+    codexLineage: {},
+    running: false,
+  };
+}
+
+function resolveStateAction<T>(update: SetStateAction<T>, current: T): T {
+  return typeof update === "function"
+    ? (update as (previous: T) => T)(current)
+    : update;
 }
 
 function isDuplicateAgentContent(currentContent: string, nextContent: string): boolean {
@@ -541,15 +858,6 @@ function appendToolActivity(activity: FlowActivity[], toolActivity: Extract<Flow
     return;
   }
   activity.push(toolActivity);
-}
-
-function updateCodexLineage(
-  event: AgentEvent,
-  setCodexLineage: Dispatch<SetStateAction<FlowCodexLineage>>,
-) {
-  const next = codexLineageFromEvent(event);
-  if (Object.keys(next).length === 0) return;
-  setCodexLineage((current) => ({ ...current, ...next }));
 }
 
 function codexLineageFromEvent(event: AgentEvent): FlowCodexLineage {

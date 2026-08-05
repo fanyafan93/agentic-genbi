@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +10,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.harness.codex_sdk_runner import CODEX_ANALYSIS_INSTRUCTIONS, CodexSdkAnalysisRuntime
+from backend.harness.codex_sdk_runner import (
+    CODEX_ANALYSIS_INSTRUCTIONS,
+    CodexSdkAnalysisRuntime,
+    CodexSdkRunnerContext,
+)
 
 
 class _FakeAsyncCodex:
@@ -17,6 +22,7 @@ class _FakeAsyncCodex:
         self.started_kwargs = None
         self.resumed = None
         self.login_api_key_value = None
+        self.last_thread = None
 
     async def __aenter__(self) -> "_FakeAsyncCodex":
         return self
@@ -26,11 +32,13 @@ class _FakeAsyncCodex:
 
     async def thread_start(self, **kwargs):
         self.started_kwargs = kwargs
-        return _FakeThread("codex_thread_started")
+        self.last_thread = _FakeThread("codex_thread_started")
+        return self.last_thread
 
     async def thread_resume(self, thread_id: str, **kwargs):
         self.resumed = (thread_id, kwargs)
-        return _FakeThread(thread_id)
+        self.last_thread = _FakeThread(thread_id)
+        return self.last_thread
 
     async def login_api_key(self, api_key: str) -> None:
         self.login_api_key_value = api_key
@@ -39,8 +47,10 @@ class _FakeAsyncCodex:
 class _FakeThread:
     def __init__(self, thread_id: str) -> None:
         self.id = thread_id
+        self.turn_input = None
 
-    async def turn(self, question: str, **kwargs):
+    async def turn(self, question, **kwargs):
+        self.turn_input = question
         return _FakeTurn("codex_turn_1", kwargs)
 
 
@@ -79,6 +89,63 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertIn("涉及真实业务数据时，必须先查证", CODEX_ANALYSIS_INSTRUCTIONS)
         self.assertIn("不能编造表、字段、指标、金额、占比或增长结论", CODEX_ANALYSIS_INSTRUCTIONS)
         self.assertIn("输出中文", CODEX_ANALYSIS_INSTRUCTIONS)
+
+    def test_thread_uses_the_current_published_system_prompt(self) -> None:
+        runtime = CodexSdkAnalysisRuntime(
+            async_codex_factory=_FakeAsyncCodex,
+            system_prompt_resolver=lambda: "由系统管理发布的提示词",
+        )
+
+        kwargs = runtime._thread_kwargs(
+            CodexSdkRunnerContext(genbi_thread_id="thread_1", genbi_turn_id="turn_1")
+        )
+
+        self.assertEqual(kwargs["developer_instructions"], "由系统管理发布的提示词")
+
+    def test_thread_uses_the_current_managed_runtime_policy(self) -> None:
+        runtime = CodexSdkAnalysisRuntime(
+            async_codex_factory=_FakeAsyncCodex,
+            runtime_policy_resolver=lambda: {
+                "model": "managed-model",
+                "approval_mode": "deny_all",
+                "sandbox": "workspace_write",
+                "default_tools_enabled": True,
+            },
+        )
+
+        kwargs = runtime._thread_kwargs(CodexSdkRunnerContext())
+
+        self.assertEqual(kwargs["model"], "managed-model")
+        self.assertEqual(kwargs["approval_mode"].value, "deny_all")
+        self.assertEqual(kwargs["sandbox"].value, "workspace-write")
+        self.assertEqual(kwargs["config"], {"default_tools_enabled": True})
+
+    def test_refreshes_runtime_home_after_mcp_enabled_policy_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            "os.environ",
+            {
+                "GENBI_ENV_FILE": "missing-test.env",
+                "GENBI_CODEX_HOME": temp_dir,
+                "GENBI_CODEX_MCP_COUNT": "1",
+                "GENBI_CODEX_MCP_1_NAME": "BI_doris",
+                "GENBI_CODEX_MCP_1_COMMAND": "npx",
+            },
+            clear=True,
+        ):
+            runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+            config_path = Path(temp_dir) / "config.toml"
+            self.assertIn("mcp_servers.BI_doris", config_path.read_text(encoding="utf-8"))
+
+            with patch(
+                "backend.system_management.mcp_enabled_overrides",
+                return_value={"BI_doris": False},
+            ):
+                runtime._sync_codex_home_config()
+
+            self.assertNotIn(
+                "mcp_servers.BI_doris",
+                config_path.read_text(encoding="utf-8"),
+            )
 
     def test_stream_maps_codex_notifications_to_agent_events(self) -> None:
         runtime = CodexSdkAnalysisRuntime(
@@ -128,6 +195,130 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertEqual(payload["mcp_server"], "GenBI_report")
         self.assertEqual(payload["mcp_result"]["content"][0]["text"], "{\"ok\":true}")
 
+    def test_maps_reasoning_summary_delta_but_not_raw_reasoning_text(self) -> None:
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+
+        summary = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/reasoning/summaryTextDelta",
+                payload=SimpleNamespace(
+                    turn_id="codex_turn_1",
+                    item_id="reasoning_1",
+                    summary_index=0,
+                    delta="正在检查渠道口径。",
+                ),
+            ),
+            codex_thread_id="codex_thread_1",
+        )
+        raw = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/reasoning/textDelta",
+                payload=SimpleNamespace(
+                    turn_id="codex_turn_1",
+                    item_id="reasoning_1",
+                    content_index=0,
+                    delta="hidden chain of thought",
+                ),
+            ),
+            codex_thread_id="codex_thread_1",
+        )
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary.type, "item/reasoning/summaryTextDelta")
+        self.assertEqual(summary.payload["delta"], "正在检查渠道口径。")
+        self.assertEqual(summary.payload["summary_index"], 0)
+        self.assertEqual(summary.payload["codex_item_id"], "reasoning_1")
+        self.assertIsNone(raw)
+
+    def test_maps_started_and_completed_tool_items_with_sanitized_details(self) -> None:
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+        item = SimpleNamespace(
+            id="tool_1",
+            type="mcpToolCall",
+            server="BI_doris",
+            tool="mysql_query",
+            status=SimpleNamespace(value="completed"),
+            arguments={"sql": "select 1", "api_key": "secret-value"},
+            result={"content": [{"type": "text", "text": "one row"}]},
+            duration_ms=1250,
+        )
+
+        started = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/started",
+                payload=SimpleNamespace(turn_id="turn_1", item=SimpleNamespace(root=item)),
+            ),
+            codex_thread_id="session_1",
+        )
+        completed = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/completed",
+                payload=SimpleNamespace(turn_id="turn_1", item=SimpleNamespace(root=item)),
+            ),
+            codex_thread_id="session_1",
+        )
+
+        self.assertIsNotNone(started)
+        self.assertEqual(started.payload["codex_item_id"], "tool_1")
+        self.assertEqual(started.payload["codex_method"], "item/started")
+        self.assertEqual(completed.payload["mcp_arguments"]["sql"], "select 1")
+        self.assertEqual(completed.payload["mcp_arguments"]["api_key"], "[REDACTED]")
+        self.assertNotIn("secret-value", repr(completed.payload))
+
+    def test_completed_reasoning_item_contains_display_summary_only(self) -> None:
+        summary_part = SimpleNamespace(root=SimpleNamespace(text="正在核验数据。"))
+        root = SimpleNamespace(
+            id="reasoning_1",
+            type="reasoning",
+            summary=[summary_part],
+            content=[SimpleNamespace(root=SimpleNamespace(text="hidden reasoning"))],
+        )
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+
+        event = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/completed",
+                payload=SimpleNamespace(turn_id="turn_1", item=SimpleNamespace(root=root)),
+            ),
+            codex_thread_id="session_1",
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.payload["summary"], "正在核验数据。")
+        self.assertNotIn("hidden reasoning", repr(event.payload))
+
+    def test_maps_command_output_and_mcp_progress_notifications(self) -> None:
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+
+        command_output = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/commandExecution/outputDelta",
+                payload=SimpleNamespace(
+                    turn_id="turn_1",
+                    item_id="command_1",
+                    delta="line 1\n",
+                ),
+            ),
+            codex_thread_id="session_1",
+        )
+        mcp_progress = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/mcpToolCall/progress",
+                payload=SimpleNamespace(
+                    turn_id="turn_1",
+                    item_id="tool_1",
+                    message="Fetched page 1",
+                ),
+            ),
+            codex_thread_id="session_1",
+        )
+
+        self.assertEqual(command_output.type, "item/commandExecution/outputDelta")
+        self.assertEqual(command_output.payload["delta"], "line 1\n")
+        self.assertEqual(command_output.payload["codex_item_id"], "command_1")
+        self.assertEqual(mcp_progress.type, "item/mcpToolCall/progress")
+        self.assertEqual(mcp_progress.payload["message"], "Fetched page 1")
+
     def test_async_stream_resumes_codex_thread_when_context_has_codex_thread_id(self) -> None:
         fake_codex = _FakeAsyncCodex()
         runtime = CodexSdkAnalysisRuntime(async_codex_factory=lambda: fake_codex)
@@ -142,6 +333,38 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
 
         self.assertEqual(fake_codex.resumed[0], "codex_existing")
         self.assertEqual(events[-1].type, "turn/completed")
+
+    def test_async_stream_passes_the_referenced_report_as_native_turn_input(self) -> None:
+        fake_codex = _FakeAsyncCodex()
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=lambda: fake_codex)
+
+        async def collect() -> list:
+            output = []
+            async for event in runtime.async_stream(
+                "哪一天的 GMV 最高？",
+                context={
+                    "initial_report_artifact": {
+                        "id": "report_context",
+                        "title": "抖音销售日报",
+                        "datasets": {
+                            "daily": {
+                                "rows": [{"dt": "2026-08-02", "gmv": 662852.06}],
+                            },
+                        },
+                    },
+                },
+            ):
+                output.append(event)
+            return output
+
+        asyncio.run(collect())
+
+        assert fake_codex.last_thread is not None
+        turn_input = fake_codex.last_thread.turn_input
+        self.assertIsInstance(turn_input, list)
+        self.assertEqual(turn_input[0].text, "哪一天的 GMV 最高？")
+        self.assertIn('"id":"report_context"', turn_input[1].text)
+        self.assertIn('"gmv":662852.06', turn_input[1].text)
 
     def test_interrupt_turn_awaits_async_sdk_interrupt(self) -> None:
         class _AsyncInterruptTurn:

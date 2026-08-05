@@ -112,10 +112,14 @@ export const authConfig = {
   providers: [feishuProvider()],
   trustHost: true,
   callbacks: {
+    signIn({ user }) {
+      return user.status !== "disabled";
+    },
     session({ session, user }) {
       if (session.user) {
         session.user.id = user.id;
         session.user.role = user.role;
+        session.user.status = user.status;
       }
       return session;
     },

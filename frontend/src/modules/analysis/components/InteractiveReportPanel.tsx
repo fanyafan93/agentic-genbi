@@ -116,7 +116,6 @@ type Props = {
   running: boolean;
   loading?: boolean;
   initialReport?: InteractiveReport;
-  initialVersion?: number;
   onSaveReport?: (saved: SavedInteractiveReport) => Promise<SavedInteractiveReport>;
 };
 
@@ -140,32 +139,29 @@ export function InteractiveReportPanel(props: Props) {
   return <InteractiveReportContent {...props} initialReport={props.initialReport} />;
 }
 
-function InteractiveReportContent({ taskTitle, running, initialReport, initialVersion = 1, onSaveReport }: Props & { initialReport: InteractiveReport }) {
+function InteractiveReportContent({ taskTitle, running, initialReport, onSaveReport }: Props & { initialReport: InteractiveReport }) {
   const normalizedInitialReport = useMemo(() => withStablePuckIds(initialReport), [initialReport]);
   const [report, setReport] = useState(normalizedInitialReport);
   const [filters, setFilters] = useState(() => createDefaultReportFilters(normalizedInitialReport));
   const [editorOpen, setEditorOpen] = useState(false);
   const [notice, setNotice] = useState("Agent 已生成一份可继续编辑的分析结果。");
   const [saveToast, setSaveToast] = useState("");
-  const [version, setVersion] = useState(initialVersion);
   const [metadataOpen, setMetadataOpen] = useState(false);
   // 引用稳定即可：JsonView 直接消费对象，避免父组件 re-render 触发子组件重渲。
   const metadataValue = useMemo(() => report, [report]);
 
   useEffect(() => {
     setReport(normalizedInitialReport);
-    setVersion(initialVersion);
     setFilters(createDefaultReportFilters(normalizedInitialReport));
     setNotice("已加载本轮分析结果；当前筛选是新的运行时视图。");
     setSaveToast("");
-  }, [normalizedInitialReport, initialVersion]);
+  }, [normalizedInitialReport]);
 
   const changeFilter = (id: keyof ReportRuntimeFilters, value: string) => setFilters((current) => ({ ...current, [id]: value }));
   const persist = async (nextReport: InteractiveReport) => {
-    const fallback: SavedInteractiveReport = { report: nextReport, version, savedAt: new Date().toISOString() };
-    const saved = onSaveReport ? await onSaveReport(fallback) : { ...fallback, version: version + 1 };
+    const fallback: SavedInteractiveReport = { report: nextReport, savedAt: new Date().toISOString() };
+    const saved = onSaveReport ? await onSaveReport(fallback) : fallback;
     setReport(saved.report);
-    setVersion(saved.version);
     return saved;
   };
   const publish = async (document: Data) => {

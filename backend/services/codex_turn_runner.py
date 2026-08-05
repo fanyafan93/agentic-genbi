@@ -137,6 +137,21 @@ def _interrupted_terminal_event(*, session_id: str, turn_id: str) -> AgentEvent:
     )
 
 
+def _failed_terminal_event(*, session_id: str, turn_id: str, error: Exception) -> AgentEvent:
+    return AgentEvent(
+        type="turn/completed",
+        turn_id=turn_id,
+        payload={
+            "eventSource": "genbi",
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "status": "failed",
+            "error": "codex_runtime_exception",
+            "detail": str(error) or error.__class__.__name__,
+        },
+    )
+
+
 def _enrich_analysis_event(
     event: AgentEvent, *, session_id: str, turn_id: str, question: str | None = None
 ) -> AgentEvent:
@@ -324,13 +339,17 @@ class CodexTurnRunner:
         if codex_session_id is None:
             session = self._catalog.get_session(session_id) if session_id else None
             codex_session_id = session.codexSessionId if session else None
-        return {
+        context = {
             "genbi_thread_id": session_id,
             "genbi_turn_id": turn_id,
             "turn_id": turn_id,
             "codex_session_id": codex_session_id,
             "codex_thread_id": codex_session_id,
         }
+        initial_report = request.metadata.get("initial_report_artifact")
+        if isinstance(initial_report, dict):
+            context["initial_report_artifact"] = initial_report
+        return context
 
     def save_turn(
         self, request: AnalysisTurnRequest, *, session_id: str, turn_id: str, events: list[AgentEvent]
@@ -433,7 +452,7 @@ class CodexTurnRunner:
                     self._catalog.register_session(
                         session_id=effective_thread_id,
                         product_kind="analysis_task",
-                        title=None,
+                        title=_string_or_none(request.metadata.get("session_title")),
                         user_id=request.user_id,
                         status="active",
                         metadata=dict(request.metadata or {}),
@@ -496,20 +515,35 @@ class CodexTurnRunner:
             else _analysis_request_from_body(request, session_id=session_id)
         )
         turn_id = ""
+        latest_thread_id = session_id
         events: list[AgentEvent] = []
-        async for event, effective_thread_id, this_turn_id in self.stream_runtime_events(
-            resolved_request,
-            session_id=session_id or "",
-            turn_id="",
-            codex_session_id=codex_session_id,
-        ):
-            if not turn_id and event.type == "genbi/turn/provisioned":
-                turn_id = (
-                    _string_or_none(event.payload.get("codex_turn_id"))
-                    or _string_or_none(event.payload.get("turn_id"))
-                    or ""
+        try:
+            async for event, effective_thread_id, this_turn_id in self.stream_runtime_events(
+                resolved_request,
+                session_id=session_id or "",
+                turn_id="",
+                codex_session_id=codex_session_id,
+            ):
+                latest_thread_id = effective_thread_id or latest_thread_id
+                if not turn_id and event.type == "genbi/turn/provisioned":
+                    turn_id = (
+                        _string_or_none(event.payload.get("codex_turn_id"))
+                        or _string_or_none(event.payload.get("turn_id"))
+                        or ""
+                    )
+                if this_turn_id:
+                    turn_id = turn_id or this_turn_id
+                events.append(event)
+        except Exception as exc:
+            if latest_thread_id and turn_id and not _has_terminal_turn_event(events):
+                events.append(_failed_terminal_event(session_id=latest_thread_id, turn_id=turn_id, error=exc))
+                self.save_turn(
+                    resolved_request,
+                    session_id=latest_thread_id,
+                    turn_id=turn_id,
+                    events=events,
                 )
-            events.append(event)
+            raise
         if not turn_id:
             raise RuntimeError(
                 "codex_runtime_did_not_emit_turn_id: cannot persist turn without Codex-issued turn id."
@@ -709,6 +743,16 @@ class _FirstTurnStream:
                     )
                 )
             raise
+        except Exception as exc:
+            if not _has_terminal_turn_event(self._events) and self._resolved_thread_id and self._resolved_turn_id:
+                self._events.append(
+                    _failed_terminal_event(
+                        session_id=self._resolved_thread_id,
+                        turn_id=self._resolved_turn_id,
+                        error=exc,
+                    )
+                )
+            raise
         finally:
             if self._events and self._resolved_turn_id and self._resolved_thread_id:
                 self._runner.save_turn(
@@ -771,6 +815,16 @@ class _ContinuationTurnStream:
                 fallback_turn_id = self._resolved_turn_id or self._session_id
                 self._events.append(
                     _interrupted_terminal_event(session_id=self._session_id, turn_id=fallback_turn_id)
+                )
+            raise
+        except Exception as exc:
+            if not _has_terminal_turn_event(self._events) and self._resolved_turn_id and self._session_id:
+                self._events.append(
+                    _failed_terminal_event(
+                        session_id=self._session_id,
+                        turn_id=self._resolved_turn_id,
+                        error=exc,
+                    )
                 )
             raise
         finally:

@@ -1,5 +1,6 @@
 ﻿import json
 import asyncio
+import hmac
 import logging
 import os
 from dataclasses import asdict, dataclass, field
@@ -13,7 +14,6 @@ from backend.config import check_runtime_env, load_project_env
 from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
 from backend.analysis.interactive_report_store import (
     InteractiveReportStore,
-    InteractiveReportVersionConflict,
     asdict_report,
 )
 from backend.business_semantics.finereport_reports import FineReportReportRepository
@@ -34,6 +34,7 @@ from backend.persistence.postgres_stores import (
     build_postgres_codex_projection_store,
     postgres_persistence_enabled,
 )
+from backend.system_management import runtime_policy_overrides
 from backend.business_semantics.knowledge_store import KnowledgeStore
 # P2-3: responsibility split.
 #
@@ -181,9 +182,9 @@ def create_app(
         chartSpecs: dict[str, Any] = Field(default_factory=dict)
         gridSpecs: dict[str, Any] = Field(default_factory=dict)
         datasets: dict[str, Any] = Field(default_factory=dict)
-        source: InteractiveReportSourceBody
+        source: InteractiveReportSourceBody | None = None
+        originType: Literal["codex", "seed", "import", "manual"] | None = None
         ownerId: str = Field(min_length=1)
-        expectedVersion: int | None = Field(default=None, ge=0)
         dataUpdatedAt: str | None = None
         derivedFromReportId: str | None = None
 
@@ -224,6 +225,14 @@ def create_app(
             return None
         text = str(value).strip()
         return text or None
+
+    def _require_system_api_token(request: Request) -> None:
+        expected = os.getenv("GENBI_SYSTEM_API_TOKEN", "").strip()
+        if not expected:
+            return
+        actual = _header_text(request, "X-GenBI-System-Token") or ""
+        if not hmac.compare_digest(actual, expected):
+            raise HTTPException(status_code=401, detail="system_api_token_required")
 
     def _principal_from_request(request: Request) -> Principal | None:
         tenant_id = _header_text(request, "X-GenBI-Tenant-Id")
@@ -387,6 +396,35 @@ def create_app(
     configured_codex_projection_store.bind_session_touch(configured_session_catalog)
     configured_finereport_repository = finereport_repository or FineReportReportRepository()
 
+    def first_turn_metadata(
+        raw_metadata: dict[str, Any],
+        principal: Principal | None,
+    ) -> dict[str, Any]:
+        metadata = dict(raw_metadata or {})
+        source_report_id = str(metadata.get("source_report_id") or "").strip()
+        for key in (
+            "initial_report_id",
+            "initial_report_artifact",
+            "initial_report_saved_at",
+            "session_title",
+        ):
+            metadata.pop(key, None)
+        if source_report_id:
+            report = configured_interactive_report_store.get_report(source_report_id)
+            if not report:
+                raise HTTPException(status_code=404, detail="interactive_report_not_found")
+            metadata.update({
+                "source_report_id": report.id,
+                "initial_report_id": report.id,
+                "initial_report_artifact": interactive_report_payload(report),
+                "initial_report_saved_at": report.updatedAt,
+                "session_title": f"{report.title} 新会话",
+            })
+        metadata = _metadata_with_principal(metadata, principal)
+        metadata.setdefault("domain", ANALYSIS_PRODUCT_KIND)
+        metadata.setdefault("thread_root", True)
+        return metadata
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -396,12 +434,40 @@ def create_app(
         return check_runtime_env()
 
     @app.get("/api/system/mcp/servers")
-    def list_mcp_servers() -> dict[str, Any]:
+    def list_mcp_servers(request: Request) -> dict[str, Any]:
+        _require_system_api_token(request)
         return codex_mcp_server_status_payload()
 
     @app.post("/api/system/mcp/servers/{server_name}/test")
-    def test_mcp_server(server_name: str) -> dict[str, Any]:
+    def test_mcp_server(server_name: str, request: Request) -> dict[str, Any]:
+        _require_system_api_token(request)
         return test_codex_mcp_server(server_name)
+
+    @app.get("/api/system/runtime/policy")
+    def system_runtime_policy(request: Request) -> dict[str, Any]:
+        _require_system_api_token(request)
+        managed = runtime_policy_overrides()
+        default_tools = os.getenv("GENBI_CODEX_DEFAULT_TOOLS_ENABLED", "true").strip().lower()
+        return {
+            "provider": str(getattr(configured_analysis_runtime, "provider", "") or "local"),
+            "enabled": bool(getattr(configured_analysis_runtime, "enabled", False)),
+            "model": str(managed.get("model") or getattr(configured_analysis_runtime, "model", "") or ""),
+            "approvalMode": (
+                "deny_all"
+                if managed.get("approval_mode") == "deny_all"
+                else "auto_review"
+            ),
+            "sandbox": (
+                "workspace_write"
+                if managed.get("sandbox") == "workspace_write"
+                else "read_only"
+            ),
+            "defaultToolsEnabled": (
+                managed["default_tools_enabled"]
+                if isinstance(managed.get("default_tools_enabled"), bool)
+                else default_tools not in {"0", "false", "off", "no", "disabled"}
+            ),
+        }
 
     @app.post("/api/codex-minimax/v1/responses")
     async def codex_minimax_responses(body: dict[str, Any] = Body(...)) -> Any:
@@ -476,9 +542,7 @@ def create_app(
         to writing a caller-supplied synthetic row.
         """
         principal = _principal_from_request(request)
-        metadata = _metadata_with_principal(dict(body.metadata or {}), principal)
-        metadata.setdefault("domain", ANALYSIS_PRODUCT_KIND)
-        metadata.setdefault("thread_root", True)
+        metadata = first_turn_metadata(dict(body.metadata or {}), principal)
         turn_request = AnalysisTurnRequest(
             question=body.message.strip(),
             session_id="",
@@ -683,9 +747,7 @@ def create_app(
         from fastapi.responses import StreamingResponse
 
         principal = _principal_from_request(request)
-        metadata = _metadata_with_principal(dict(body.metadata or {}), principal)
-        metadata.setdefault("domain", ANALYSIS_PRODUCT_KIND)
-        metadata.setdefault("thread_root", True)
+        metadata = first_turn_metadata(dict(body.metadata or {}), principal)
         turn_request = AnalysisTurnRequest(
             question=body.message.strip(),
             session_id="",
@@ -919,20 +981,17 @@ def create_app(
     @app.post("/api/analysis/reports")
     def save_interactive_report(body: InteractiveReportBody = Body(...)) -> dict[str, Any]:
         try:
-            report, version = configured_interactive_report_store.save_report(body.model_dump())
-        except InteractiveReportVersionConflict as exc:
-            raise HTTPException(status_code=409, detail="interactive_report_version_conflict") from exc
+            report = configured_interactive_report_store.save_report(body.model_dump())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"report": asdict_report(report), "version": asdict(version)}
+        return {"report": asdict_report(report)}
 
     @app.get("/api/analysis/reports/{report_id}")
     def get_interactive_report(report_id: str) -> dict[str, Any]:
         result = configured_interactive_report_store.get_report(report_id)
         if not result:
             raise HTTPException(status_code=404, detail="interactive_report_not_found")
-        report, version = result
-        return {"report": asdict_report(report), "version": asdict(version)}
+        return {"report": asdict_report(result)}
 
     @app.post("/api/analysis/reports/{report_id}/sessions")
     async def create_session_from_report(
@@ -949,9 +1008,9 @@ def create_app(
         if not result:
             raise HTTPException(status_code=404, detail="interactive_report_not_found")
         principal = _principal_from_request(request)
-        report, version = result
+        report = result
         title = (body.title or f"{report.title} 新分析").strip()
-        report_payload = interactive_report_payload(report, version)
+        report_payload = interactive_report_payload(report)
         try:
             session_id = await _provision_codex_thread_id(
                 analysis_runtime=configured_analysis_runtime,
@@ -978,17 +1037,13 @@ def create_app(
                 "codex_session_id": session_id,
                 "source_report_id": report.id,
                 "initial_report_id": report.id,
-                "initial_report_version": version.version,
                 "initial_report_artifact": report_payload,
             }, principal),
         )
         view = configured_session_service.require_view(session_id)
         return {
             "session": _session_view_to_thread_dict(view, configured_codex_projection_store),
-            "report": {
-                "report": asdict_report(report),
-                "version": asdict(version),
-            },
+            "report": {"report": asdict_report(report)},
         }
 
     @app.patch("/api/analysis/reports/{report_id}")
@@ -1031,21 +1086,6 @@ def create_app(
         if not revoked:
             raise HTTPException(status_code=404, detail="report_share_not_found")
         return {"revoked": True, "report_id": report_id, "recipient_user_id": recipient_user_id}
-
-    @app.get("/api/analysis/reports/{report_id}/versions")
-    def list_interactive_report_versions(report_id: str) -> dict[str, Any]:
-        versions = configured_interactive_report_store.list_versions(report_id)
-        if versions is None:
-            raise HTTPException(status_code=404, detail="interactive_report_not_found")
-        return {"versions": [asdict(version) for version in versions]}
-
-    @app.get("/api/analysis/reports/{report_id}/versions/{version_number}")
-    def get_interactive_report_version(report_id: str, version_number: int) -> dict[str, Any]:
-        result = configured_interactive_report_store.get_report(report_id, version=version_number)
-        if not result:
-            raise HTTPException(status_code=404, detail="interactive_report_version_not_found")
-        report, version = result
-        return {"report": asdict(report), "version": asdict(version)}
 
     @app.get("/api/knowledge")
     def list_knowledge(

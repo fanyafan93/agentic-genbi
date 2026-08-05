@@ -25,7 +25,7 @@ import json
 from typing import Any
 
 from backend.analysis.report_artifact import normalize_report_artifact, validate_report_artifact
-from backend.analysis.interactive_report_store import InteractiveReportStore, InteractiveReportVersionConflict
+from backend.analysis.interactive_report_store import InteractiveReportStore
 from backend.harness.events import AgentEvent
 
 
@@ -60,25 +60,28 @@ def _extract_interactive_report(payload: dict[str, Any]) -> dict[str, Any] | Non
     return None
 
 
-def interactive_report_payload(report: Any, version: Any) -> dict[str, Any]:
-    return {
+def interactive_report_payload(report: Any) -> dict[str, Any]:
+    payload = {
         "id": report.id,
         "title": report.title,
         "subtitle": report.subtitle,
         "artifactType": report.artifactType,
         "schemaVersion": "1.0",
         "renderer": report.renderer,
-        "document": version.document,
-        "filters": version.filters,
-        "queries": version.queries,
-        "chartSpecs": version.chartSpecs,
-        "gridSpecs": version.gridSpecs,
-        "datasets": version.datasets,
-        "source": {
-            "threadId": version.sourceThreadId,
-            "turnId": version.sourceTurnId,
-        },
+        "document": report.document,
+        "filters": report.filters,
+        "queries": report.queries,
+        "chartSpecs": report.chartSpecs,
+        "gridSpecs": report.gridSpecs,
+        "datasets": report.datasets,
+        "originType": report.originType,
     }
+    if report.sourceThreadId and report.sourceTurnId:
+        payload["source"] = {
+            "threadId": report.sourceThreadId,
+            "turnId": report.sourceTurnId,
+        }
+    return payload
 
 
 class ArtifactProjector:
@@ -143,13 +146,11 @@ class ArtifactProjector:
             # artifact event is emitted, so the UI shows "no artifact
             # yet" and the upstream stream keeps flowing.
             return None
-        version_number = None
         if store is not None:
             try:
-                _, version = store.save_report(report)
-                version_number = version.version
-            except (InteractiveReportVersionConflict, ValueError):
-                # Save failure (version conflict or structural) must
+                store.save_report(report)
+            except ValueError:
+                # Structural save failure must
                 # be an explicit failure so the frontend shows an
                 # error. Returning None here would mask a real save
                 # bug — instead we emit genbi/artifact/failed via the
@@ -172,7 +173,6 @@ class ArtifactProjector:
             turn_id=turn_id,
             payload={
                 **report,
-                **({"version": version_number} if version_number is not None else {}),
                 "eventSource": "genbi_projection",
                 "codex_thread_id": payload.get("codex_thread_id"),
                 "codex_turn_id": payload.get("codex_turn_id"),

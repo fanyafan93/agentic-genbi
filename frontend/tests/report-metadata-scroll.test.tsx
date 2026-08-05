@@ -39,7 +39,6 @@ const renderReady = () =>
       taskTitle="渠道销售占比分析"
       running={false}
       initialReport={interactiveReportFixture}
-      initialVersion={1}
     />,
   );
 

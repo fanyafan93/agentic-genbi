@@ -213,6 +213,34 @@ class GenbiReportMcpServerTest(unittest.TestCase):
         self.assertEqual(row["vchannel_name"], "PriceTag")
         self.assertEqual(row["sales_amt"], 45.0)
 
+    def test_create_interactive_report_compiles_top_level_arguments_when_artifact_is_empty(self) -> None:
+        response = _handle({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "create_interactive_report",
+                "arguments": {
+                    "title": "物料类型销售分析",
+                    "summary": "基于已查证的物料类型聚合结果。",
+                    "sourceDescription": "本轮 SQL 聚合结果",
+                    "rows": [
+                        {"$text": "\t{\"物料类型\":\"单刀\",\"客户数\":309,\"记录数\":315,\"实付金额\":46337.15}"},
+                        {"$text": "\t{\"物料类型\":\"刀芯\",\"客户数\":317,\"记录数\":418,\"实付金额\":26149.89}"},
+                    ],
+                    "artifact": {},
+                    "threadId": "thread_1",
+                    "turnId": "turn_1",
+                },
+            },
+        })
+
+        text = response["result"]["content"][0]["text"]
+        payload = json.loads(text)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "validated")
+        self.assertEqual(payload["interactive_report"]["artifactType"], "interactive_report")
+
     def test_validate_interactive_report_recovers_wrapped_series_json_strings(self) -> None:
         response = _handle({
             "jsonrpc": "2.0",

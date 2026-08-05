@@ -47,7 +47,6 @@ describe("InteractiveReportPanel save report", () => {
         taskTitle="分析任务"
         running={false}
         initialReport={interactiveReportFixture}
-        initialVersion={1}
         onSaveReport={onSaveReport}
       />,
     );
@@ -69,7 +68,6 @@ describe("InteractiveReportPanel save report", () => {
         taskTitle="分析任务"
         running={false}
         initialReport={interactiveReportFixture}
-        initialVersion={1}
         onSaveReport={onSaveReport}
       />,
     );

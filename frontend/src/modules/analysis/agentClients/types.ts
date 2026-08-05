@@ -19,9 +19,16 @@ export type AgentEventSystemContext = {
 export type AgentEvent =
   | ({ type: "user"; nodeId: string; content: string } & AgentEventSystemContext)
   | ({ type: "agent"; nodeId: string; content: string; mode?: "delta" | "replace" } & AgentEventSystemContext)
+  | ({
+      type: "process";
+      nodeId: string;
+      text: string;
+      mode: "delta" | "replace";
+      summaryIndex: number;
+    } & AgentEventSystemContext)
   | ({ type: "thinking"; nodeId: string } & AgentEventSystemContext)
   | ({ type: "debug"; nodeId: string; title: string; content: string } & AgentEventSystemContext)
-  | ({ type: "step"; label: string; state: "queued" | "running" | "done"; nodeId?: string; detail?: string } & AgentEventSystemContext)
+  | ({ type: "step"; label: string; state: "queued" | "running" | "done" | "failed"; nodeId?: string; detail?: string } & AgentEventSystemContext)
   | ({ type: "ask"; nodeId: string; question: string; options: { id: string; label: string }[] } & AgentEventSystemContext)
   | ({ type: "tokens"; nodeId: string; text: string } & AgentEventSystemContext)
   | ({ type: "report-artifact"; report: InteractiveReport } & AgentEventSystemContext)
@@ -37,7 +44,13 @@ export type AgentEvent =
 // continuation call must echo the same id explicitly — the agent
 // client must not remember a previous session across calls.
 export type AgentInput =
-  | { kind: "start"; suggestionId?: string; question?: string; sessionId: string | null }
+  | {
+      kind: "start";
+      suggestionId?: string;
+      question?: string;
+      sessionId: string | null;
+      context?: { sourceReportId?: string };
+    }
   | { kind: "message"; content: string; sessionId: string | null }
   | { kind: "reply"; optionId: string; sessionId: string | null }
   | { kind: "reset" };

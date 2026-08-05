@@ -36,10 +36,13 @@ export type BackendAnalysisSessionDetail = {
   turns: Array<{
     id: string;
     question: string;
+    inputText?: string;
     inputKind?: string;
     status?: string;
     createdAt?: string;
     updatedAt?: string;
+    completedAt?: string;
+    timeline?: BackendTimelineItem[];
   }>;
   codexItemProjections?: Array<{
     codexItemId: string;
@@ -48,7 +51,22 @@ export type BackendAnalysisSessionDetail = {
     payload: Record<string, unknown>;
     createdAt: string;
     genbiTurnId?: string | null;
+    sequence?: number;
   }>;
+};
+
+type BackendTimelineItem = {
+  codexItemId?: string;
+  codex_item_id?: string;
+  itemType?: string;
+  item_type?: string;
+  status?: string;
+  sequence?: number;
+  payload?: Record<string, unknown>;
+  createdAt?: string;
+  created_at?: string;
+  genbiTurnId?: string | null;
+  genbi_turn_id?: string | null;
 };
 
 export type BackendMcpTool = {
@@ -126,10 +144,16 @@ export class BackendAnalysisAgentClient implements AgentClient {
       const sessionTurnUrl = isSessionlessStart
         ? `${this.apiBaseUrl}/api/analysis/sessions/turns/stream`
         : `${this.apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}/turns/stream`;
+      const firstTurnMetadata = {
+        frontend_client: "analysis_task",
+        ...(input.kind === "start" && input.context?.sourceReportId
+          ? { source_report_id: input.context.sourceReportId }
+          : {}),
+      };
       const requestBody: Record<string, unknown> = isSessionlessStart
         ? {
             message: question,
-            metadata: { frontend_client: "analysis_task" },
+            metadata: firstTurnMetadata,
           }
         : {
             message: question,
@@ -155,6 +179,7 @@ export class BackendAnalysisAgentClient implements AgentClient {
       // tool calls, and the resolved turn id surface in real time
       // — not after the whole turn completes.
       let resolvedSessionId = asString(input.sessionId) || "";
+      const mappingContext: BackendEventMappingContext = {};
       for await (const backendEvent of readAnalysisSse(response)) {
         refreshTimeout();
         // The first business event on the sessionless flow is
@@ -178,7 +203,7 @@ export class BackendAnalysisAgentClient implements AgentClient {
             continue;
           }
         }
-        for (const event of mapBackendEvents([backendEvent], input.kind)) {
+        for (const event of mapBackendEvents([backendEvent], input.kind, mappingContext)) {
           for await (const displayEvent of smoothTokenEvent(event)) {
             yield displayEvent;
           }
@@ -260,7 +285,7 @@ export function getBackendAnalysisApiBaseUrl(): string | null {
 export async function listBackendAnalysisSessions(): Promise<BackendAnalysisSessionSummary[]> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) return [];
-  const response = await fetch(`${apiBaseUrl}/api/analysis/sessions`);
+  const response = await fetch(`${apiBaseUrl}/api/analysis/sessions?limit=200`);
   if (!response.ok) throw new Error(`Analysis sessions API returned ${response.status}`);
   const payload = await response.json() as { sessions?: BackendAnalysisSessionSummary[] };
   return Array.isArray(payload.sessions) ? payload.sessions : [];
@@ -286,18 +311,14 @@ export async function deleteBackendAnalysisSession(sessionId: string): Promise<v
 }
 
 export async function listBackendMcpServers(): Promise<BackendMcpServer[]> {
-  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
-  if (!apiBaseUrl) return [];
-  const response = await fetch(`${apiBaseUrl}/api/system/mcp/servers`);
+  const response = await fetch("/api/system/mcp/servers");
   if (!response.ok) throw new Error(`MCP servers API returned ${response.status}`);
   const payload = await response.json() as { servers?: BackendMcpServer[] };
   return Array.isArray(payload.servers) ? payload.servers : [];
 }
 
 export async function testBackendMcpServer(serverName: string): Promise<{ ok: boolean; status: string; message: string }> {
-  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
-  if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
-  const response = await fetch(`${apiBaseUrl}/api/system/mcp/servers/${encodeURIComponent(serverName)}/test`, {
+  const response = await fetch(`/api/system/mcp/servers/${encodeURIComponent(serverName)}/test`, {
     method: "POST",
   });
   if (!response.ok) throw new Error(`MCP server test API returned ${response.status}`);
@@ -305,16 +326,42 @@ export async function testBackendMcpServer(serverName: string): Promise<{ ok: bo
 }
 
 export function flowNodesFromBackendSession(detail: BackendAnalysisSessionDetail): FlowNode[] {
-  const projections = [...(detail.codexItemProjections ?? [])].sort((left, right) => compareIsoText(left.createdAt, right.createdAt));
+  const projections = normalizeBackendProjections(detail);
   return [...(detail.turns ?? [])]
     .sort((left, right) => compareIsoText(left.createdAt, right.createdAt))
     .flatMap((turn) => {
-      const nodes: FlowNode[] = [{ id: `user-${turn.id}`, role: "user", content: turn.question || "历史问题无法恢复" }];
+      const nodes: FlowNode[] = [{ id: `user-${turn.id}`, role: "user", content: turn.inputText || turn.question || "历史问题无法恢复" }];
       const turnProjections = projections.filter((item) => item.genbiTurnId === turn.id);
-      const agentNode = agentNodeFromTurnProjections(turn.id, turnProjections);
+      const agentNode = agentNodeFromTurnProjections(turn, turnProjections);
       if (agentNode) nodes.push(agentNode);
       return nodes;
     });
+}
+
+function normalizeBackendProjections(
+  detail: BackendAnalysisSessionDetail,
+): NonNullable<BackendAnalysisSessionDetail["codexItemProjections"]> {
+  const topLevel = detail.codexItemProjections ?? [];
+  const fromTimeline = (detail.turns ?? []).flatMap((turn) => (turn.timeline ?? []).map((item) => ({
+    codexItemId: asString(item.codexItemId) || asString(item.codex_item_id),
+    genbiTurnId: asString(item.genbiTurnId) || asString(item.genbi_turn_id) || turn.id,
+    itemType: asString(item.itemType) || asString(item.item_type) || "unknown",
+    status: asString(item.status) || "completed",
+    sequence: item.sequence,
+    payload: item.payload ?? {},
+    createdAt: asString(item.createdAt) || asString(item.created_at) || turn.createdAt || "",
+  })));
+  const seenItemIds = new Set<string>();
+  return [...topLevel, ...fromTimeline]
+    .filter((item) => item.itemType !== "userMessage")
+    .filter((item) => {
+      const itemId = asString(item.codexItemId);
+      if (!itemId) return true;
+      if (seenItemIds.has(itemId)) return false;
+      seenItemIds.add(itemId);
+      return true;
+    })
+    .sort((left, right) => compareIsoText(left.createdAt, right.createdAt));
 }
 
 export function getBackendAnalysisRequestTimeoutMs(): number {
@@ -365,13 +412,31 @@ function compareIsoText(left?: string, right?: string): number {
 }
 
 function agentNodeFromTurnProjections(
-  turnId: string,
+  turn: BackendAnalysisSessionDetail["turns"][number],
   projections: NonNullable<BackendAnalysisSessionDetail["codexItemProjections"]>,
 ): FlowNode | null {
   let content = "";
   let activeItemId: string | undefined;
   const activity: FlowActivity[] = [];
-  for (const item of projections) {
+  const orderedProjections = [...projections].sort((left, right) => {
+    const leftSequence = typeof left.sequence === "number" ? left.sequence : Number.MAX_SAFE_INTEGER;
+    const rightSequence = typeof right.sequence === "number" ? right.sequence : Number.MAX_SAFE_INTEGER;
+    return leftSequence - rightSequence
+      || compareIsoText(left.createdAt, right.createdAt)
+      || left.codexItemId.localeCompare(right.codexItemId);
+  });
+  for (const item of orderedProjections) {
+    if (item.itemType === "reasoning") {
+      const summary = asString(item.payload.summary);
+      if (summary) {
+        activity.push({
+          kind: "reasoning",
+          content: summary,
+          itemId: `${item.codexItemId}:0`,
+        });
+      }
+      continue;
+    }
     if (item.itemType === "agentMessage") {
       const messageContent = asString(item.payload.content);
       if (messageContent) {
@@ -381,11 +446,23 @@ function agentNodeFromTurnProjections(
       }
       continue;
     }
-    if (["toolCall", "toolResult", "mcpToolCall"].includes(item.itemType)) {
+    if (["toolCall", "toolResult", "mcpToolCall", "commandExecution", "fileChange"].includes(item.itemType)) {
+      const normalizedStatus = (
+        asString(item.payload.mcp_status)
+        || asString(item.payload.command_status)
+        || asString(item.payload.file_change_status)
+        || item.status
+      ).toLowerCase();
       appendHistoricalToolActivity(activity, {
         kind: "tool",
         label: toolLabelFromPayload(item.payload),
-        state: item.status === "completed" ? "done" : item.status === "running" ? "running" : "queued",
+        state: ["failed", "error", "cancelled", "declined"].includes(normalizedStatus)
+          ? "failed"
+          : normalizedStatus === "completed"
+            ? "done"
+            : normalizedStatus === "running"
+              ? "running"
+              : "queued",
         detail: toolCallDetail(item.payload),
         itemId: item.codexItemId,
       });
@@ -393,12 +470,18 @@ function agentNodeFromTurnProjections(
   }
   if (!content && activity.length === 0) return null;
   return {
-    id: `agent-${turnId}`,
+    id: `agent-${turn.id}`,
     role: "agent",
     content,
     mode: "replace",
     activity,
     activeItemId,
+    ...(activity.length > 0 ? {
+      processRunning: turn.status === "running",
+      processStartedAt: turn.createdAt,
+      processCompletedAt: turn.completedAt
+        || (turn.status && turn.status !== "running" ? turn.updatedAt : undefined),
+    } : {}),
   };
 }
 
@@ -456,7 +539,7 @@ export function parseAnalysisSse(text: string): BackendTurnEvent[] {
 }
 
 function getInputQuestion(input: AgentInput): string {
-  if (input.kind === "start") return input.question;
+  if (input.kind === "start") return input.question ?? "";
   if (input.kind === "message") return input.content;
   if (input.kind === "reply") return input.optionId;
   return "";
@@ -464,6 +547,7 @@ function getInputQuestion(input: AgentInput): string {
 
 type BackendEventMappingContext = {
   currentAgentNodeId?: string;
+  streamedAgentTextByNode?: Map<string, string>;
 };
 
 export function* mapBackendEvents(
@@ -489,19 +573,67 @@ export function* mapBackendEvents(
       continue;
     }
 
+    if (
+      event.type === "item/reasoning/summaryTextDelta"
+      || method === "item/reasoning/summaryTextDelta"
+    ) {
+      const summaryIndex = Number(event.payload.summary_index ?? 0);
+      const codexItemId = asString(event.payload.codex_item_id);
+      const delta = asString(event.payload.delta);
+      if (codexItemId && delta) {
+        yield {
+          type: "process",
+          nodeId: getAgentNodeId(event),
+          text: delta,
+          mode: "delta",
+          summaryIndex,
+          itemId: `${codexItemId}:${summaryIndex}`,
+          ...context,
+        };
+      }
+      continue;
+    }
+
+    if (
+      (event.type === "item/completed" || method === "item/completed")
+      && codexItemType === "reasoning"
+      && asString(event.payload.summary)
+    ) {
+      const codexItemId = asString(event.payload.codex_item_id);
+      yield {
+        type: "process",
+        nodeId: getAgentNodeId(event),
+        text: asString(event.payload.summary),
+        mode: "replace",
+        summaryIndex: 0,
+        itemId: `${codexItemId}:0`,
+        ...context,
+      };
+      continue;
+    }
+
     const isToolItemEvent = (
       (event.type === "item/started" || event.type === "item/completed" || method === "item/started" || method === "item/completed")
-      && ["toolCall", "toolResult", "mcpToolCall"].includes(codexItemType)
+      && ["toolCall", "toolResult", "mcpToolCall", "commandExecution", "fileChange"].includes(codexItemType)
     );
     if (isToolItemEvent) {
       const toolNodeId = mappingContext.currentAgentNodeId || getAgentNodeId(event);
-      const toolName = asString(event.payload.mcp_tool) || asString(event.payload.tool) || asString(event.payload.name) || "tool";
+      const toolName = toolNameFromPayload(event.payload, codexItemType);
       const toolServer = asString(event.payload.mcp_server);
       const itemId = asString(event.payload.item_id) || asString(event.payload.codex_item_id) || undefined;
+      const completedStatus = (
+        asString(event.payload.mcp_status)
+        || asString(event.payload.command_status)
+        || asString(event.payload.file_change_status)
+      ).toLowerCase();
       yield {
         type: "step",
         label: `${toolServer ? `${toolServer} / ` : ""}${toolName}`,
-        state: event.type === "item/started" ? "running" : "done",
+        state: (event.type === "item/started" || method === "item/started")
+          ? "running"
+          : ["failed", "error", "cancelled", "declined"].includes(completedStatus)
+            ? "failed"
+            : "done",
         nodeId: toolNodeId,
         detail: toolCallDetail(event.payload),
         itemId,
@@ -529,6 +661,11 @@ export function* mapBackendEvents(
       const agentNodeId = getAgentNodeId(event);
       mappingContext.currentAgentNodeId = agentNodeId;
       const content = asString(event.payload.content);
+      const streamedContent = mappingContext.streamedAgentTextByNode?.get(agentNodeId);
+      mappingContext.streamedAgentTextByNode?.delete(agentNodeId);
+      if (streamedContent === content) {
+        continue;
+      }
       yield {
         type: "agent",
         nodeId: agentNodeId,
@@ -543,10 +680,14 @@ export function* mapBackendEvents(
     if (event.type === "item/agentMessage/delta" || method === "item/agentMessage/delta") {
       const agentNodeId = getAgentNodeId(event);
       mappingContext.currentAgentNodeId = agentNodeId;
+      const delta = asString(event.payload.delta);
+      const streamedTextByNode = mappingContext.streamedAgentTextByNode ?? new Map<string, string>();
+      mappingContext.streamedAgentTextByNode = streamedTextByNode;
+      streamedTextByNode.set(agentNodeId, (streamedTextByNode.get(agentNodeId) ?? "") + delta);
       yield {
         type: "tokens",
         nodeId: agentNodeId,
-        text: asString(event.payload.delta),
+        text: delta,
         itemId: asString(event.payload.item_id) || undefined,
         ...context,
       };
@@ -575,8 +716,8 @@ export function* mapBackendEvents(
           type: "report-artifact",
           report,
           ...context,
-          threadId: report.source.threadId,
-          turnId: report.source.turnId,
+          threadId: report.source?.threadId || context.threadId,
+          turnId: report.source?.turnId || context.turnId,
         };
       }
       continue;
@@ -621,15 +762,22 @@ export function* mapBackendEvents(
 }
 
 function toolCallDetail(payload: Record<string, unknown>): string | undefined {
+  const sections: string[] = [];
   const args = asRecord(payload.mcp_arguments) || asRecord(payload.arguments);
-  const sql = args ? asString(args.sql) : "";
-  if (sql) return sql;
-  const error = asString(payload.mcp_error);
-  if (error) return error;
-  if (args && Object.keys(args).length > 0) return formatToolDetail(args);
   const result = asRecord(payload.mcp_result) || asRecord(payload.result);
-  if (result) return formatToolResult(result);
-  return undefined;
+  const command = asString(payload.command);
+  const output = asString(payload.aggregated_output);
+  if (command) sections.push(`Command:\n${command}`);
+  if (args && Object.keys(args).length > 0) sections.push(`Arguments:\n${formatToolDetail(args)}`);
+  if (result) sections.push(`Result:\n${formatToolResult(result)}`);
+  if (output) sections.push(`Output:\n${output}`);
+  if (Array.isArray(payload.changes)) {
+    sections.push(`Changes:\n${truncateToolDetail(JSON.stringify(payload.changes, null, 2))}`);
+  }
+  if (payload.exit_code != null) sections.push(`Exit code: ${String(payload.exit_code)}`);
+  const error = asString(payload.mcp_error) || asString(payload.error);
+  if (error) sections.push(`Error:\n${error}`);
+  return sections.length > 0 ? truncateToolDetail(sections.join("\n\n")) : undefined;
 }
 
 function formatToolDetail(value: Record<string, unknown>): string {
@@ -646,7 +794,18 @@ function formatToolResult(value: Record<string, unknown>): string {
 
 function truncateToolDetail(value: string): string {
   const text = value.trim();
-  return text.length > 2000 ? `${text.slice(0, 2000)}\n...` : text;
+  return text.length > 20_000 ? `${text.slice(0, 20_000)}\n...[truncated]` : text;
+}
+
+function toolNameFromPayload(payload: Record<string, unknown>, itemType: string): string {
+  const named = asString(payload.mcp_tool) || asString(payload.tool) || asString(payload.name);
+  if (named) return named;
+  if (itemType === "commandExecution") {
+    const command = asString(payload.command).split(/\r?\n/, 1)[0]?.trim();
+    return command ? `Command: ${command.slice(0, 100)}` : "Command";
+  }
+  if (itemType === "fileChange") return "File changes";
+  return "tool";
 }
 
 function getAgentNodeId(event: BackendTurnEvent): string {
