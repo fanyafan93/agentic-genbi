@@ -1582,6 +1582,133 @@ class TurnCancellationTest(unittest.TestCase):
         self.assertEqual(session.status, "archived")
 
 
+class SessionContinuationBodyContractTest(unittest.TestCase):
+    """Locks the user spec that the continuation body must NOT
+    carry a ``sessionId`` field, and that ``turn_kind`` is
+    restricted to ``message`` or ``reply``.
+
+    A previous version of ``analysis_api.py`` defined
+    ``AnalysisSessionContinuationBody`` twice. The second
+    definition (which silently won) added a ``sessionId``
+    field and dropped ``turn_kind``. That regression violated
+    the "session id only lives in the URL" rule and let
+    clients smuggle a session id through the body, bypassing
+    the URL resolution path. This test locks both halves of
+    the contract:
+
+    * Body ``sessionId`` / ``session_id`` / ``task_id`` keys
+      must be silently ignored on the continuation endpoint
+      so a careless client cannot route to a different
+      session than the URL advertised.
+    * ``turn_kind`` is restricted to ``message`` or ``reply``;
+      ``start`` is reserved for the sessionless entry point.
+    """
+
+    def _build_client(self) -> TestClient:
+        thread_store = ThreadStore(Path(tempfile.mkdtemp()) / "thread-store.jsonl")
+        app = create_app(
+            analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+            thread_store=thread_store,
+        )
+        return TestClient(app)
+
+    def test_continuation_body_rejects_session_id_field(self) -> None:
+        client = self._build_client()
+        # Pydantic forbids unknown fields by default
+        # (``BaseModel.model_config.extra = "ignore"`` is *not*
+        # the default). Sending ``sessionId`` in the body must
+        # therefore produce a 422, not a 200, because the field
+        # is not part of the contract.
+        response = client.post(
+            "/api/analysis/sessions/codex_thread_body/turns",
+            json={
+                "message": "follow up",
+                "sessionId": "codex_thread_smuggled",
+                "turn_kind": "message",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        detail = response.json()["detail"]
+        # The error mentions ``sessionId`` as an unknown field
+        # — this is the lock that prevents future refactors
+        # from silently accepting it again.
+        self.assertTrue(
+            any("sessionId" in (entry.get("loc") or []) and "extra" in (entry.get("type") or "")
+                for entry in detail),
+            msg=f"validation error does not mention sessionId: {detail!r}",
+        )
+
+    def test_continuation_body_rejects_session_id_aliases(self) -> None:
+        client = self._build_client()
+        # Snake_case and ``task_id`` aliases are equally
+        # forbidden — they were historical aliases that the
+        # body contract explicitly rejects.
+        for alias in ("session_id", "task_id", "conversation_id"):
+            response = client.post(
+                "/api/analysis/sessions/codex_thread_body/turns",
+                json={
+                    "message": "follow up",
+                    alias: "codex_thread_smuggled",
+                    "turn_kind": "message",
+                },
+            )
+            self.assertEqual(
+                response.status_code,
+                422,
+                msg=f"alias {alias!r} should be rejected; got {response.status_code}",
+            )
+
+    def test_continuation_body_rejects_turn_kind_start(self) -> None:
+        # ``start`` is reserved for the sessionless entry
+        # point. Sending it on the session-scoped URL must be
+        # rejected so a client cannot accidentally start a new
+        # session through a continuation URL.
+        client = self._build_client()
+        response = client.post(
+            "/api/analysis/sessions/codex_thread_body/turns",
+            json={
+                "message": "first?",
+                "turn_kind": "start",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_continuation_body_accepts_message_and_reply(self) -> None:
+        # The locked-in ``Literal["message", "reply"]`` means
+        # both valid kinds round-trip through the request
+        # parser without rejection. We don't care about the
+        # downstream behavior here — the runtime mock always
+        # completes — only that the body validation accepts
+        # these two values.
+        client = self._build_client()
+        for kind in ("message", "reply"):
+            response = client.post(
+                "/api/analysis/sessions/codex_thread_body/turns",
+                json={"message": f"x ({kind})", "turn_kind": kind},
+            )
+            self.assertEqual(
+                response.status_code,
+                200,
+                msg=f"turn_kind={kind!r} should be accepted; got {response.status_code} body={response.text!r}",
+            )
+
+    def test_sessionless_body_rejects_session_id_field(self) -> None:
+        # The sessionless entry point (``POST /sessions/turns``)
+        # must never accept a session id in the body either —
+        # the body contract is "session id lives in the URL".
+        # ``AnalysisSessionStartBody`` never declared the field,
+        # so sending it produces a 422.
+        client = self._build_client()
+        response = client.post(
+            "/api/analysis/sessions/turns",
+            json={
+                "message": "first",
+                "sessionId": "codex_thread_smuggled",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
+
 class SessionScopedContinuationTest(unittest.IsolatedAsyncioTestCase):
     """Locks the session-scoped continuation turn contract.
 

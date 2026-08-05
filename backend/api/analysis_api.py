@@ -67,7 +67,7 @@ def create_app(
         from fastapi import Body, FastAPI, HTTPException, Query
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import Response, StreamingResponse
-        from pydantic import BaseModel, Field
+        from pydantic import BaseModel, ConfigDict, Field
     except ImportError as exc:
         raise RuntimeError("Install FastAPI dependencies from backend/requirements.txt to start the API.") from exc
 
@@ -85,6 +85,7 @@ def create_app(
         the Codex-issued id as part of the first ``session/created``
         event.
         """
+        model_config = ConfigDict(extra="forbid")
         message: str = Field(min_length=1)
         user_id: str | None = None
         metadata: dict[str, Any] = Field(default_factory=dict)
@@ -93,10 +94,15 @@ def create_app(
         """Request body for ``POST /api/analysis/sessions/{sessionId}/turns``.
 
         The ``sessionId`` comes from the URL path; the body never
-        re-asserts it.
+        re-asserts it (no ``sessionId`` / ``conversation_id`` /
+        ``task_id`` field is accepted on this contract).
+        ``turn_kind`` is restricted to ``message`` or ``reply``
+        because the very first turn of a brand-new session uses
+        the dedicated sessionless entry point, not this URL.
         """
+        model_config = ConfigDict(extra="forbid")
         message: str = Field(min_length=1)
-        turn_kind: str = "message"
+        turn_kind: Literal["message", "reply"] = "message"
         user_id: str | None = None
         metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -164,32 +170,6 @@ def create_app(
     class ReportAnalysisSessionBody(BaseModel):
         userId: str | None = None
         title: str | None = None
-        metadata: dict[str, Any] = Field(default_factory=dict)
-
-    class AnalysisSessionStartBody(BaseModel):
-        """Request body for ``POST /api/analysis/sessions/turns``.
-
-        The frontend must POST exactly this shape (instead of calling
-        ``POST /api/analysis/threads`` first). The endpoint lazily opens
-        a Codex thread and returns the Codex-issued id as part of the
-        first ``session/created`` event.
-        """
-        message: str = Field(min_length=1)
-        user_id: str | None = None
-        metadata: dict[str, Any] = Field(default_factory=dict)
-
-    class AnalysisSessionContinuationBody(BaseModel):
-        """Request body for ``POST /api/analysis/sessions/{sessionId}/turns/stream``.
-
-        The ``sessionId`` is normally taken from the URL path, but the
-        body is allowed to carry it for clients that prefer a single
-        source of truth. If the body field disagrees with the URL the
-        endpoint returns ``400 session_id_mismatch``.
-        """
-        message: str = Field(min_length=1)
-        sessionId: str | None = None
-        turn_kind: str = "message"
-        user_id: str | None = None
         metadata: dict[str, Any] = Field(default_factory=dict)
 
     class AnalysisSessionUpdateBody(BaseModel):

@@ -313,9 +313,58 @@
     断言第二次 fetch URL 跟 method 正确。
   * **修复前**测试失败（`cancelTurn` 方法不存在），证明它
     锁住 P1 回归。
-  验收：后端 145/145、前端 95/95、tsc 全过。docker backend
+ - 验收：后端 145/145、前端 95/95、tsc 全过。docker backend
   rebuild 后新 endpoint `POST /sessions/{id}/turns/{turn_id}/cancel`
   可达。
+- **Body 合约单一来源（P1）**：`analysis_api.py` 里
+  `AnalysisSessionStartBody` 跟
+  `AnalysisSessionContinuationBody` 被**定义了两遍**。
+  Python 类定义按出现顺序覆盖，第二次定义生效，且
+  第二次定义**故意**违反前一次定义：
+  * 第二次 `AnalysisSessionContinuationBody` 加了
+    `sessionId: str | None` 字段——违反"body 永不携带
+    session id"规范。
+  * 第二次 `AnalysisSessionStartBody` 丢了 `turn_kind`——
+    也是不一致，但用户没点名。
+  后果：
+  * 客户端可以发 `{"message": "x", "sessionId": "..."}`
+    走 `/sessions/{id}/turns` endpoint，body 里走私另一
+    个 session id，绕过 URL resolution 路径（之前根本没
+    校验 URL vs body session_id 一致性）。
+  * 第二次定义里的 docstring 撒谎："If the body field
+    disagrees with the URL the endpoint returns 400
+    session_id_mismatch"——实际没实现，且**第二次定义就
+    把 session_id 字段放回来了**，永远不会触发 400。
+  修复：
+  * 删第二次定义（line 168-192）。第一份定义（line 80-101）
+    严格遵守 spec：`message`、`turn_kind`、`user_id`、
+    `metadata`，没有 session id 字段。
+  * 把 `turn_kind` 从 `str` 收紧成
+    `Literal["message", "reply"]`（用户规范字面）——`start`
+    走 sessionless endpoint，不通过这里。
+  * 两个 body 都加 `model_config = ConfigDict(extra="forbid")`。
+    Pydantic v2 默认 `extra="ignore"`，意味着发
+    `{"sessionId": "x"}` 也会被默默接受；`forbid` 后未
+    知字段返 422。
+  * 加 docstring 说明"no ``sessionId`` / ``conversation_id``
+    / ``task_id`` field is accepted on this contract"。
+  测试（新增 `SessionContinuationBodyContractTest`，5 例）：
+  * `test_continuation_body_rejects_session_id_field`：
+    POST `/sessions/{id}/turns` body 带 `sessionId` → 422
+    + detail 提到 `sessionId` 字段。
+  * `test_continuation_body_rejects_session_id_aliases`：
+    `session_id` / `task_id` / `conversation_id` 别名也都
+    422。
+  * `test_continuation_body_rejects_turn_kind_start`：
+    `turn_kind="start"` 422（保留给 sessionless endpoint）。
+  * `test_continuation_body_accepts_message_and_reply`：
+    `turn_kind in {"message", "reply"}` 200 通过。
+  * `test_sessionless_body_rejects_session_id_field`：
+    sessionless endpoint 也 forbiddens `sessionId`。
+  * **修复前**4 个测试失败（`sessionId` + `turn_kind="start"`
+    都被允许，response 200），证明它们真的锁住 P1 回归。
+  验收：后端 150/150、前端 95/95、tsc 全过。docker backend
+  rebuild 后 422 校验生效。
 - **统一 API**（用户规范）：保留 7 个 `/api/analysis/sessions/*`
   路由，body 永不携带 session id。
   - `GET    /api/analysis/sessions`
