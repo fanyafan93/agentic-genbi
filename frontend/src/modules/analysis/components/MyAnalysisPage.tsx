@@ -95,8 +95,10 @@ function ReportCard({
         <div className="report-card-actions">
           <button type="button" onClick={() => onPreview(saved)}>预览</button>
           <button type="button" onClick={() => window.alert("删除功能待接入后端。")}>删除</button>
-          <button type="button" onClick={() => onOpenReport(saved)}>回到原任务</button>
-          <button type="button" disabled={!onCreateAnalysis} onClick={() => onCreateAnalysis?.(saved)}>新建分析</button>
+          {saved.report.source?.threadId ? (
+            <button type="button" onClick={() => onOpenReport(saved)}>回到会话</button>
+          ) : null}
+          <button type="button" disabled={!onCreateAnalysis} onClick={() => onCreateAnalysis?.(saved)}>新建会话</button>
         </div>
       </footer>
     </article>
@@ -116,7 +118,6 @@ function ReportPreviewDialog({ saved, onClose }: { saved: SavedInteractiveReport
             taskTitle={saved.report.title}
             running={false}
             initialReport={saved.report}
-            initialVersion={saved.version}
           />
         </div>
       </section>

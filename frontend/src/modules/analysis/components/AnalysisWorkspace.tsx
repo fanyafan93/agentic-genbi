@@ -12,7 +12,11 @@ import { useFlow, type FlowNode } from "../hooks/use-flow";
 import { AnalysisTaskThread } from "./AnalysisTaskThread";
 import { InteractiveReportPanel } from "./InteractiveReportPanel";
 import { MyAnalysisPage } from "./MyAnalysisPage";
-import { SystemMcpPage } from "./SystemMcpPage";
+import {
+  SystemAdminPage,
+  systemSections,
+  type SystemSection,
+} from "@/modules/system/components/SystemAdminPage";
 import {
   deleteBackendAnalysisSession,
   flowNodesFromBackendSession,
@@ -22,7 +26,6 @@ import {
   type BackendAnalysisSessionSummary,
 } from "../agentClients/backendClient";
 import {
-  createAnalysisThreadFromReportBackend,
   listInteractiveReportsByThreadFromBackend,
   listReportCenterFromBackend,
   saveInteractiveReportToBackend,
@@ -113,8 +116,8 @@ function analysisThreadTime(thread: BackendAnalysisSessionSummary): string {
 // The session-level ``status`` is always ``active`` or ``archived``;
 // we read the latest turn's state for the sidebar signal so a turn
 // failure never flips the session into a frozen "completed" state.
-function analysisLatestTurnStatus(thread: BackendAnalysisSessionSummary): string | null {
-  const value = thread.latestTurnStatus ?? thread.latest_turn_status;
+function analysisLatestTurnStatus(thread: BackendAnalysisSessionSummary | null | undefined): string | null {
+  const value = thread?.latestTurnStatus ?? thread?.latest_turn_status;
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
@@ -143,24 +146,30 @@ function threadDate(thread: BackendAnalysisSessionSummary): Date {
 function savedReportFromThreadMetadata(metadata: Record<string, unknown> | null | undefined): SavedInteractiveReport | null {
   const report = metadata?.initial_report_artifact;
   if (!report || typeof report !== "object") return null;
-  const version = Number(metadata?.initial_report_version ?? 1);
   return {
     report: report as SavedInteractiveReport["report"],
-    version: Number.isFinite(version) && version > 0 ? version : 1,
     savedAt: String(metadata?.initial_report_saved_at ?? metadata?.created_at ?? new Date().toISOString()),
   };
 }
 
-export function AnalysisWorkspace() {
+type AnalysisWorkspaceProps = {
+  initialSessionId?: string | null;
+};
+
+export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspaceProps) {
   const { data: session } = useSession();
+  const routedSessionId = initialSessionId && initialSessionId !== "new"
+    ? initialSessionId
+    : null;
   const [activeTool, setActiveTool] = useState<ActiveTool>("analysis-workspace");
   const [collapsed, setCollapsed] = useState(false);
   const [selectedAnalysisTask, setSelectedAnalysisTask] = useState<string | null>(null);
   const [splitPercent, setSplitPercent] = useState(40);
   const [mobilePane, setMobilePane] = useState<"analysisTask" | "assetLibrary">("analysisTask");
-  const [currentAnalysisTaskId, setCurrentAnalysisTaskId] = useState<string | null>(null);
+  const [currentAnalysisTaskId, setCurrentAnalysisTaskId] = useState<string | null>(routedSessionId);
   const [businessSemanticSection, setBusinessSemanticSection] = useState<BusinessSemanticSection>("structured");
   const [structuredKnowledgeSource, setStructuredKnowledgeSource] = useState<StructuredKnowledgeSource>("finereport");
+  const [systemSection, setSystemSection] = useState<SystemSection>("overview");
   const [savedReports, setSavedReports] = useState<SavedInteractiveReport[]>([]);
   const [sharedReports, setSharedReports] = useState<SharedInteractiveReport[]>([]);
   const [analysisThreads, setAnalysisThreads] = useState<BackendAnalysisSessionSummary[]>([]);
@@ -172,18 +181,24 @@ export function AnalysisWorkspace() {
   const [openedReportThreadId, setOpenedReportThreadId] = useState<string | null>(null);
   const [openedReportLoadingThreadId, setOpenedReportLoadingThreadId] = useState<string | null>(null);
   const [analysisTaskNotice, setAnalysisTaskNotice] = useState("");
-  const hadLocalRunningFlowRef = useRef(false);
+  const locallyRunningSessionIdsRef = useRef(new Set<string>());
+  const skipSelectedThreadSyncRef = useRef<string | null>(null);
   const reportLoadRequestRef = useRef(0);
   const reportOwnerId = session?.user?.id ?? "local-user";
   // The page router owns the only durable id we recognise. When the user
   // is in "new" mode ``currentAnalysisTaskId`` is null; after the
   // sessionless first turn is provisioned by the backend the
   // ``onSessionCreated`` callback below adopts the Codex-issued id.
-  const [localNewSession, setLocalNewSession] = useState(false);
+  const [localNewSession, setLocalNewSession] = useState(initialSessionId === "new");
   const localNewSessionRef = useRef<string | null>(null);
+  const draftReportIdRef = useRef<string | null>(null);
   const flow = useFlow(currentAnalysisTaskId, initialFlowMessages, {
     onSessionCreated: (sessionId) => {
       if (sessionId && sessionId !== currentAnalysisTaskId) {
+        if (draftReportIdRef.current) {
+          setOpenedReportThreadId(sessionId);
+          draftReportIdRef.current = null;
+        }
         setCurrentAnalysisTaskId(sessionId);
         if (typeof window !== "undefined" && window.location.pathname !== `/analysis/${sessionId}`) {
           window.history.pushState({ analysisSessionId: sessionId }, "", `/analysis/${sessionId}`);
@@ -192,6 +207,9 @@ export function AnalysisWorkspace() {
         localNewSessionRef.current = null;
       }
     },
+    onTurnSettled: async (sessionId) => (
+      flowNodesFromBackendSession(await getBackendAnalysisSession(sessionId))
+    ),
   });
   useEffect(() => {
     if (!localNewSession) return;
@@ -242,10 +260,98 @@ export function AnalysisWorkspace() {
     return () => { cancelled = true; };
   }, []);
   useEffect(() => {
+    if (!initialSessionId || initialSessionId === "new") return;
+    let cancelled = false;
+    const reportLoadRequestId = ++reportLoadRequestRef.current;
+    setCurrentAnalysisTaskId(initialSessionId);
+    setAnalysisTaskNotice("");
+    if (shouldUseBackendInteractiveReports()) setOpenedReportLoadingThreadId(initialSessionId);
+
+    void getBackendAnalysisSession(initialSessionId)
+      .then(async (detail) => {
+        if (cancelled || reportLoadRequestId !== reportLoadRequestRef.current) return;
+        const sessionRow = detail.session ?? detail.thread;
+        if (!sessionRow) throw new Error("analysis_session_not_found");
+        if (sessionRow.status === "archived") {
+          setCurrentAnalysisTaskId(null);
+          setSelectedAnalysisTask(null);
+          setInitialFlowMessages([]);
+          setOpenedReportId(null);
+          setOpenedReportThreadId(null);
+          setAnalysisThreads((threads) => threads.filter((thread) => thread.id !== sessionRow.id));
+          window.history.replaceState({ analysisSessionId: "new" }, "", "/analysis/new");
+          return;
+        }
+
+        setSelectedAnalysisTask(analysisThreadTitle(sessionRow));
+        setInitialFlowMessages(flowNodesFromBackendSession(detail));
+        setAnalysisThreads((threads) => {
+          if (threads.some((thread) => thread.id === sessionRow.id)) {
+            return threads.map((thread) => (thread.id === sessionRow.id ? sessionRow : thread));
+          }
+          return orderAnalysisThreads([sessionRow, ...threads]);
+        });
+
+        const initialReport = savedReportFromThreadMetadata(sessionRow.metadata);
+        if (initialReport) {
+          setOpenedReportId(initialReport.report.id);
+          setOpenedReportThreadId(initialSessionId);
+          setSavedReports((items) => [
+            initialReport,
+            ...items.filter((item) => item.report.id !== initialReport.report.id),
+          ]);
+        }
+
+        if (shouldUseBackendInteractiveReports()) {
+          try {
+            const reports = await listInteractiveReportsByThreadFromBackend(initialSessionId);
+            if (cancelled || reportLoadRequestId !== reportLoadRequestRef.current) return;
+            const latest = reports[0];
+            if (latest) {
+              setOpenedReportId(latest.report.id);
+              setOpenedReportThreadId(null);
+              setSavedReports((items) => [
+                latest,
+                ...items.filter((item) => item.report.id !== latest.report.id),
+              ]);
+            } else if (!initialReport) {
+              setOpenedReportId(null);
+              setOpenedReportThreadId(null);
+            }
+          } catch {
+            if (!cancelled && reportLoadRequestId === reportLoadRequestRef.current && !initialReport) {
+              setOpenedReportId(null);
+              setOpenedReportThreadId(null);
+            }
+          }
+        }
+      })
+      .catch(() => {
+        if (cancelled || reportLoadRequestId !== reportLoadRequestRef.current) return;
+        setInitialFlowMessages([]);
+        setAnalysisTaskNotice("无法加载该分析任务，请返回任务列表重试。");
+      })
+      .finally(() => {
+        if (!cancelled && reportLoadRequestId === reportLoadRequestRef.current) {
+          setOpenedReportLoadingThreadId(null);
+        }
+      });
+
+    return () => { cancelled = true; };
+  }, [initialSessionId]);
+  useEffect(() => {
     if (!currentAnalysisTaskId || !selectedAnalysisTask) return;
     const sessionId = currentAnalysisTaskId;
-    const hadLocalRunningFlow = hadLocalRunningFlowRef.current;
-    if (flow.running) hadLocalRunningFlowRef.current = true;
+    if (skipSelectedThreadSyncRef.current === sessionId) {
+      // useFlow displays the newly selected Session snapshot in an effect.
+      // During the selection render, flow.running can still belong to the
+      // previous Session; never let that transition frame reorder or retime
+      // the clicked row.
+      skipSelectedThreadSyncRef.current = null;
+      return;
+    }
+    const hadLocalRunningFlow = locallyRunningSessionIdsRef.current.has(sessionId);
+    if (flow.running) locallyRunningSessionIdsRef.current.add(sessionId);
     setAnalysisThreads((threads) => {
       const now = new Date().toISOString();
       const existing = threads.find((thread) => thread.id === sessionId);
@@ -267,20 +373,22 @@ export function AnalysisWorkspace() {
       };
       return [nextThread, ...threads.filter((thread) => thread.id !== sessionId)];
     });
-    if (!flow.running && hadLocalRunningFlow) hadLocalRunningFlowRef.current = false;
+    if (!flow.running && hadLocalRunningFlow) locallyRunningSessionIdsRef.current.delete(sessionId);
   }, [currentAnalysisTaskId, flow.running, selectedAnalysisTask]);
-  const isAdmin = true;
-  const isNewAnalysisTask = selectedAnalysisTask === null;
+  const showSystemEntry = Boolean(session?.user);
+  const isNewAnalysisTask = currentAnalysisTaskId === null && selectedAnalysisTask === null;
   const openedReport = savedReports.find((saved) => saved.report.id === openedReportId);
-  const openedReportBelongsToCurrentTask = openedReport?.report.source.threadId === currentAnalysisTaskId
-    || (currentAnalysisTaskId ? openedReportThreadId === currentAnalysisTaskId : false);
+  const openedReportBelongsToCurrentTask = openedReport?.report.source?.threadId === currentAnalysisTaskId
+    || (currentAnalysisTaskId ? openedReportThreadId === currentAnalysisTaskId : false)
+    || (localNewSession && draftReportIdRef.current === openedReport?.report.id);
   const flowReportBelongsToCurrentTask = Boolean(
     flow.reportArtifact
-    && (flow.reportArtifact.source.threadId === currentAnalysisTaskId),
+    && (flow.reportArtifact.source?.threadId === currentAnalysisTaskId),
   );
   const currentPanelReport = flowReportBelongsToCurrentTask ? flow.reportArtifact : openedReportBelongsToCurrentTask && openedReport ? openedReport.report : undefined;
-  const currentPanelVersion = openedReportBelongsToCurrentTask && openedReport ? openedReport.version : undefined;
-  const currentPanelReportLoading = openedReportLoadingThreadId === currentAnalysisTaskId;
+  const currentPanelReportLoading = Boolean(
+    currentAnalysisTaskId && openedReportLoadingThreadId === currentAnalysisTaskId,
+  );
   const analysisTaskGroups = useMemo(() => groupAnalysisThreads(analysisThreads), [analysisThreads]);
   const selectedThreadCount = selectedThreadIds.length;
   const currentAnalysisThread = currentAnalysisTaskId
@@ -334,13 +442,14 @@ export function AnalysisWorkspace() {
       toggleSelectedThread(thread.id);
       return;
     }
-    if (flow.running && thread.id !== currentAnalysisTaskId) {
-      setAnalysisTaskNotice("当前任务正在分析，停止回答后再切换任务。");
-      return;
-    }
     setAnalysisTaskNotice("");
+    draftReportIdRef.current = null;
+    skipSelectedThreadSyncRef.current = thread.id;
     setSelectedAnalysisTask(analysisThreadTitle(thread));
     setCurrentAnalysisTaskId(thread.id);
+    if (typeof window !== "undefined" && window.location.pathname !== `/analysis/${thread.id}`) {
+      window.history.pushState({ analysisSessionId: thread.id }, "", `/analysis/${thread.id}`);
+    }
     setInitialFlowMessages([]);
     setOpenedReportId(null);
     setOpenedReportThreadId(null);
@@ -427,6 +536,7 @@ export function AnalysisWorkspace() {
       return;
     }
     setAnalysisTaskNotice("");
+    draftReportIdRef.current = null;
     // New-session contract: "click new" only opens a blank page locally.
     // The first user message is what calls the backend (and only then a
     // Codex thread is provisioned). This guarantees that clicking "new"
@@ -453,16 +563,19 @@ export function AnalysisWorkspace() {
     // bug (P2-1) where ``useFlow(A)`` + ``flow.send(msg, B)`` could
     // route a message to the wrong session.
     if (isNewAnalysisTask || localNewSession) {
-      setSelectedAnalysisTask(taskTitleFromQuestion(content));
+      const sourceReportId = draftReportIdRef.current;
+      if (!sourceReportId) setSelectedAnalysisTask(taskTitleFromQuestion(content));
       setInitialFlowMessages([]);
-      setOpenedReportId(null);
-      setOpenedReportThreadId(null);
+      if (!sourceReportId) {
+        setOpenedReportId(null);
+        setOpenedReportThreadId(null);
+      }
       setMobilePane("analysisTask");
-      void flow.start(content);
+      void flow.start(content, sourceReportId ? { sourceReportId } : undefined);
     } else {
       if (isWaitingForFirstQuestion) {
         markCurrentThreadAsStarted(content);
-        void flow.start(content);
+        void flow.send(content);
       } else {
         flow.send(content);
       }
@@ -476,23 +589,25 @@ export function AnalysisWorkspace() {
       setOpenedReportId(null);
       setOpenedReportThreadId(null);
       setMobilePane("analysisTask");
-      void flow.start(question);
+      void flow.send(question);
       return;
     }
     // Sessionless first-turn for a suggestion as well.
-    setSelectedAnalysisTask(taskTitleFromQuestion(title));
+    const sourceReportId = draftReportIdRef.current;
+    if (!sourceReportId) setSelectedAnalysisTask(taskTitleFromQuestion(title));
     setInitialFlowMessages([]);
-    setOpenedReportId(null);
-    setOpenedReportThreadId(null);
+    if (!sourceReportId) {
+      setOpenedReportId(null);
+      setOpenedReportThreadId(null);
+    }
     setMobilePane("analysisTask");
     setLocalNewSession(true);
-    void flow.start(question);
+    void flow.start(question, sourceReportId ? { sourceReportId } : undefined);
   }
 
   async function handleSaveReport(saved: SavedInteractiveReport): Promise<SavedInteractiveReport> {
-    const previous = savedReports.find((item) => item.report.id === saved.report.id);
     if (!shouldUseBackendInteractiveReports()) throw new Error("分析结果存储不可用。");
-    const persisted = await saveInteractiveReportToBackend(saved.report, previous?.version, reportOwnerId);
+    const persisted = await saveInteractiveReportToBackend(saved.report, reportOwnerId);
     setSavedReports((reports) => [persisted, ...reports.filter((item) => item.report.id !== persisted.report.id)]);
     return persisted;
   }
@@ -503,7 +618,9 @@ export function AnalysisWorkspace() {
       return;
     }
     setAnalysisTaskNotice("");
-    const sourceThreadId = saved.report.source.threadId;
+    draftReportIdRef.current = null;
+    const sourceThreadId = saved.report.source?.threadId;
+    if (!sourceThreadId) return;
     setOpenedReportId(saved.report.id);
     setOpenedReportThreadId(null);
     setSelectedAnalysisTask(saved.report.title);
@@ -534,24 +651,27 @@ export function AnalysisWorkspace() {
     }
   }
 
-  async function handleCreateAnalysisFromReport(saved: SavedInteractiveReport) {
+  function handleCreateAnalysisFromReport(saved: SavedInteractiveReport) {
     if (flow.running) {
-      setAnalysisTaskNotice("当前任务正在分析，停止回答后再新建分析。");
+      setAnalysisTaskNotice("当前任务正在分析，停止回答后再新建会话。");
       return;
     }
     setAnalysisTaskNotice("");
     if (!shouldUseBackendInteractiveReports()) return;
-    const title = `${saved.report.title} 新分析`;
-    const created = await createAnalysisThreadFromReportBackend(saved.report.id, title, reportOwnerId);
-    setSelectedAnalysisTask(analysisThreadTitle(created.thread));
-    setCurrentAnalysisTaskId(created.thread.id);
+    const title = `${saved.report.title} 新会话`;
+    draftReportIdRef.current = saved.report.id;
+    setSelectedAnalysisTask(title);
+    setCurrentAnalysisTaskId(null);
     setInitialFlowMessages([]);
-    setOpenedReportId(created.saved.report.id);
-    setOpenedReportThreadId(created.thread.id);
-    setSavedReports((reports) => [created.saved, ...reports.filter((item) => item.report.id !== created.saved.report.id)]);
-    setAnalysisThreads((threads) => [created.thread, ...threads.filter((thread) => thread.id !== created.thread.id)]);
+    setOpenedReportId(saved.report.id);
+    setOpenedReportThreadId(null);
+    setLocalNewSession(true);
+    localNewSessionRef.current = `local_report_${Date.now().toString(36)}`;
     setActiveTool("analysis-workspace");
     setMobilePane("analysisTask");
+    if (typeof window !== "undefined") {
+      window.history.pushState({ analysisSessionId: "new" }, "", "/analysis/new");
+    }
   }
 
   function startResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -608,7 +728,7 @@ export function AnalysisWorkspace() {
               <NavIcon name={item.icon} />
             </button>
           ))}
-          {isAdmin && (
+          {showSystemEntry && (
             <button
               className={`icon-btn admin-nav ${activeTool === adminNavItem.id ? "active" : ""}`}
               type="button"
@@ -717,11 +837,20 @@ export function AnalysisWorkspace() {
           ) : (
             <div className="workbench-panel">
               <header className="panel-header"><span className="panel-kicker">GOVERNANCE</span><h2>系统</h2></header>
-              <div className="panel-brief-list">
-                <span>数据源连接</span>
-                <span>权限与 RLS</span>
-                <span>模型与工具配置</span>
-              </div>
+              <nav className="panel-brief-list panel-nav-list" aria-label="系统管理导航">
+                {systemSections.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={systemSection === item.id ? "active" : ""}
+                    aria-current={systemSection === item.id ? "page" : undefined}
+                    onClick={() => setSystemSection(item.id)}
+                  >
+                    <strong>{item.label}</strong>
+                    <small>{item.description}</small>
+                  </button>
+                ))}
+              </nav>
             </div>
           )}
         </aside>
@@ -732,7 +861,7 @@ export function AnalysisWorkspace() {
 
         <main className="main" data-mode={mode} data-tool={activeTool}>
           {activeTool === "system" ? (
-            <SystemMcpPage />
+            <SystemAdminPage section={systemSection} onSectionChange={setSystemSection} />
           ) : activeTool === "analysis-assets" ? (
              <MyAnalysisPage reports={savedReports} sharedReports={sharedReports} onOpenReport={handleOpenReport} onCreateAnalysis={handleCreateAnalysisFromReport} />
           ) : activeTool === "business-semantics" ? (
@@ -773,7 +902,7 @@ export function AnalysisWorkspace() {
                 <div className="workspace-resizer" role="separator" aria-label="调整分析工作台和当前任务资产宽度" aria-orientation="vertical" onPointerDown={startResize} onDoubleClick={() => setSplitPercent(40)}><span /></div>
 
                 <div className={`analysis-result-pane ${mobilePane !== "assetLibrary" ? "mobile-hidden" : ""}`}>
-                  <InteractiveReportPanel taskTitle={selectedAnalysisTask ?? "当前分析任务"} running={flow.running} loading={currentPanelReportLoading} initialReport={currentPanelReport ?? undefined} initialVersion={currentPanelVersion} onSaveReport={handleSaveReport} />
+                  <InteractiveReportPanel taskTitle={selectedAnalysisTask ?? "当前分析任务"} running={flow.running} loading={currentPanelReportLoading} initialReport={currentPanelReport ?? undefined} onSaveReport={handleSaveReport} />
                 </div>
               </section>
           </div>

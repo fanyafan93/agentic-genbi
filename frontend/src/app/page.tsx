@@ -4,6 +4,6 @@ import { SignInScreen } from "@/modules/auth/components/SignInScreen";
 
 export default async function HomePage() {
   const session = await auth();
-  if (!session?.user) return <SignInScreen />;
+  if (!session?.user || session.user.status === "disabled") return <SignInScreen />;
   return <AnalysisWorkspace />;
 }

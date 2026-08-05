@@ -59,7 +59,7 @@ def _validate_interactive_report(message: dict[str, Any], arguments: dict[str, A
 
 def _artifact_from_arguments(arguments: dict[str, Any], *, normalize: bool) -> dict[str, Any]:
     artifact = arguments.get("artifact")
-    if isinstance(artifact, dict):
+    if isinstance(artifact, dict) and artifact:
         source = dict(artifact.get("source") or {})
         source.setdefault("threadId", str(arguments.get("threadId") or arguments.get("thread_id") or source.get("threadId") or "codex_thread_pending"))
         source.setdefault("turnId", str(arguments.get("turnId") or arguments.get("turn_id") or source.get("turnId") or "codex_turn_pending"))

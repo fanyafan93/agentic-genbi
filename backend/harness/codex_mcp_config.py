@@ -91,6 +91,8 @@ def load_codex_mcp_servers_from_env(
 
 def load_runtime_codex_mcp_servers_from_env(
     environ: dict[str, str] | None = None,
+    *,
+    enabled_overrides: dict[str, bool] | None = None,
 ) -> list[CodexMcpServer]:
     """Return only MCP servers allowed for the analysis Codex runtime.
 
@@ -99,10 +101,18 @@ def load_runtime_codex_mcp_servers_from_env(
     are explicitly allowed by GenBI configuration.
     """
     env = environ if environ is not None else dict(os.environ)
+    if enabled_overrides is None and environ is None:
+        from backend.system_management import mcp_enabled_overrides
+
+        enabled_overrides = mcp_enabled_overrides()
+    effective_overrides = enabled_overrides or {}
     allowed_names = _allowed_runtime_server_names(env)
     servers: list[CodexMcpServer] = []
     for server in load_codex_mcp_servers_from_env(env):
-        if not _enabled_server(server, env=env):
+        if not effective_overrides.get(
+            server.name,
+            _enabled_server(server, env=env),
+        ):
             continue
         if allowed_names is not None and server.name not in allowed_names:
             continue
@@ -135,9 +145,23 @@ def to_codex_config_overrides(servers: Iterable[CodexMcpServer]) -> list[str]:
 
 def codex_mcp_server_statuses(
     environ: dict[str, str] | None = None,
+    *,
+    enabled_overrides: dict[str, bool] | None = None,
 ) -> list[CodexMcpServerStatus]:
     env = environ if environ is not None else dict(os.environ)
-    return [_server_status(server, env=env) for server in load_codex_mcp_servers_from_env(env)]
+    if enabled_overrides is None and environ is None:
+        from backend.system_management import mcp_enabled_overrides
+
+        enabled_overrides = mcp_enabled_overrides()
+    effective_overrides = enabled_overrides or {}
+    return [
+        _server_status(
+            server,
+            env=env,
+            enabled=effective_overrides.get(server.name),
+        )
+        for server in load_codex_mcp_servers_from_env(env)
+    ]
 
 
 def codex_mcp_server_status_payload(environ: dict[str, str] | None = None) -> dict[str, object]:
@@ -159,7 +183,12 @@ def test_codex_mcp_server(name: str, environ: dict[str, str] | None = None) -> d
     }
 
 
-def _server_status(server: CodexMcpServer, *, env: dict[str, str]) -> CodexMcpServerStatus:
+def _server_status(
+    server: CodexMcpServer,
+    *,
+    env: dict[str, str],
+    enabled: bool | None = None,
+) -> CodexMcpServerStatus:
     trusted = _trusted_server(server, env=env)
     command_available = _command_available(server.command)
     status = "trusted" if trusted else "ready" if command_available else "unavailable"
@@ -174,7 +203,7 @@ def _server_status(server: CodexMcpServer, *, env: dict[str, str]) -> CodexMcpSe
         name=server.name,
         command=server.command,
         args=server.args,
-        enabled=_enabled_server(server, env=env),
+        enabled=_enabled_server(server, env=env) if enabled is None else enabled,
         status=status,
         permission=_server_permission(server),
         trusted=trusted,

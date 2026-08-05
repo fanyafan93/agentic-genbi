@@ -251,6 +251,7 @@ class TurnStream:
         started_at = self.events[0].created_at
         completed_at = self.events[-1].created_at
         terminal = status in {"completed", "failed", "cancelled"}
+        metadata = _terminal_turn_metadata(self.events)
         self.turn_record = self.runtime.projection_store.save_turn(
             session_id=self.session_id,
             turn_id=self.turn_id,
@@ -261,6 +262,7 @@ class TurnStream:
             completed_at=completed_at if terminal else None,
             codex_session_id=self.accumulator.codex_session_id,
             codex_turn_id=self.accumulator.codex_turn_id,
+            metadata=metadata,
         )
 
     async def interrupt(self) -> TurnRecord:
@@ -384,6 +386,19 @@ def _empty_turn(*, turn_id: str, session_id: str, input_text: str) -> TurnRecord
         codexSessionId=None,
         codexTurnId=turn_id,
     )
+
+
+def _terminal_turn_metadata(events: list[AgentEvent]) -> dict[str, Any]:
+    for event in reversed(events):
+        if event.type != "turn/completed":
+            continue
+        metadata: dict[str, Any] = {}
+        for key in ("error", "detail"):
+            value = event.payload.get(key)
+            if value:
+                metadata[key] = str(value)
+        return metadata
+    return {}
 
 
 def _string_or_none(value: Any) -> str | None:

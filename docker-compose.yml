@@ -40,6 +40,7 @@ services:
       AUTH_DATABASE_URL: ${AUTH_DATABASE_URL:-postgresql://agentic_genbi:agentic_genbi_dev_password@postgres:5432/agentic_genbi?schema=public}
       GENBI_PERSISTENCE: ${GENBI_PERSISTENCE:-postgres}
       GENBI_CODEX_HOME: ${GENBI_CODEX_HOME:-/app/.codex-home}
+      GENBI_SYSTEM_API_TOKEN: ${GENBI_SYSTEM_API_TOKEN:-agentic-genbi-local-system-token-change-me}
     ports:
       - "8000:8000"
     volumes:
@@ -62,6 +63,11 @@ services:
       AUTH_URL: ${AUTH_URL:-http://localhost:3000}
       AUTH_SECRET: ${AUTH_SECRET:-agentic-genbi-local-dev-secret-change-me}
       AUTH_TRUST_HOST: ${AUTH_TRUST_HOST:-true}
+      GENBI_BACKEND_INTERNAL_URL: http://backend:8000
+      GENBI_SYSTEM_API_TOKEN: ${GENBI_SYSTEM_API_TOKEN:-agentic-genbi-local-system-token-change-me}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_REDIRECT_URI: ${FEISHU_REDIRECT_URI:-}
       NEXT_PUBLIC_API_BASE_URL: ${GENBI_PUBLIC_API_BASE_URL:-http://192.168.101.12:8000}
       NEXT_PUBLIC_GENBI_API_BASE_URL: ${GENBI_PUBLIC_API_BASE_URL:-http://192.168.101.12:8000}
       NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME: ${NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME:-backend}

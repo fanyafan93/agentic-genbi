@@ -20,5 +20,6 @@ export function mapFeishuProfile(profile: FeishuProfile) {
     email: profile.email || null,
     image: profile.avatar_url || profile.avatar_thumb || null,
     role: "user",
+    status: "active",
   };
 }

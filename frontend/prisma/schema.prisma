@@ -14,6 +14,7 @@ model User {
   emailVerified DateTime?
   image         String?
   role          String    @default("user")
+  status        String    @default("active")
   accounts      Account[]
   sessions      Session[]
   createdAt     DateTime  @default(now())
@@ -54,4 +55,41 @@ model VerificationToken {
   expires    DateTime
 
   @@unique([identifier, token])
+}
+
+model SystemPromptVersion {
+  id          String    @id @default(cuid())
+  promptKey   String
+  name        String
+  description String?
+  version     Int
+  content     String    @db.Text
+  status      String    @default("draft")
+  createdById String
+  createdAt   DateTime  @default(now())
+  publishedAt DateTime?
+
+  @@unique([promptKey, version])
+  @@index([promptKey, status])
+}
+
+model SystemSetting {
+  key         String   @id
+  value       Json
+  updatedById String
+  updatedAt   DateTime @updatedAt
+}
+
+model SystemAuditLog {
+  id         String   @id @default(cuid())
+  actorId    String
+  action     String
+  targetType String
+  targetId   String
+  before     Json?
+  after      Json?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([targetType, targetId])
 }

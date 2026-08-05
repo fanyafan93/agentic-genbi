@@ -11,7 +11,7 @@ from backend.harness.codex_mcp_config import (
     codex_mcp_server_status_payload,
     load_codex_mcp_servers_from_env,
     load_runtime_codex_mcp_servers_from_env,
-    test_codex_mcp_server,
+    test_codex_mcp_server as run_codex_mcp_server_test,
     to_codex_config_overrides,
 )
 
@@ -93,6 +93,21 @@ class LoadCodexMcpServersFromEnvTest(unittest.TestCase):
 
         self.assertEqual([server.name for server in servers], ["BI_doris", "GenBI_report"])
 
+    def test_runtime_loader_applies_persisted_enabled_override(self) -> None:
+        env = {
+            "GENBI_CODEX_MCP_COUNT": "1",
+            "GENBI_CODEX_MCP_1_NAME": "BI_doris",
+            "GENBI_CODEX_MCP_1_COMMAND": "npx",
+            "GENBI_CODEX_MCP_BI_doris_ENABLED": "true",
+        }
+
+        servers = load_runtime_codex_mcp_servers_from_env(
+            env,
+            enabled_overrides={"BI_doris": False},
+        )
+
+        self.assertEqual(servers, [])
+
     def test_status_marks_genbi_report_as_trusted_internal_tool(self) -> None:
         payload = codex_mcp_server_status_payload({
             "GENBI_CODEX_MCP_COUNT": "1",
@@ -108,7 +123,7 @@ class LoadCodexMcpServersFromEnvTest(unittest.TestCase):
         self.assertEqual(server["tools"][0]["name"], "create_interactive_report")
 
     def test_can_test_configured_mcp_server(self) -> None:
-        result = test_codex_mcp_server("GenBI_report", {
+        result = run_codex_mcp_server_test("GenBI_report", {
             "GENBI_CODEX_MCP_COUNT": "1",
             "GENBI_CODEX_MCP_1_NAME": "GenBI_report",
             "GENBI_CODEX_MCP_1_COMMAND": "python",

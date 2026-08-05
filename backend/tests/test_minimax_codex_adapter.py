@@ -171,6 +171,34 @@ class MinimaxCodexAdapterTest(unittest.TestCase):
         self.assertIn("event: response.failed", text)
         self.assertIn("minimax_stream_timeout", text)
 
+    def test_iter_rewritten_sse_preserves_utf8_split_across_read_chunks(self) -> None:
+        payload = {
+            "type": "response.output_text.delta",
+            "delta": "你好！有什么我可以帮你的吗？随时告诉我。",
+        }
+        raw = ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+        split_at = raw.index("什".encode("utf-8")) + 1
+
+        class SplitUtf8Response:
+            def __init__(self) -> None:
+                self.chunks = [raw[:split_at], raw[split_at:]]
+                self.closed = False
+
+            def read(self, size: int) -> bytes:
+                return self.chunks.pop(0) if self.chunks else b""
+
+            def close(self) -> None:
+                self.closed = True
+
+        response = SplitUtf8Response()
+
+        chunks = list(_iter_rewritten_sse(response, []))
+
+        self.assertTrue(response.closed)
+        text = b"".join(chunks).decode("utf-8")
+        self.assertNotIn("\ufffd", text)
+        self.assertIn(payload["delta"], text)
+
 
 if __name__ == "__main__":
     unittest.main()

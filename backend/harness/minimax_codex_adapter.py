@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import urllib.error
@@ -226,15 +227,17 @@ def _rewrite_sse_block(block: str, namespace_maps: Iterable[NamespaceToolMap]) -
 
 def _iter_rewritten_sse(response: Any, namespace_maps: list[NamespaceToolMap]) -> Iterable[bytes]:
     buffer = ""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     try:
         while True:
             chunk = response.read(4096)
             if not chunk:
                 break
-            buffer += chunk.decode("utf-8", errors="replace")
+            buffer += decoder.decode(chunk, final=False)
             while "\n\n" in buffer:
                 block, buffer = buffer.split("\n\n", 1)
                 yield (_rewrite_sse_block(block, namespace_maps) + "\n\n").encode("utf-8")
+        buffer += decoder.decode(b"", final=True)
         if buffer:
             yield _rewrite_sse_block(buffer, namespace_maps).encode("utf-8")
     except TimeoutError:

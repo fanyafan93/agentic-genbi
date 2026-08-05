@@ -38,7 +38,8 @@ export type InteractiveReport = {
   chartSpecs: Record<string, ReportChartSpec>;
   gridSpecs: Record<string, ReportGridSpec>;
   datasets?: Record<string, { rows: ReportDatasetRow[] }>;
-  source: {
+  originType?: "codex" | "seed" | "import" | "manual";
+  source?: {
     threadId: string;
     turnId: string;
   };

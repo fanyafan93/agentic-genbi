@@ -367,6 +367,46 @@ class _MissingTerminalRuntime:
         )
 
 
+class _FailingAfterStartedRuntime:
+    runtime_name = "openai-codex"
+    enabled = True
+
+    async def async_stream(self, question: str, *, context: dict):
+        codex_thread_id = "codex_thread_runtime_error"
+        yield AgentEvent(
+            type="genbi/thread/provisioned",
+            turn_id="codex_turn_runtime_error",
+            payload={
+                "eventSource": "genbi",
+                "runtime": "openai-codex",
+                "codex_thread_id": codex_thread_id,
+                "thread_id": codex_thread_id,
+            },
+        )
+        yield AgentEvent(
+            type="genbi/turn/provisioned",
+            turn_id="codex_turn_runtime_error",
+            payload={
+                "eventSource": "genbi",
+                "runtime": "openai-codex",
+                "codex_thread_id": codex_thread_id,
+                "codex_turn_id": "codex_turn_runtime_error",
+                "thread_id": codex_thread_id,
+                "turn_id": "codex_turn_runtime_error",
+            },
+        )
+        yield AgentEvent(
+            type="turn/started",
+            turn_id="codex_turn_runtime_error",
+            payload={
+                "eventSource": "codex",
+                "codex_thread_id": codex_thread_id,
+                "codex_turn_id": "codex_turn_runtime_error",
+            },
+        )
+        raise RuntimeError("report projection exploded")
+
+
 class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
     def test_default_analysis_runtime_uses_codex_runtime_when_configured(self) -> None:
         with patch.dict("os.environ", {"GENBI_ANALYSIS_RUNTIME": "codex"}, clear=False):
@@ -419,6 +459,30 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(listed.json()["servers"][0]["approval"], "trusted")
             self.assertEqual(tested.status_code, 200)
             self.assertTrue(tested.json()["ok"])
+
+    def test_system_mcp_server_api_requires_internal_token_when_configured(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "GENBI_SYSTEM_API_TOKEN": "internal-system-token",
+                "GENBI_CODEX_MCP_COUNT": "1",
+                "GENBI_CODEX_MCP_1_NAME": "GenBI_report",
+                "GENBI_CODEX_MCP_1_COMMAND": "python",
+            },
+            clear=False,
+        ):
+            client = TestClient(
+                create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled())
+            )
+
+            denied = client.get("/api/system/mcp/servers")
+            allowed = client.get(
+                "/api/system/mcp/servers",
+                headers={"X-GenBI-System-Token": "internal-system-token"},
+            )
+
+            self.assertEqual(denied.status_code, 401)
+            self.assertEqual(allowed.status_code, 200)
 
     def test_analysis_thread_turn_api_streams_codex_events_and_persists_thread(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -854,6 +918,29 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(detail.json()["session"]["latestTurnStatus"], "failed")
             self.assertEqual(detail.json()["turns"][0]["status"], "failed")
 
+    def test_runtime_exception_marks_provisioned_turn_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_FailingAfterStartedRuntime(),  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app, raise_server_exceptions=False)
+
+            response = client.post("/api/analysis/sessions/turns", json={"message": "generate report"})
+            detail = client.get("/api/analysis/sessions/codex_thread_runtime_error")
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(detail.status_code, 200)
+            self.assertEqual(detail.json()["session"]["status"], "active")
+            self.assertEqual(detail.json()["session"]["latestTurnStatus"], "failed")
+            turn = detail.json()["turns"][0]
+            self.assertEqual(turn["id"], "codex_turn_runtime_error")
+            self.assertEqual(turn["status"], "failed")
+            self.assertIsNotNone(turn["completedAt"])
+            self.assertEqual(turn["metadata"].get("error"), "codex_runtime_exception")
+            self.assertIn("report projection exploded", turn["metadata"].get("detail", ""))
+
     def test_interrupted_terminal_event_persists_interrupted_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
@@ -1127,7 +1214,6 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
                 json={
                     **report_payload,
                     "title": "Current Report Updated",
-                    "expectedVersion": saved_v1.json()["version"]["version"],
                     "datasets": {"rows": {"rows": [{"channel": "A", "sales": 2}]}},
                     "dataUpdatedAt": "2026-08-04T10:00:00+08:00",
                 },
@@ -1358,6 +1444,59 @@ class SessionlessStartTest(unittest.IsolatedAsyncioTestCase):
             assert thread is not None
             self.assertEqual(thread["session"]["id"], "codex_thread_created")
             self.assertEqual(thread["session"]["codexSessionId"], "codex_thread_created")
+
+    def test_report_reference_is_resolved_into_the_sessionless_first_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            report_store = InteractiveReportStore(Path(temp_dir) / "interactive-reports.json")
+            runtime = _FakeCodexRuntime()
+            app = create_app(
+                analysis_runtime=runtime,  # type: ignore[arg-type]
+                interactive_report_store=report_store,
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+            report_payload = {
+                "id": "report_first_turn_context",
+                "title": "抖音销售日报",
+                "subtitle": "8 月 1 日至 4 日",
+                "artifactType": "interactive_report",
+                "renderer": "puck",
+                "ownerId": "owner_1",
+                "document": {"content": [], "root": {"props": {}}},
+                "filters": [],
+                "queries": {},
+                "chartSpecs": {},
+                "gridSpecs": {},
+                "datasets": {"daily": {"rows": [{"dt": "2026-08-02", "gmv": 662852.06}]}},
+            }
+            self.assertEqual(client.post("/api/analysis/reports", json=report_payload).status_code, 200)
+
+            response = client.post(
+                "/api/analysis/sessions/turns",
+                json={
+                    "message": "哪一天的 GMV 最高？",
+                    "metadata": {"source_report_id": "report_first_turn_context"},
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            runtime_context = runtime.contexts[0]
+            self.assertEqual(
+                runtime_context["initial_report_artifact"]["id"],
+                "report_first_turn_context",
+            )
+            self.assertEqual(
+                runtime_context["initial_report_artifact"]["datasets"]["daily"]["rows"][0]["gmv"],
+                662852.06,
+            )
+            detail = thread_store.get_thread("codex_thread_created")
+            assert detail is not None
+            self.assertEqual(detail["session"]["title"], "抖音销售日报 新会话")
+            self.assertEqual(
+                detail["session"]["metadata"]["initial_report_artifact"]["id"],
+                "report_first_turn_context",
+            )
 
     def test_sessions_turns_rejects_blank_message(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2953,6 +3092,68 @@ class NoGenBIItemTest(unittest.IsolatedAsyncioTestCase):
             assert detail is not None
             sequences = [item["sequence"] for item in detail["codexItemProjections"]]
             self.assertEqual(sequences, [0, 1])
+
+    def test_completed_reasoning_summary_is_persisted_for_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            thread_store.session_catalog.register_session(
+                "codex_thread_reasoning",
+                product_kind="analysis_task",
+                title="reasoning replay",
+                user_id=None,
+                status="active",
+            )
+            thread_store.save_turn(
+                thread_id="codex_thread_reasoning",
+                turn_id="codex_turn_reasoning",
+                question="analyze",
+                input_kind="start",
+                product_kind="analysis_task",
+                user_id=None,
+                events=[
+                    AgentEvent(
+                        type="item/reasoning/summaryTextDelta",
+                        turn_id="codex_turn_reasoning",
+                        created_at="2026-08-05T12:00:00Z",
+                        payload={
+                            "codex_method": "item/reasoning/summaryTextDelta",
+                            "codex_thread_id": "codex_thread_reasoning",
+                            "codex_turn_id": "codex_turn_reasoning",
+                            "codex_item_id": "reasoning_1",
+                            "codex_item_type": "reasoning",
+                            "summary_index": 0,
+                            "delta": "正在核验",
+                        },
+                    ),
+                    AgentEvent(
+                        type="item/completed",
+                        turn_id="codex_turn_reasoning",
+                        created_at="2026-08-05T12:00:01Z",
+                        payload={
+                            "codex_method": "item/completed",
+                            "codex_thread_id": "codex_thread_reasoning",
+                            "codex_turn_id": "codex_turn_reasoning",
+                            "codex_item_id": "reasoning_1",
+                            "codex_item_type": "reasoning",
+                            "summary": "正在核验数据。",
+                        },
+                    ),
+                    AgentEvent(
+                        type="turn/completed",
+                        turn_id="codex_turn_reasoning",
+                        payload={"status": "completed"},
+                    ),
+                ],
+            )
+
+            detail = thread_store.get_thread("codex_thread_reasoning")
+            assert detail is not None
+            projections = detail["codexItemProjections"]
+            self.assertEqual(len(projections), 1)
+            self.assertEqual(projections[0]["itemType"], "reasoning")
+            self.assertEqual(projections[0]["status"], "completed")
+            self.assertEqual(projections[0]["payload"]["summary"], "正在核验数据。")
+            self.assertNotIn("content", projections[0]["payload"])
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import { interactiveReportFixture } from "./fixtures/interactive-report";
 const savedReport: SavedInteractiveReport = {
   report: {
     ...interactiveReportFixture,
+    originType: "codex",
     title: "渠道销售概览",
     subtitle: "按渠道聚合",
     document: {
@@ -35,7 +36,6 @@ const savedReport: SavedInteractiveReport = {
       zones: {},
     },
   },
-  version: 1,
   savedAt: "2026-08-04T10:00:00+08:00",
 };
 
@@ -58,19 +58,39 @@ describe("report center cards", () => {
     expect(screen.getByText("这是保存后的真实报表内容。")).toBeTruthy();
   });
 
-  test("routes report actions without calling delete backend", () => {
+  test("shows return and new-session actions for a report with a source session", () => {
     const onOpenReport = vi.fn();
     const onCreateAnalysis = vi.fn();
     const alert = vi.spyOn(window, "alert").mockImplementation(() => {});
     render(<MyAnalysisPage reports={[savedReport]} sharedReports={[]} onOpenReport={onOpenReport} onCreateAnalysis={onCreateAnalysis} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "回到原任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "回到会话" }));
     expect(onOpenReport).toHaveBeenCalledWith(savedReport);
 
-    fireEvent.click(screen.getByRole("button", { name: "新建分析" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
     expect(onCreateAnalysis).toHaveBeenCalledWith(savedReport);
 
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
     expect(alert).toHaveBeenCalledWith("删除功能待接入后端。");
+  });
+
+  test("shows only new-session action for a report without a source session", () => {
+    const onOpenReport = vi.fn();
+    const onCreateAnalysis = vi.fn();
+    const seedReport: SavedInteractiveReport = {
+      ...savedReport,
+      report: {
+        ...savedReport.report,
+        originType: "seed",
+        source: undefined,
+      },
+    };
+
+    render(<MyAnalysisPage reports={[seedReport]} sharedReports={[]} onOpenReport={onOpenReport} onCreateAnalysis={onCreateAnalysis} />);
+
+    expect(screen.queryByRole("button", { name: "回到会话" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    expect(onCreateAnalysis).toHaveBeenCalledWith(seedReport);
+    expect(onOpenReport).not.toHaveBeenCalled();
   });
 });

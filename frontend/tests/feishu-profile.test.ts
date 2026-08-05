@@ -18,6 +18,7 @@ describe("mapFeishuProfile", () => {
       email: "jason@example.com",
       image: "https://example.com/avatar.png",
       role: "user",
+      status: "active",
     });
   });
 

@@ -107,6 +107,46 @@ test("does not replace empty start questions with a sample prompt", async () => 
   expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 });
 
+test("sends a report-backed draft through the sessionless first-turn endpoint", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sseResponse([
+    {
+      type: "session/created",
+      turn_id: "turn_report_draft",
+      payload: {
+        sessionId: "thread_report_draft",
+        codexThreadId: "thread_report_draft",
+      },
+    },
+    {
+      type: "turn/completed",
+      turn_id: "turn_report_draft",
+      payload: { status: "completed" },
+    },
+  ])));
+
+  const client = new BackendAnalysisAgentClient("http://backend.test");
+  const input = {
+    kind: "start" as const,
+    question: "哪一天的 GMV 最高？",
+    sessionId: null,
+    context: { sourceReportId: "report_current" },
+  };
+
+  await collect(client.send(input));
+
+  expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions/turns/stream");
+  const requestInit = vi.mocked(fetch).mock.calls[0]?.[1];
+  expect(requestInit).toBeDefined();
+  const body = JSON.parse(String(requestInit?.body));
+  expect(body).toEqual({
+    message: "哪一天的 GMV 最高？",
+    metadata: {
+      frontend_client: "analysis_task",
+      source_report_id: "report_current",
+    },
+  });
+});
+
 describe("analysis backend client event mapping", () => {
   test("preserves backend thread id on new analysis turns", () => {
     const events = Array.from(mapBackendEvents([
@@ -170,7 +210,7 @@ describe("analysis backend client event mapping", () => {
     });
   });
 
-  test("streams assistant deltas into one Codex turn message and replaces it with the final content", () => {
+  test("does not emit a second visible message when completed content matches streamed deltas", () => {
     const events = Array.from(mapBackendEvents([
       {
         type: "item/agentMessage/delta",
@@ -218,7 +258,6 @@ describe("analysis backend client event mapping", () => {
     expect(events).toEqual([
       expect.objectContaining({ type: "tokens", nodeId: "agent-turn_analysis_stream", text: "hello, " }),
       expect.objectContaining({ type: "tokens", nodeId: "agent-turn_analysis_stream", text: "complete reply." }),
-      expect.objectContaining({ type: "agent", nodeId: "agent-turn_analysis_stream", content: "hello, complete reply.", mode: "replace" }),
     ]);
     expect(events[0]).toMatchObject({
       turnId: "turn_analysis_stream",
@@ -795,7 +834,7 @@ describe("analysis backend client event mapping", () => {
     await expect(listBackendAnalysisSessions()).resolves.toEqual([
       { id: "session_real", latestQuestion: "real question", updatedAt: "2026-08-03T10:00:00Z" },
     ]);
-    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions");
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions?limit=200");
   });
 
   test("streams backend events as soon as the runtime emits them", async () => {
@@ -1004,12 +1043,254 @@ describe("analysis backend client event mapping", () => {
         content: "我来查询。",
         activity: [
           {
-            kind: "tool",
-            label: "BI_doris / mysql_query",
-            count: 2,
-            details: ["SELECT 1", "SELECT 2"],
+          kind: "tool",
+          label: "BI_doris / mysql_query",
+          count: 2,
+          details: [
+            expect.stringMatching(/Arguments:[\s\S]*SELECT 1/),
+            expect.stringMatching(/Arguments:[\s\S]*SELECT 2/),
+          ],
           },
         ],
+      },
+    ]);
+  });
+
+  test("restores reasoning and tools by Codex sequence before the final answer", () => {
+    const nodes = flowNodesFromBackendSession({
+      session: { id: "session_reasoning" },
+      turns: [{
+        id: "turn_reasoning",
+        question: "分析渠道销售",
+        createdAt: "2026-08-05T10:00:00Z",
+        completedAt: "2026-08-05T10:01:36Z",
+      }],
+      codexItemProjections: [
+        {
+          codexItemId: "message_1",
+          genbiTurnId: "turn_reasoning",
+          itemType: "agentMessage",
+          status: "completed",
+          sequence: 2,
+          payload: { content: "最终结论。" },
+          createdAt: "2026-08-05T10:00:01Z",
+        },
+        {
+          codexItemId: "tool_1",
+          genbiTurnId: "turn_reasoning",
+          itemType: "mcpToolCall",
+          status: "completed",
+          sequence: 1,
+          payload: {
+            mcp_server: "BI_doris",
+            mcp_tool: "mysql_query",
+            mcp_arguments: { sql: "SELECT 1" },
+          },
+          createdAt: "2026-08-05T10:00:02Z",
+        },
+        {
+          codexItemId: "reasoning_1",
+          genbiTurnId: "turn_reasoning",
+          itemType: "reasoning",
+          status: "completed",
+          sequence: 0,
+          payload: { summary: "正在核验数据。" },
+          createdAt: "2026-08-05T10:00:03Z",
+        },
+      ],
+    });
+
+    expect(nodes[1]).toMatchObject({
+      role: "agent",
+      content: "最终结论。",
+      processStartedAt: "2026-08-05T10:00:00Z",
+      processCompletedAt: "2026-08-05T10:01:36Z",
+      activity: [
+        { kind: "reasoning", itemId: "reasoning_1:0", content: "正在核验数据。" },
+        {
+          kind: "tool",
+          itemId: "tool_1",
+          label: "BI_doris / mysql_query",
+          state: "done",
+        },
+      ],
+    });
+  });
+
+  test("restores failed and successful tool attempts from native item status without grouping them", () => {
+    const nodes = flowNodesFromBackendSession({
+      session: { id: "session_retry" },
+      turns: [{
+        id: "turn_retry",
+        question: "查询当前时间",
+        status: "completed",
+        createdAt: "2026-08-05T10:00:00Z",
+        completedAt: "2026-08-05T10:00:10Z",
+      }],
+      codexItemProjections: [
+        {
+          codexItemId: "tool_failed",
+          genbiTurnId: "turn_retry",
+          itemType: "mcpToolCall",
+          status: "completed",
+          sequence: 0,
+          payload: {
+            mcp_server: "BI_doris",
+            mcp_tool: "mysql_query",
+            mcp_status: "failed",
+            mcp_arguments: { sql: "SELECT NOW(), CURRENT_TIMESTAMP" },
+          },
+          createdAt: "2026-08-05T10:00:01Z",
+        },
+        {
+          codexItemId: "tool_done",
+          genbiTurnId: "turn_retry",
+          itemType: "mcpToolCall",
+          status: "completed",
+          sequence: 1,
+          payload: {
+            mcp_server: "BI_doris",
+            mcp_tool: "mysql_query",
+            mcp_status: "completed",
+            mcp_arguments: { sql: "SELECT NOW()" },
+          },
+          createdAt: "2026-08-05T10:00:02Z",
+        },
+      ],
+    });
+
+    expect(nodes[1]).toMatchObject({
+      role: "agent",
+      activity: [
+        { kind: "tool", itemId: "tool_failed", state: "failed" },
+        { kind: "tool", itemId: "tool_done", state: "done" },
+      ],
+    });
+  });
+
+  test("hydrates legacy replay items from per-turn timeline", () => {
+    const nodes = flowNodesFromBackendSession({
+      session: { id: "thread_legacy", title: "legacy question" },
+      turns: [
+        {
+          id: "turn_legacy",
+          question: "legacy question",
+          inputText: "legacy question",
+          createdAt: "2026-08-03T10:00:00Z",
+          timeline: [
+            {
+              codex_item_id: "legacy_user_turn_legacy",
+              item_type: "userMessage",
+              status: "completed",
+              sequence: -1,
+              payload: { content: "legacy question" },
+              created_at: "2026-08-03T10:00:00Z",
+            },
+            {
+              codex_item_id: "legacy_agent_turn_legacy",
+              item_type: "agentMessage",
+              status: "completed",
+              sequence: 0,
+              payload: { content: "legacy answer" },
+              created_at: "2026-08-03T10:00:01Z",
+            },
+          ],
+        },
+      ],
+    } as Parameters<typeof flowNodesFromBackendSession>[0]);
+
+    expect(nodes).toMatchObject([
+      { role: "user", content: "legacy question" },
+      { role: "agent", content: "legacy answer" },
+    ]);
+  });
+
+  test("maps reasoning summary deltas to stable process events", () => {
+    const events = Array.from(mapBackendEvents([
+      {
+        type: "item/reasoning/summaryTextDelta",
+        turn_id: "turn_reasoning_summary",
+        created_at: "2026-08-05T10:00:00Z",
+        payload: {
+          codex_method: "item/reasoning/summaryTextDelta",
+          codex_item_type: "reasoning",
+          codex_item_id: "reasoning_1",
+          summary_index: 0,
+          delta: "正在检查数据。",
+        },
+      },
+    ], "start"));
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "process",
+        nodeId: "agent-turn_reasoning_summary",
+        text: "正在检查数据。",
+        mode: "delta",
+        itemId: "reasoning_1:0",
+        codexItemId: "reasoning_1",
+      }),
+    ]);
+  });
+
+  test("maps completed reasoning summaries as authoritative replacements", () => {
+    const events = Array.from(mapBackendEvents([
+      {
+        type: "item/completed",
+        turn_id: "turn_reasoning_summary",
+        created_at: "2026-08-05T10:00:01Z",
+        payload: {
+          codex_method: "item/completed",
+          codex_item_type: "reasoning",
+          codex_item_id: "reasoning_1",
+          summary: "正在检查数据。",
+        },
+      },
+    ], "start"));
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "process",
+        nodeId: "agent-turn_reasoning_summary",
+        text: "正在检查数据。",
+        mode: "replace",
+        itemId: "reasoning_1:0",
+        codexItemId: "reasoning_1",
+      }),
+    ]);
+  });
+
+  test("deduplicates the same item returned in projections and turn timeline", () => {
+    const duplicateItem = {
+      codexItemId: "agent_item_1",
+      genbiTurnId: "turn_1",
+      itemType: "agentMessage",
+      status: "completed",
+      payload: { content: "single answer" },
+      createdAt: "2026-08-05T10:00:01Z",
+    };
+    const nodes = flowNodesFromBackendSession({
+      session: { id: "session_1" },
+      turns: [
+        {
+          id: "turn_1",
+          question: "hello",
+          createdAt: "2026-08-05T10:00:00Z",
+          timeline: [duplicateItem],
+        },
+      ],
+      codexItemProjections: [duplicateItem],
+    });
+
+    expect(nodes).toEqual([
+      { id: "user-turn_1", role: "user", content: "hello" },
+      {
+        id: "agent-turn_1",
+        role: "agent",
+        content: "single answer",
+        mode: "replace",
+        activity: [],
+        activeItemId: "agent_item_1",
       },
     ]);
   });
@@ -1036,8 +1317,36 @@ describe("analysis backend client event mapping", () => {
       type: "step",
       label: "BI_doris / mysql_query",
       state: "done",
-      detail: "SELECT 1 AS one",
+      detail: expect.stringMatching(/Arguments:[\s\S]*SELECT 1 AS one/),
       itemId: undefined,
+    });
+  });
+
+  test("keeps tool arguments and results in expandable detail sections", () => {
+    const events = Array.from(mapBackendEvents([
+      {
+        type: "item/completed",
+        turn_id: "turn_mcp_detail",
+        created_at: "2026-08-05T10:00:00Z",
+        payload: {
+          codex_method: "item/completed",
+          codex_item_type: "mcpToolCall",
+          codex_item_id: "tool_1",
+          mcp_server: "BI_doris",
+          mcp_tool: "mysql_query",
+          mcp_status: "completed",
+          mcp_arguments: { sql: "SELECT 1 AS one" },
+          mcp_result: { content: [{ type: "text", text: "one row" }] },
+        },
+      },
+    ], "start"));
+
+    expect(events[0]).toMatchObject({
+      type: "step",
+      label: "BI_doris / mysql_query",
+      state: "done",
+      detail: expect.stringMatching(/Arguments:[\s\S]*SELECT 1 AS one[\s\S]*Result:[\s\S]*one row/),
+      itemId: "tool_1",
     });
   });
 
