@@ -12,10 +12,6 @@ LOGGER = logging.getLogger(__name__)
 
 from backend.config import check_runtime_env, load_project_env
 from backend.analysis.asset_store import AnalysisAssetReopenContext, AnalysisAssetStore
-from backend.analysis.interactive_report_store import (
-    InteractiveReportStore,
-    asdict_report,
-)
 from backend.business_semantics.finereport_reports import FineReportReportRepository
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
 from backend.harness.codex_mcp_config import codex_mcp_server_status_payload, test_codex_mcp_server
@@ -29,11 +25,22 @@ from backend.harness.codex_projection_store import (
 )
 from backend.persistence.postgres_stores import (
     build_postgres_analysis_asset_store,
+    build_postgres_report_store,
     build_postgres_stores,
     build_postgres_session_catalog,
     build_postgres_codex_projection_store,
     postgres_persistence_enabled,
 )
+from backend.reports.models import report_to_payload, share_to_payload
+from backend.reports.query_service import (
+    MySqlQueryRunner,
+    ReportFilterError,
+    ReportQueryExecutionError,
+    ReportQueryNotFound,
+    ReportQueryService,
+)
+from backend.reports.schema import ReportValidationError
+from backend.reports.store import ReportStore
 from backend.system_management import runtime_policy_overrides
 from backend.business_semantics.knowledge_store import KnowledgeStore
 # P2-3: responsibility split.
@@ -78,6 +85,8 @@ def create_app(
     knowledge_store: KnowledgeStore | None = None,
     analysis_runtime: CodexSdkAnalysisRuntime | None = None,
     analysis_asset_store: AnalysisAssetStore | None = None,
+    report_store: Any | None = None,
+    report_query_service: ReportQueryService | None = None,
     interactive_report_store: Any | None = None,
     session_catalog: SessionCatalog | None = None,
     codex_projection_store: CodexProjectionStore | None = None,
@@ -166,41 +175,28 @@ def create_app(
         reopenContext: AnalysisAssetReopenContextBody
         metadata: dict[str, Any] = Field(default_factory=dict)
 
-    class InteractiveReportSourceBody(BaseModel):
-        threadId: str = Field(min_length=1)
-        turnId: str = Field(min_length=1)
-
-    class InteractiveReportBody(BaseModel):
-        id: str = Field(min_length=1)
+    class ReportConfigBody(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        ownerId: str = Field(default="local-user", min_length=1)
         title: str = Field(min_length=1)
         subtitle: str = Field(min_length=1)
-        artifactType: str = "interactive_report"
-        renderer: str = "puck"
-        document: dict[str, Any]
-        filters: list[dict[str, Any]] = Field(default_factory=list)
+        layout: dict[str, Any]
+        filters: dict[str, Any] = Field(default_factory=dict)
+        charts: dict[str, Any] = Field(default_factory=dict)
+        tables: dict[str, Any] = Field(default_factory=dict)
         queries: dict[str, Any] = Field(default_factory=dict)
-        chartSpecs: dict[str, Any] = Field(default_factory=dict)
-        gridSpecs: dict[str, Any] = Field(default_factory=dict)
-        datasets: dict[str, Any] = Field(default_factory=dict)
-        source: InteractiveReportSourceBody | None = None
-        originType: Literal["codex", "seed", "import", "manual"] | None = None
-        ownerId: str = Field(min_length=1)
-        dataUpdatedAt: str | None = None
-        derivedFromReportId: str | None = None
-
-    class InteractiveReportRenameBody(BaseModel):
-        ownerId: str = Field(min_length=1)
-        title: str = Field(min_length=1)
 
     class ReportShareBody(BaseModel):
+        model_config = ConfigDict(extra="forbid")
         ownerId: str = Field(default="local-user", min_length=1)
         recipientUserId: str = Field(min_length=1)
         permission: Literal["view", "view_and_reuse"]
 
-    class ReportAnalysisSessionBody(BaseModel):
-        userId: str | None = None
-        title: str | None = None
-        metadata: dict[str, Any] = Field(default_factory=dict)
+    class ReportQueryBody(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        filters: dict[str, Any] = Field(default_factory=dict)
+        page: int = Field(default=1, ge=1)
+        pageSize: int = Field(default=50, ge=1, le=500)
 
     class AnalysisSessionUpdateBody(BaseModel):
         """Request body for ``PATCH /api/analysis/sessions/{sessionId}``.
@@ -373,12 +369,20 @@ def create_app(
     configured_knowledge_store = knowledge_store or _build_default_knowledge_store()
     configured_analysis_runtime = analysis_runtime or build_default_analysis_runtime()
     configured_analysis_asset_store = analysis_asset_store or _build_default_analysis_asset_store()
-    configured_interactive_report_store = interactive_report_store or _build_default_interactive_report_store()
+    configured_report_store = (
+        report_store
+        or interactive_report_store
+        or _build_default_report_store()
+    )
+    configured_report_query_service = (
+        report_query_service
+        or ReportQueryService(MySqlQueryRunner())
+    )
     configured_session_catalog = session_catalog or _build_default_session_catalog()
     configured_codex_projection_store = codex_projection_store or _build_default_codex_projection_store()
     # P2-3: instantiate the service triad once per app. The rest of the
     # routes only touch the services, not the raw stores directly.
-    configured_artifact_projector = ArtifactProjector(configured_interactive_report_store)
+    configured_artifact_projector = ArtifactProjector(configured_report_store)
     configured_turn_runner = CodexTurnRunner(
         analysis_runtime=configured_analysis_runtime,
         session_catalog=configured_session_catalog,
@@ -403,21 +407,17 @@ def create_app(
         metadata = dict(raw_metadata or {})
         source_report_id = str(metadata.get("source_report_id") or "").strip()
         for key in (
-            "initial_report_id",
-            "initial_report_artifact",
-            "initial_report_saved_at",
+            "initial_report",
             "session_title",
         ):
             metadata.pop(key, None)
         if source_report_id:
-            report = configured_interactive_report_store.get_report(source_report_id)
+            report = configured_report_store.get_report(source_report_id)
             if not report:
-                raise HTTPException(status_code=404, detail="interactive_report_not_found")
+                raise HTTPException(status_code=404, detail="report_not_found")
             metadata.update({
                 "source_report_id": report.id,
-                "initial_report_id": report.id,
-                "initial_report_artifact": interactive_report_payload(report),
-                "initial_report_saved_at": report.updatedAt,
+                "initial_report": report_to_payload(report),
                 "session_title": f"{report.title} 新会话",
             })
         metadata = _metadata_with_principal(metadata, principal)
@@ -960,125 +960,163 @@ def create_app(
             raise HTTPException(status_code=404, detail="analysis_asset_not_found")
         return result
 
-    @app.get("/api/analysis/reports")
-    def list_interactive_reports(
+    def report_response_payload(report: Any) -> dict[str, Any]:
+        source_session_id = None
+        if report.turnId:
+            turn = configured_codex_projection_store.get_turn_by_id(
+                report.turnId
+            )
+            source_session_id = turn.sessionId if turn else None
+        return report_to_payload(
+            report,
+            source_session_id=source_session_id,
+        )
+
+    @app.get("/api/reports")
+    def list_reports(
         owner_id: str | None = None,
-        source_thread_id: str | None = None,
+        session_id: str | None = None,
         limit: int = Query(default=50, ge=1, le=200),
     ) -> dict[str, Any]:
-        reports = configured_interactive_report_store.list_reports(owner_id=owner_id, limit=limit)
-        if source_thread_id:
-            reports = [report for report in reports if report.sourceThreadId == source_thread_id]
-        return {"reports": [asdict_report(report) for report in reports]}
+        turn_ids = None
+        if session_id:
+            turn_ids = {
+                turn.id
+                for turn in configured_codex_projection_store.list_turns(
+                    session_id
+                )
+            }
+        reports = configured_report_store.list_reports(
+            owner_id=owner_id,
+            turn_ids=turn_ids,
+            limit=limit,
+        )
+        return {
+            "reports": [
+                report_response_payload(report)
+                for report in reports
+            ]
+        }
 
-    @app.get("/api/analysis/report-center")
+    @app.get("/api/report-center")
     def list_report_center(
         user_id: str = Query(min_length=1),
         limit: int = Query(default=50, ge=1, le=200),
     ) -> dict[str, Any]:
-        return configured_interactive_report_store.list_report_center(user_id=user_id, limit=limit)
-
-    @app.post("/api/analysis/reports")
-    def save_interactive_report(body: InteractiveReportBody = Body(...)) -> dict[str, Any]:
-        try:
-            report = configured_interactive_report_store.save_report(body.model_dump())
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"report": asdict_report(report)}
-
-    @app.get("/api/analysis/reports/{report_id}")
-    def get_interactive_report(report_id: str) -> dict[str, Any]:
-        result = configured_interactive_report_store.get_report(report_id)
-        if not result:
-            raise HTTPException(status_code=404, detail="interactive_report_not_found")
-        return {"report": asdict_report(result)}
-
-    @app.post("/api/analysis/reports/{report_id}/sessions")
-    async def create_session_from_report(
-        request: Request,
-        report_id: str,
-        body: ReportAnalysisSessionBody = Body(default_factory=ReportAnalysisSessionBody),
-    ) -> dict[str, Any]:
-        """Create a brand-new analysis session anchored to a saved report.
-
-        The session id comes from the Codex runtime; the body never
-        carries a session id (no ``session_id`` / ``task_id`` aliases).
-        """
-        result = configured_interactive_report_store.get_report(report_id)
-        if not result:
-            raise HTTPException(status_code=404, detail="interactive_report_not_found")
-        principal = _principal_from_request(request)
-        report = result
-        title = (body.title or f"{report.title} 新分析").strip()
-        report_payload = interactive_report_payload(report)
-        try:
-            session_id = await _provision_codex_thread_id(
-                analysis_runtime=configured_analysis_runtime,
-                body=body,
-                allow_client_preflight=False,
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        # Session creation routed through SessionService: the service
-        # owns id canonicalization + latest-turn binding. Since the
-        # service does not yet expose a raw ``register_session``
-        # passthrough we call the underlying catalog here and then
-        # touch through require_view so the binding is consistent.
-        configured_session_service.raw_catalog.register_session(
-            session_id=session_id,
-            product_kind=ANALYSIS_PRODUCT_KIND,
-            title=title,
-            user_id=principal.user_id if principal is not None else body.userId,
-            status="active",
-            codex_session_id=session_id,
-            metadata=_metadata_with_principal({
-                "domain": ANALYSIS_PRODUCT_KIND,
-                "session_id": session_id,
-                "codex_session_id": session_id,
-                "source_report_id": report.id,
-                "initial_report_id": report.id,
-                "initial_report_artifact": report_payload,
-            }, principal),
+        center = configured_report_store.list_report_center(
+            user_id=user_id,
+            limit=limit,
         )
-        view = configured_session_service.require_view(session_id)
         return {
-            "session": _session_view_to_thread_dict(view, configured_codex_projection_store),
-            "report": {"report": asdict_report(report)},
+            "mine": [
+                {
+                    "report": report_response_payload(
+                        configured_report_store.get_report(
+                            item["report"]["id"]
+                        )
+                    )
+                }
+                for item in center["mine"]
+            ],
+            "sharedWithMe": [
+                {
+                    **{
+                        key: value
+                        for key, value in item.items()
+                        if key != "report"
+                    },
+                    "report": report_response_payload(
+                        configured_report_store.get_report(
+                            item["report"]["id"]
+                        )
+                    ),
+                }
+                for item in center["sharedWithMe"]
+            ],
         }
 
-    @app.patch("/api/analysis/reports/{report_id}")
-    def rename_interactive_report(report_id: str, body: InteractiveReportRenameBody = Body(...)) -> dict[str, Any]:
-        report = configured_interactive_report_store.rename_report(report_id, owner_id=body.ownerId, title=body.title)
-        if not report:
-            raise HTTPException(status_code=404, detail="interactive_report_not_found")
-        return {"report": asdict_report(report)}
+    @app.post("/api/reports", status_code=201)
+    def create_report(
+        body: ReportConfigBody = Body(...),
+    ) -> dict[str, Any]:
+        payload = body.model_dump()
+        owner_id = payload.pop("ownerId")
+        try:
+            report = configured_report_store.create_report(
+                payload,
+                owner_id=owner_id,
+            )
+        except ReportValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"path": exc.path, "message": exc.message},
+            ) from exc
+        return {"report": report_response_payload(report)}
 
-    @app.delete("/api/analysis/reports/{report_id}")
-    def delete_interactive_report(report_id: str, owner_id: str = Query(min_length=1)) -> dict[str, Any]:
-        deleted = configured_interactive_report_store.delete_report(report_id, owner_id=owner_id)
+    @app.get("/api/reports/{report_id}")
+    def get_report(report_id: str) -> dict[str, Any]:
+        result = configured_report_store.get_report(report_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="report_not_found")
+        return {"report": report_response_payload(result)}
+
+    @app.put("/api/reports/{report_id}")
+    def update_report(
+        report_id: str,
+        body: ReportConfigBody = Body(...),
+    ) -> dict[str, Any]:
+        payload = body.model_dump()
+        owner_id = payload.pop("ownerId")
+        try:
+            report = configured_report_store.update_report(
+                report_id,
+                payload,
+                owner_id=owner_id,
+            )
+        except ReportValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"path": exc.path, "message": exc.message},
+            ) from exc
+        if not report:
+            raise HTTPException(status_code=404, detail="report_not_found")
+        return {"report": report_response_payload(report)}
+
+    @app.delete("/api/reports/{report_id}")
+    def delete_report(
+        report_id: str,
+        owner_id: str = Query(min_length=1),
+    ) -> dict[str, Any]:
+        deleted = configured_report_store.delete_report(
+            report_id,
+            owner_id=owner_id,
+        )
         if not deleted:
-            raise HTTPException(status_code=404, detail="interactive_report_not_found")
+            raise HTTPException(status_code=404, detail="report_not_found")
         return {"deleted": True, "report_id": report_id}
 
-    @app.post("/api/analysis/reports/{report_id}/shares")
-    def share_interactive_report(report_id: str, body: ReportShareBody = Body(...)) -> dict[str, Any]:
-        share = configured_interactive_report_store.share_report(
+    @app.post("/api/reports/{report_id}/shares")
+    def share_report(
+        report_id: str,
+        body: ReportShareBody = Body(...),
+    ) -> dict[str, Any]:
+        share = configured_report_store.share_report(
             report_id,
             owner_id=body.ownerId,
             recipient_user_id=body.recipientUserId,
             permission=body.permission,
         )
         if not share:
-            raise HTTPException(status_code=404, detail="interactive_report_not_found")
-        return {"share": asdict(share)}
+            raise HTTPException(status_code=404, detail="report_not_found")
+        return {"share": share_to_payload(share)}
 
-    @app.delete("/api/analysis/reports/{report_id}/shares/{recipient_user_id}")
-    def revoke_interactive_report_share(
+    @app.delete("/api/reports/{report_id}/shares/{recipient_user_id}")
+    def revoke_report_share(
         report_id: str,
         recipient_user_id: str,
         owner_id: str = Query(min_length=1),
     ) -> dict[str, Any]:
-        revoked = configured_interactive_report_store.revoke_report_share(
+        revoked = configured_report_store.revoke_report_share(
             report_id,
             owner_id=owner_id,
             recipient_user_id=recipient_user_id,
@@ -1086,6 +1124,40 @@ def create_app(
         if not revoked:
             raise HTTPException(status_code=404, detail="report_share_not_found")
         return {"revoked": True, "report_id": report_id, "recipient_user_id": recipient_user_id}
+
+    @app.post("/api/reports/{report_id}/queries/{query_id}")
+    def execute_report_query(
+        report_id: str,
+        query_id: str,
+        body: ReportQueryBody = Body(...),
+    ) -> dict[str, Any]:
+        report = configured_report_store.get_report(report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="report_not_found")
+        try:
+            return configured_report_query_service.execute(
+                report,
+                query_id,
+                filters=body.filters,
+                page=body.page,
+                page_size=body.pageSize,
+            )
+        except ReportQueryNotFound as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="report_query_not_found",
+            ) from exc
+        except ReportFilterError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ReportQueryExecutionError as exc:
+            LOGGER.exception(
+                "report_query_failed",
+                extra={"report_id": report_id, "query_id": query_id},
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="report_query_failed",
+            ) from exc
 
     @app.get("/api/knowledge")
     def list_knowledge(
@@ -1307,12 +1379,10 @@ def _build_default_analysis_asset_store() -> AnalysisAssetStore:
     return AnalysisAssetStore()
 
 
-def _build_default_interactive_report_store() -> Any:
+def _build_default_report_store() -> Any:
     if postgres_persistence_enabled():
-        from backend.persistence.postgres_stores import build_postgres_interactive_report_store
-
-        return build_postgres_interactive_report_store()
-    return InteractiveReportStore()
+        return build_postgres_report_store()
+    return ReportStore()
 
 
 def main() -> None:

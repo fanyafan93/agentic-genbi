@@ -361,6 +361,12 @@ class CodexProjectionStore:
 
     # -- reads -----------------------------------------------------------
 
+    def get_turn_by_id(self, turn_id: str) -> TurnRecord | None:
+        if self._has_row_backend("get_turn_by_id"):
+            return self.backend.get_turn_by_id(turn_id)
+        state = self._read_state()
+        return state["turns"].get(turn_id)
+
     def get_turn(self, session_id: str, turn_id: str) -> TurnRecord | None:
         if self._has_row_backend("get_turn"):
             return self.backend.get_turn(session_id, turn_id)
