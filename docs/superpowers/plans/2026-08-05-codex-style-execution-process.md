@@ -912,6 +912,7 @@ git commit -m "feat: preserve ordered execution activity"
 **Interfaces:**
 - Consumes `FlowNode.activity`, `processRunning`, `processStartedAt`, and `processCompletedAt`.
 - Produces an accessible `<details aria-label="执行过程">` region.
+- Produces nested, accessible `<details aria-label="执行步骤 …">` groups derived only from adjacent event order.
 
 - [ ] **Step 1: Write failing component tests**
 
@@ -942,6 +943,7 @@ describe("FlowNodeView execution process", () => {
 
     fireEvent.click(screen.getByText("分析了 1分36秒"));
     expect(screen.getByText("正在核验数据。")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "执行步骤 正在核验数据。" })).not.toHaveAttribute("open");
     expect(screen.getByLabelText("工具 BI_doris / mysql_query")).not.toHaveAttribute("open");
   });
 
@@ -1009,7 +1011,40 @@ function processSummary(node: Extract<FlowNodeData, { role: "agent" }>): string 
 }
 ```
 
-Render activities inside:
+Derive nested blocks from the flat persisted order without interpreting tool names:
+
+```tsx
+type ToolActivity = Extract<FlowActivity, { kind: "tool" }>;
+type ProcessBlock =
+  | { kind: "note"; entry: Extract<FlowActivity, { kind: "reasoning" | "message" }> }
+  | {
+      kind: "group";
+      entry: Extract<FlowActivity, { kind: "reasoning" | "message" }>;
+      tools: ToolActivity[];
+    }
+  | { kind: "tools"; tools: ToolActivity[] };
+
+function groupProcessActivity(activity: FlowActivity[]): ProcessBlock[] {
+  const blocks: ProcessBlock[] = [];
+  for (const entry of activity) {
+    if (entry.kind === "tool") {
+      const previous = blocks.at(-1);
+      if (previous?.kind === "note") {
+        blocks[blocks.length - 1] = { kind: "group", entry: previous.entry, tools: [entry] };
+      } else if (previous?.kind === "group" || previous?.kind === "tools") {
+        previous.tools.push(entry);
+      } else {
+        blocks.push({ kind: "tools", tools: [entry] });
+      }
+      continue;
+    }
+    blocks.push({ kind: "note", entry });
+  }
+  return blocks;
+}
+```
+
+Render the whole process and nested step groups:
 
 ```tsx
 <details
@@ -1020,33 +1055,56 @@ Render activities inside:
 >
   <summary>{processSummary(node)}</summary>
   <ol className="agent-activity" aria-label="本轮执行过程">
-    {activity.map((item, index) => (
-      <li
-        className={`agent-activity-item activity-${item.kind}${item.kind === "tool" ? ` ${item.state}` : ""}`}
-        key={`${item.itemId ?? item.kind}-${index}`}
-      >
-        {item.kind === "reasoning" || item.kind === "message" ? (
+    {groupProcessActivity(activity).map((block, index) => (
+      <li className={`agent-process-block block-${block.kind}`} key={`${block.kind}-${index}`}>
+        {block.kind === "note" ? (
           <div className="message-body-markdown activity-message-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.entry.content}</ReactMarkdown>
           </div>
-        ) : item.detail ? (
-          <details className="tool-step-detail" aria-label={`工具 ${cleanToolLabel(item.label)}`}>
-            <summary>
-              <span className="agent-activity-tool-icon" aria-hidden="true">TOOL</span>
-              <strong>{cleanToolLabel(item.label)}</strong>
-            </summary>
-            <pre>{(item.details?.length ? item.details : [item.detail]).join("\n\n")}</pre>
+        ) : block.kind === "group" ? (
+          <details
+            className="agent-step-group"
+            aria-label={`执行步骤 ${block.entry.content}`}
+            defaultOpen={block.tools.some((tool) => tool.state === "running")}
+          >
+            <summary>{block.entry.content}</summary>
+            <div className="agent-step-tools">{block.tools.map(renderToolActivity)}</div>
           </details>
         ) : (
-          <span className="agent-activity-tool-label">
-            <span className="agent-activity-tool-icon" aria-hidden="true">TOOL</span>
-            <strong>{cleanToolLabel(item.label)}</strong>
-          </span>
+          <div className="agent-step-tools">{block.tools.map(renderToolActivity)}</div>
         )}
       </li>
     ))}
   </ol>
 </details>
+```
+
+Define the tool renderer in the same file:
+
+```tsx
+function renderToolActivity(tool: ToolActivity) {
+  return (
+    <div
+      className={`agent-activity-item activity-tool ${tool.state}`}
+      key={tool.itemId ?? tool.label}
+    >
+      {tool.detail ? (
+        <details className="tool-step-detail" aria-label={`工具 ${cleanToolLabel(tool.label)}`}>
+          <summary>
+            <span className="agent-activity-tool-icon" aria-hidden="true">TOOL</span>
+            <strong>{cleanToolLabel(tool.label)}</strong>
+          </summary>
+          <pre>{(tool.details?.length ? tool.details : [tool.detail]).join("\n\n")}</pre>
+        </details>
+      ) : (
+        <span className="agent-activity-tool-label" aria-label={`工具 ${cleanToolLabel(tool.label)}`}>
+          <span className="agent-activity-tool-icon" aria-hidden="true">TOOL</span>
+          <strong>{cleanToolLabel(tool.label)}</strong>
+        </span>
+      )}
+    </div>
+  );
+}
 ```
 
 `processSummary(node)` returns:
@@ -1088,7 +1146,19 @@ Extend `frontend/src/app/globals.css` with:
   padding-top: 8px;
   border-top: 1px solid rgba(30,58,95,.08);
 }
-.agent-activity-item.activity-reasoning {
+.agent-step-group { min-width: 0; }
+.agent-step-group > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  list-style: none;
+}
+.agent-step-tools {
+  display: grid;
+  gap: 5px;
+  margin-top: 6px;
+  padding-left: 12px;
+}
+.agent-process-block.block-note {
   color: var(--text-secondary);
   padding: 2px 0;
 }
@@ -1185,11 +1255,12 @@ Submit a new analysis question and verify:
 1. The static “思考中” is replaced when the first reasoning summary arrives.
 2. Reasoning summaries persist in event order instead of flashing and disappearing.
 3. Tool rows appear between summaries and are collapsed by default.
-4. Expanding a tool row reveals actual details.
-5. No test Token, password, Cookie, Authorization value, or URL credential appears in the DOM or SSE payload.
-6. The final answer appears once.
-7. Completion collapses the process and shows elapsed time.
-8. Refreshing the deep link restores process Items and the final answer in sequence order.
+4. A reasoning summary followed by tools becomes a clickable, collapsible step group.
+5. Expanding a step group reveals its tool rows; expanding a tool row reveals actual details.
+6. No test Token, password, Cookie, Authorization value, or URL credential appears in the DOM or SSE payload.
+7. The final answer appears once.
+8. Completion collapses the process and shows elapsed time.
+9. Refreshing the deep link restores process Items and the final answer in sequence order.
 
 - [ ] **Step 5: Update the current branch snapshot**
 
