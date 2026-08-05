@@ -130,6 +130,98 @@ class CodexProjectionStorePurityTest(unittest.TestCase):
                     created_at="2026-08-05T00:00:00Z",
                 )
 
+    def test_upsert_item_rejects_turn_belonging_to_another_session(self) -> None:
+        """Cross-session projection pollution MUST raise ValueError.
+
+        The previous guard (``if turn_id not in state["turns"]``)
+        allowed an attacker to append projections with
+        ``genbiSessionId = B`` against a turn that really lives on
+        session A, orphaning the lineage. The new guard checks
+        ``turn.sessionId == session_id`` so mismatches are refused
+        at write time.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = CodexProjectionStore(path=Path(temp_dir) / "p.jsonl")
+            # Turn ``t_a`` genuinely belongs to session A.
+            store.save_turn(
+                session_id="sess_a",
+                turn_id="t_a",
+                input_kind="start",
+                input_text="a q",
+                status="running",
+                started_at="2026-08-05T00:00:00Z",
+            )
+            # The happy path: upsert on the *owning* session works.
+            store.upsert_item(
+                session_id="sess_a",
+                turn_id="t_a",
+                codex_item_id="it_ok",
+                item_type="agentMessage",
+                status="completed",
+                sequence=0,
+                payload={"text": "hi"},
+                created_at="2026-08-05T00:00:01Z",
+            )
+            # The forbidden path: upserting with session_id = B on
+            # the *same* turn_id must blow up, even though the turn
+            # exists.
+            with self.assertRaises(ValueError) as ctx:
+                store.upsert_item(
+                    session_id="sess_b",
+                    turn_id="t_a",
+                    codex_item_id="it_bad",
+                    item_type="agentMessage",
+                    status="streaming",
+                    sequence=1,
+                    payload={"text": "polluted"},
+                    created_at="2026-08-05T00:00:02Z",
+                )
+            msg = str(ctx.exception)
+            self.assertIn("t_a", msg)
+            self.assertIn("sess_a", msg, "error must name the turn's real owning session")
+            self.assertIn("sess_b", msg, "error must name the caller-supplied wrong session")
+            # The projection store must never have written the bad
+            # row: list_items on sess_b is empty and sess_b still
+            # has no turns.
+            self.assertEqual(store.list_items(session_id="sess_b"), [])
+            self.assertEqual(store.list_turns(session_id="sess_b"), [])
+            good_projections = store.list_items(session_id="sess_a", turn_id="t_a")
+            self.assertEqual([p.codexItemId for p in good_projections], ["it_ok"])
+
+    def test_save_turn_rejects_moving_existing_turn_across_sessions(self) -> None:
+        """``save_turn`` is an UPSERT — the existing guard must also
+        refuse to re-parent a turn from session A onto session B.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = CodexProjectionStore(path=Path(temp_dir) / "p.jsonl")
+            store.save_turn(
+                session_id="sess_a",
+                turn_id="t_x",
+                input_kind="message",
+                input_text="q1",
+                status="running",
+                started_at="2026-08-05T00:00:00Z",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                store.save_turn(
+                    session_id="sess_b",
+                    turn_id="t_x",
+                    input_kind="message",
+                    input_text="q2",
+                    status="completed",
+                    started_at="2026-08-05T00:00:10Z",
+                    completed_at="2026-08-05T00:00:20Z",
+                )
+            msg = str(ctx.exception)
+            self.assertIn("t_x", msg)
+            self.assertIn("sess_a", msg)
+            self.assertIn("sess_b", msg)
+            # The original turn row must still point at sess_a.
+            turn = store.get_turn(session_id="sess_a", turn_id="t_x")
+            self.assertIsNotNone(turn)
+            self.assertEqual(turn.sessionId, "sess_a")
+            self.assertIsNone(store.get_turn(session_id="sess_b", turn_id="t_x"))
+
     def test_projection_store_does_not_know_user_permissions(self) -> None:
         module = importlib.import_module("backend.harness.codex_projection_store")
         for forbidden in (

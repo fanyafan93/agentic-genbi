@@ -167,6 +167,17 @@ class CodexProjectionStore:
             )
         state = self._read_state()
         existing = state["turns"].get(turn_id)
+        # The turn_id is globally unique in this store (it IS the
+        # Codex-issued turn id per the new contract). If a row
+        # already exists it must belong to the same session the
+        # caller is updating; otherwise we would silently move a
+        # turn from session A to B, which is exactly the cross-
+        # session projection pollution we need to reject.
+        if existing is not None and existing.sessionId != session_id:
+            raise ValueError(
+                f"turn {turn_id!r} belongs to session {existing.sessionId!r}; "
+                f"cannot update it on session {session_id!r}."
+            )
         now = _now()
         canonical_input = (input_text or "").strip() or (existing.inputText if existing else "")
         merged_metadata = {
@@ -267,13 +278,22 @@ class CodexProjectionStore:
 
         The Runtime already decided ``status`` and ``sequence``;
         this store just persists. The session + turn must exist;
-        we don't auto-create rows the catalog owns.
+        we don't auto-create rows the catalog owns. The turn must
+        also *belong* to the given session — otherwise we silently
+        write cross-session projection pollution (a turn that lives
+        on session A ends up with ``genbiSessionId = B``).
         """
         if not codex_item_id.strip():
             raise ValueError("codex_item_id is required.")
         state = self._read_state()
-        if turn_id not in state["turns"]:
+        turn = state["turns"].get(turn_id)
+        if turn is None:
             raise ValueError(f"turn not found: {turn_id}")
+        if turn.sessionId != session_id:
+            raise ValueError(
+                f"turn {turn_id!r} belongs to session {turn.sessionId!r}; "
+                f"cannot upsert projection on session {session_id!r}."
+            )
         existing = None
         for projection in state["projections"]:
             if projection.codexItemId == codex_item_id:
