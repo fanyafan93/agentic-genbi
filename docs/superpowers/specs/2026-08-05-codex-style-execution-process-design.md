@@ -20,12 +20,13 @@ Codex SDK 同时提供 `item/reasoning/summaryTextDelta`、`item/started` 等通
 - 流式小片段在同一个条目内累积，不产生逐字消息或重复回复。
 - 执行期间过程自动展开；完成后显示总耗时并默认折叠。
 - 刷新后可从已保存的 Turn 和 Item 恢复过程。
-- 工具活动只显示安全名称、状态和耗时，不展示参数、SQL 或结果明细。
+- 工具活动默认折叠；展开后展示 Codex 实际提供的命令、参数、SQL、输出、结果和错误详情。
+- 工具详情在后端经过凭据脱敏，密钥、Token、密码、Cookie 和 Authorization 等信息不得进入浏览器。
 
 ## 非目标
 
 - 不展示 `item/reasoning/textDelta` 原始隐藏推理。
-- 不展示系统提示词、开发者指令、鉴权信息或 Provider 原始协议包。
+- 不展示系统提示词、开发者指令、鉴权凭据或 Provider 原始协议包。
 - 不由前端根据工具名称猜测业务阶段。
 - 不调整 Thread、Turn、Item 生命周期契约。
 - 不新增 `turn/failed`、`item/failed` 等非原生终态事件。
@@ -72,7 +73,27 @@ started   → running
 completed → done / failed
 ```
 
-可见内容仅包括安全工具标签、状态和可计算耗时。参数、SQL、结果和错误原文不进入浏览器事件；失败只显示统一错误说明。
+工具活动默认显示工具标签、状态和可计算耗时。展开详情后按 Item 类型展示：
+
+```text
+mcpToolCall      → server、tool、arguments、result、error
+commandExecution → command、cwd、stdout、stderr、exit code
+fileChange       → 目标文件与变更摘要
+```
+
+详情尽量保留 Codex 实际返回的内容，但必须先经过统一后端脱敏。字段名或文本命中以下类别时使用掩码替换：
+
+```text
+api_key
+token
+password
+secret
+authorization
+cookie
+credential
+```
+
+数据库连接串中的账号和密码同样脱敏。结构化详情保持 JSON 结构；长输出允许截断，并明确标记“内容已截断”，不能静默丢失。
 
 ### Agent message 与 Turn 终态
 
@@ -103,7 +124,7 @@ MiniMax Responses
 - reasoning summary：可展示并转发。
 - reasoning text：忽略。
 - agent message：按现有方式转发。
-- tool item：只投影安全活动字段。
+- tool item：投影可折叠详情，但先经过统一凭据脱敏。
 - 未知通知：忽略并保留可观测日志，不向前端透传原始负载。
 
 Reasoning Item 完成时，优先从 Item 的 `summary` 字段保存最终文本。增量通知只负责实时展示，完成 Item 负责持久化与刷新恢复。
@@ -123,9 +144,9 @@ agent-message
 ```text
 分析了 1分36秒  [展开/折叠]
   中间说明
-  工具活动
+  工具活动 [可展开详情]
   中间说明
-  工具活动
+  工具活动 [可展开详情]
 
 最终回复
 ```
@@ -135,6 +156,7 @@ agent-message
 - 执行中自动展开，新增内容追加到尾部。
 - reasoning delta 只更新对应说明条目，不新增重复条目。
 - 同一工具 Item 的 started/completed 更新同一行。
+- 工具行默认折叠；用户展开后可查看命令、参数、SQL、输出、结果或错误。
 - 过程区和最终回复分开，最终回复不会被过程内容覆盖。
 - Turn 完成后记录耗时并默认折叠。
 - 用户手动展开或折叠后，本次页面生命周期内尊重用户选择。
@@ -143,7 +165,7 @@ agent-message
 ## 历史恢复
 
 - Reasoning 完成 Item 保存 summary 文本和 sequence。
-- Tool Item 保存安全名称、状态、起止时间和 sequence。
+- Tool Item 保存名称、状态、起止时间、已脱敏详情和 sequence。
 - Session 详情按 sequence 恢复活动顺序。
 - 实时 delta 不单独持久化，避免碎片记录；异常中断时允许只恢复最后已完成的 Item。
 
@@ -164,7 +186,9 @@ agent-message
 - reasoning text delta 被忽略。
 - reasoning completed Item 保存 summary。
 - item started/completed 使用同一个 Item ID。
-- 工具参数、SQL 和结果不会进入前端事件。
+- 工具参数、SQL、结果和错误能够进入折叠详情。
+- 密钥、Token、密码、Cookie、Authorization 和连接串凭据在后端脱敏。
+- 长输出截断时有明确标记。
 - `turn/completed` 只出现一次。
 
 ### 前端
@@ -172,6 +196,7 @@ agent-message
 - summary delta 合并到同一条活动。
 - 多个 summary 和工具 Item 按顺序交错。
 - tool started/completed 更新同一行。
+- 工具详情默认折叠，展开后正确展示格式化内容。
 - 最终 Agent Message 与过程区分开。
 - 完成后过程默认折叠且显示耗时。
 - 历史恢复不产生重复消息。
@@ -180,6 +205,7 @@ agent-message
 
 - 使用 Chrome 提交真实分析问题。
 - 确认等待期间出现 MiniMax/Codex reasoning summary。
-- 确认工具活动不泄露参数、SQL 或结果。
+- 确认工具详情可展开，并显示实际参数、SQL 或输出。
+- 确认测试凭据不会出现在页面或 SSE 负载中。
 - 确认最终回复只显示一次。
 - 刷新后确认过程与最终回复均可恢复。
