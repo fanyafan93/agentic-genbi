@@ -124,8 +124,8 @@ export class BackendAnalysisAgentClient implements AgentClient {
       // through the URL path; the body never re-asserts it.
       const isSessionlessStart = sessionId == null;
       const sessionTurnUrl = isSessionlessStart
-        ? `${this.apiBaseUrl}/api/analysis/sessions/turns`
-        : `${this.apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}/turns`;
+        ? `${this.apiBaseUrl}/api/analysis/sessions/turns/stream`
+        : `${this.apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}/turns/stream`;
       const requestBody: Record<string, unknown> = isSessionlessStart
         ? {
             message: question,
@@ -145,36 +145,35 @@ export class BackendAnalysisAgentClient implements AgentClient {
       if (!response.ok) {
         throw new Error(`Analysis API returned ${response.status}`);
       }
-      const payload = (await response.json()) as {
-        session_id?: string;
-        turn_id?: string;
-        events?: BackendTurnEvent[];
-      };
-      const events = Array.isArray(payload.events) ? payload.events : [];
-      const resolvedSessionId =
-        asString(payload.session_id) ||
-        asString(input.sessionId) ||
-        "";
-      for (const backendEvent of events) {
+      if (!response.body) {
+        throw new Error("Analysis API returned no stream body");
+      }
+      // The backend writes ``text/event-stream``: each non-empty
+      // ``data:`` line carries a JSON-encoded AgentEvent. The
+      // shared ``readAnalysisSse`` helper parses the stream into
+      // backend events the moment they arrive, so token deltas,
+      // tool calls, and the resolved turn id surface in real time
+      // — not after the whole turn completes.
+      let resolvedSessionId = asString(input.sessionId) || "";
+      for await (const backendEvent of readAnalysisSse(response)) {
         refreshTimeout();
         // The first business event on the sessionless flow is
-        // ``session/created`` with the Codex-issued session id; we
-        // forward it as an AgentEvent so the page can navigate from
-        // ``/analysis/new`` to ``/analysis/{session_id}``.
+        // ``session/created`` with the Codex-issued session id;
+        // we forward it as an AgentEvent so the page can navigate
+        // from ``/analysis/new`` to ``/analysis/{session_id}``.
         if (backendEvent.type === "session/created") {
           const newSessionId =
             asString(backendEvent.payload.sessionId) ||
             asString(backendEvent.payload.codexThreadId) ||
             resolvedSessionId;
           if (newSessionId) {
+            resolvedSessionId = newSessionId;
             yield {
               type: "session/created",
               sessionId: newSessionId,
               codexThreadId: newSessionId,
               codexTurnId:
-                asString(backendEvent.payload.codexTurnId) ||
-                asString(payload.turn_id) ||
-                undefined,
+                asString(backendEvent.payload.codexTurnId) || undefined,
             };
             continue;
           }

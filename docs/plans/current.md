@@ -209,7 +209,59 @@
     id 才是唯一权威。
   * 修复前两个测试都失败（`'' != 'codex_turn_1'`），
     修复后通过。
-  验收：后端 137/137、前端 93/93、tsc 全过。
+ - 验收：后端 137/137、前端 93/93、tsc 全过。
+- **Streaming turn endpoints（P1 关键回归修复）**：上一轮把
+  `/turns` 端点从 SSE 改成 JSON 等全部完成后再发，丢了流式
+  体验。Session Manager 收缩**不应该**以删除流式能力为代价。
+  修复：
+  * 新增 `POST /api/analysis/sessions/turns/stream`（首轮）
+    跟 `POST /api/analysis/sessions/{session_id}/turns/stream`
+    （续轮）两条 SSE 路由，返回
+    `StreamingResponse(..., media_type="text/event-stream")`。
+  * 这两条路由**共享**同一个 Session / Turn / Projection
+    内核（`_astream_runtime_events`，上一轮已经修了
+    `resolved_turn_id` accumulator）：`_stream_session_first_turn_response`
+    走 sessionless 首轮，`_stream_analysis_turn_response`
+    走续轮。两端点内部事件流、projection fold、artifact
+    lineage 都用同一个 kernel。
+  * 现有 `/turns` JSON 路由**保留**——disabled runtime / 测试
+    / non-streaming client 用。streaming 路径**专属** runtime
+    enabled 场景，`/turns/stream` 在 runtime disabled 时返
+    503 强制走 JSON fallback。
+  * `_stream_analysis_turn_response` 加 `genbi/*` 内部事件过
+    滤——首轮 helper 之前已有过滤，续轮 helper 漏了；现在两
+    边对齐，下游 SSE 看不到内部 marker。
+  * Frontend `BackendAnalysisAgentClient` 改用 SSE parser
+    (`readAnalysisSse`)：response body 拉流 → 解析
+    `data:` 行 → 转发 AgentEvent → 必要时 `session/created`
+    触发 URL navigation。**不再** `await response.json()`
+    等完整返回。
+  * URL path 跟 body 不携带 session id 的规则不变；
+    `codex_session_id` resolve 走 `SessionCatalog.resolve_session_id`
+    跟上一轮一样。
+  测试：
+  * 后端 `StreamingEndpointContractTest`（3 例）：
+    - `test_first_turn_stream_endpoint_returns_event_stream`：
+      `/turns/stream` 返回 `text/event-stream`，第一个事件是
+      `session/created` 且带 `codexTurnId`。
+    - `test_continuation_turn_stream_endpoint_returns_event_stream`：
+      `/{id}/turns/stream` 返回 SSE，第一个事件不是
+      `session/created`（session 已存在），是 `turn/started`
+      或 `item/agentMessage/delta`。
+    - `test_first_turn_stream_endpoint_rejects_disabled_runtime`：
+      runtime disabled 时 `/turns/stream` 返 503，强制走
+      JSON fallback。
+  * 前端 `sseResponse(events)` helper + URL 期望改成
+    `/turns/stream`（4 个受影响的 route 测试）。
+  * 前端 `streams backend events as soon as the runtime emits them`
+    验证 streaming：ReadableStream 每 10 ms push 一个 chunk，
+    第一个 event 延迟 < 50 ms，第二个 event 晚于第一个，
+    总时间 bounded by chunk schedule。**修复前**这个测试
+    失败（前端 `await response.json()` 等完整 JSON）——
+    证明它真的锁住"等全部完成才播放"的 P1 回归。
+  验收：后端 140/140、前端 94/94、tsc 全过；docker backend
+  rebuild 后 `/api/analysis/sessions/turns/stream` 返回
+  `text/event-stream`（用容器内 python urllib 实测）。
 - **统一 API**（用户规范）：保留 7 个 `/api/analysis/sessions/*`
   路由，body 永不携带 session id。
   - `GET    /api/analysis/sessions`

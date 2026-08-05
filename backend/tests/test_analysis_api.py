@@ -1303,6 +1303,115 @@ class StreamingResolvedTurnIdTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("", seen_turn_ids[1:])  # all events after the first carry the resolved id
 
 
+class StreamingEndpointContractTest(unittest.TestCase):
+    """Locks the user spec that the streaming endpoints emit
+    ``text/event-stream`` and surface events the moment the
+    runtime produces them — not after the whole turn finishes.
+
+    Before the fix the only turn endpoints returned a single JSON
+    blob, so the frontend had to wait for the entire Codex run
+    before it could render anything. We now register dedicated
+    ``/turns/stream`` routes that share the same Session / Turn
+    / Projection kernel as the JSON endpoints but write events
+    straight to the wire as SSE.
+    """
+
+    def test_first_turn_stream_endpoint_returns_event_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            with client.stream(
+                "POST",
+                "/api/analysis/sessions/turns/stream",
+                json={"message": "hi", "metadata": {"frontend_client": "analysis_task"}},
+            ) as response:
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(
+                    response.headers["content-type"].startswith("text/event-stream"),
+                    msg=f"stream endpoint returned {response.headers['content-type']!r} instead of text/event-stream",
+                )
+                # Pull the SSE body line by line and confirm at
+                # least one ``data:`` payload lands.
+                lines = [line for line in response.iter_lines() if line.startswith("data:")]
+                self.assertTrue(
+                    lines,
+                    msg="stream endpoint emitted no SSE data lines — did the runtime stream at all?",
+                )
+                # The first business event must be ``session/created``;
+                # the resolved Codex session/turn ids must be
+                # embedded so the frontend can navigate.
+                first_payload = json.loads(lines[0].removeprefix("data:"))
+                self.assertEqual(first_payload["type"], "session/created")
+                self.assertEqual(first_payload["payload"]["sessionId"], "codex_thread_created")
+                self.assertTrue(first_payload["payload"]["codexTurnId"])
+
+    def test_continuation_turn_stream_endpoint_returns_event_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            # Pre-create the session row so the URL resolution is
+            # exercised against a real catalog entry.
+            thread_store.create_thread(
+                thread_id="codex_thread_existing",
+                product_kind="analysis_task",
+                title=None,
+                user_id=None,
+            )
+            client.post(
+                "/api/analysis/sessions/codex_thread_existing/turns",
+                json={"message": "first", "turn_kind": "message"},
+            )
+
+            with client.stream(
+                "POST",
+                "/api/analysis/sessions/codex_thread_existing/turns/stream",
+                json={"message": "follow up", "turn_kind": "message"},
+            ) as response:
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(
+                    response.headers["content-type"].startswith("text/event-stream"),
+                )
+                lines = [line for line in response.iter_lines() if line.startswith("data:")]
+                self.assertTrue(lines)
+                first_payload = json.loads(lines[0].removeprefix("data:"))
+                # Continuation streams do NOT emit ``session/created``
+                # because the session already exists; they go
+                # straight to turn events.
+                self.assertNotEqual(first_payload["type"], "session/created")
+                self.assertIn(first_payload["type"], {"turn/started", "item/agentMessage/delta"})
+
+    def test_first_turn_stream_endpoint_rejects_disabled_runtime(self) -> None:
+        # The streaming endpoint requires the Codex runtime to be
+        # enabled; offline / test mode clients must use the JSON
+        # fallback at ``/turns`` instead. This protects the
+        # contract that ``/turns/stream`` is *always* real-time.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            runtime = _FakeCodexRuntime()
+            runtime.enabled = False
+            app = create_app(
+                analysis_runtime=runtime,  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            response = client.post(
+                "/api/analysis/sessions/turns/stream",
+                json={"message": "hi"},
+            )
+            self.assertEqual(response.status_code, 503)
+
+
 class SessionScopedContinuationTest(unittest.IsolatedAsyncioTestCase):
     """Locks the session-scoped continuation turn contract.
 

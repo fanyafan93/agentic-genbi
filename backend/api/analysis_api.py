@@ -536,6 +536,96 @@ def create_app(
             session_id=codex_session_id,
         )
 
+    @app.post("/api/analysis/sessions/turns/stream")
+    async def stream_session_first_turn(body: AnalysisSessionStartBody = Body(...)) -> Any:
+        """Stream the very first turn of a brand-new session.
+
+        Same Session / Turn / Projection kernel as
+        ``POST /api/analysis/sessions/turns`` (the JSON endpoint),
+        but writes events straight to the wire as ``text/event-stream``
+        so the frontend can render tool calls and token deltas in
+        real time. The first business event is ``session/created``;
+        the rest follows as the Codex runtime emits them. The
+        disabled-runtime fallback (used by offline tests) is
+        served by the JSON endpoint above, not here — this
+        endpoint requires the runtime to actually stream.
+        """
+        if not getattr(configured_analysis_runtime, "enabled", False):
+            raise HTTPException(
+                status_code=503,
+                detail="codex_runtime_not_configured: /turns/stream requires a streaming Codex runtime.",
+            )
+        metadata = dict(body.metadata or {})
+        metadata.setdefault("domain", "analysis_task")
+        metadata.setdefault("thread_root", True)
+        preflight_session_id = (
+            _string_or_none(metadata.get("codex_session_id"))
+            or _string_or_none(metadata.get("codex_thread_id"))
+        )
+        turn_request = AnalysisTurnRequest(
+            question=body.message.strip(),
+            session_id=preflight_session_id or "",
+            user_id=body.user_id,
+            turn_kind="start",
+            metadata=metadata,
+        )
+        return _stream_session_first_turn_response(
+            configured_analysis_runtime,
+            configured_session_catalog,
+            configured_codex_projection_store,
+            configured_interactive_report_store,
+            turn_request,
+        )
+
+    @app.post("/api/analysis/sessions/{session_id}/turns/stream")
+    async def stream_session_continuation_turn(
+        session_id: str,
+        body: AnalysisSessionContinuationBody = Body(default_factory=AnalysisSessionContinuationBody),
+    ) -> Any:
+        """Stream a continuation turn on an existing session.
+
+        Same kernel as the JSON
+        ``POST /api/analysis/sessions/{session_id}/turns`` endpoint:
+        the URL may carry either the legacy GenBI alias or the
+        Codex-side id, the row is resolved through
+        ``SessionCatalog.resolve_session_id``, and the runtime
+        receives the Codex-side id. The streaming path is used
+        when the frontend wants real-time token / tool feedback;
+        the JSON path is used for offline / disabled-runtime
+        fallback.
+        """
+        if not session_id.strip():
+            raise HTTPException(status_code=400, detail="session_id_required")
+        view = configured_session_catalog.get_view(session_id)
+        if view is not None:
+            codex_session_id = view.session.codexSessionId or view.session.id
+        else:
+            # The row may not exist yet (e.g. a brand-new sessionless
+            # id forwarded by a client that skipped the sessionless
+            # start). The runtime will lazy-register it during the
+            # stream; treat the URL id as the Codex-side id.
+            codex_session_id = session_id
+        turn_request = AnalysisTurnRequest(
+            question=body.message.strip(),
+            session_id=codex_session_id,
+            user_id=body.user_id,
+            turn_kind=str(body.turn_kind or "message").strip().lower() or "message",  # type: ignore[arg-type]
+            metadata={
+                **(body.metadata or {}),
+                "domain": "analysis_task",
+                "session_id": codex_session_id,
+                "codex_session_id": codex_session_id,
+            },
+        )
+        return _stream_analysis_turn_response(
+            configured_analysis_runtime,
+            configured_session_catalog,
+            configured_codex_projection_store,
+            configured_interactive_report_store,
+            turn_request,
+            session_id=codex_session_id,
+        )
+
     @app.post("/api/analysis/sessions/{session_id}/cancel")
     def cancel_session(session_id: str) -> dict[str, Any]:
         """Mark the in-flight turn (if any) as ``cancelled`` and archive the session.
@@ -1149,6 +1239,11 @@ def _stream_analysis_turn_response(
                         or _string_or_none(event.payload.get("turn_id"))
                         or ""
                     )
+                if event.type in {"genbi/thread/provisioned", "genbi/turn/provisioned"}:
+                    # Internal marker events. Never forward them
+                    # to the client; we only use them to resolve
+                    # session/turn ids.
+                    continue
                 events.append(event)
                 yield event.to_sse()
         except asyncio.CancelledError:
