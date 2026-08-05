@@ -115,4 +115,3 @@ def test_runtime_context_uses_initial_report_key(tmp_path: Path) -> None:
     )
 
     assert context["initial_report"] == report
-    assert "initial_report_artifact" not in context

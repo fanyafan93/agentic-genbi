@@ -2,14 +2,14 @@
 
 ## 一句话
 
-用户在分析工作台提出业务问题；Codex 负责通用 Agent 工程底座，GenBI 负责业务语义、数据权限、受控 SQL 工具、Artifact 版本和治理。
+用户在分析工作台提出业务问题；Codex 负责通用 Agent 工程底座，GenBI 负责业务语义、受控数据访问、Report 和分析资产治理。
 
 ## 当前方向
 
 ```text
 分析工作台：提出问题、追问、查看过程、生成和修改当前分析结果。
 业务语义库：维护 FineReport 语义案例、指标、字段、关联规则和业务知识。
-我的分析：查看已保存的分析结果、历史版本和分析模板。
+我的分析：查看、复用和分享已保存的 Report。
 系统：管理数据源、权限、安全、模型、工具、审计和成本。
 ```
 
@@ -38,8 +38,8 @@ GenBI 负责：
 - FineReport 语义案例
 - 指标与关联规则
 - 受控 SQL 工具
-- Artifact
-- Artifact 版本和血缘
+- Report
+- 可复用分析资产及其治理
 - 分享、发布和治理
 
 ## 目标架构
@@ -49,7 +49,8 @@ GenBI 负责：
 Codex：Agent Loop / Thread / Turn / Item / 上下文 / 工具调度 / 事件流
 语义层：业务语义库，包含 FineReport 语义案例、指标和业务知识
 数据层：只读、安全、可审计地访问 MySQL、Doris、报表、ETL、金蝶等数据源
-Artifact 层：版本化保存报告、图表、SQL、数据快照、分析路径和 SKILL.md
+Report 层：单记录保存布局、筛选、图表、表格和查询配置
+分析资产层：保存 SQL、数据快照、分析路径和 SKILL.md 等可复用资产
 治理层：RBAC / RLS、敏感字段、审批、发布、审计、成本和运行安全边界
 ```
 
@@ -57,11 +58,11 @@ MiniMax、OpenAI-compatible 或其他模型只是 Codex 的 model adapter，不�
 
 ## 当前实现快照
 
-- 前端：Next.js + TypeScript。分析工作台提供左侧分析线程和右侧交互式分析结果；结果以 Puck JSON 描述布局，ECharts / AG Grid 渲染图表与表格，并优先读写后端报告版本接口。
-- 后端：FastAPI。分析工作台主入口收敛到 Codex Thread / Turn / Item；知识记录、分析资产存储、Codex Item projection 和交互式报告版本已经可用。旧资源库、报告查询和数据库工具模块已删除；报告只接受真实 Codex Artifact 事件，不从回复文本或本地 mock 生成。
+- 前端：Next.js + TypeScript。分析工作台提供左侧分析线程和右侧 Report；Puck 管布局、Ant Design 管筛选、ECharts 管图表、VTable 管表格。
+- 后端：FastAPI。Report 直接保存为当前单记录，不做版本管理；查询配置保存只读 SQL 和筛选参数绑定，数据由后端按需执行并分页返回。
 - 登录：Auth.js + 飞书 OAuth + PostgreSQL session。
 - 运行：Docker Compose 启动 frontend、backend、postgres。
-- 待完成：Codex 工具/MCP/Skill 接入、完整业务语义库持久化、完整 Artifact 治理、团队权限/RLS、生产数据源治理。
+- 待完成：完整业务语义库持久化、团队权限/RLS、生产数据源治理和更复杂的 Report 联动能力。
 
 详细状态看 `docs/plans/current.md`，不要从历史段落推断当前完成度。
 

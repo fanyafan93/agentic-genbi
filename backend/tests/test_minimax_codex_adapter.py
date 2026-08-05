@@ -116,7 +116,7 @@ class MinimaxCodexAdapterTest(unittest.TestCase):
             "type": "response.output_item.done",
             "item": {
                 "type": "function_call",
-                "name": "create_interactive_report",
+                "name": "create_report",
                 "arguments": "{}",
             },
         }
@@ -125,12 +125,12 @@ class MinimaxCodexAdapterTest(unittest.TestCase):
             event,
             [
                 NamespaceToolMap(namespace="mcp__BI_doris__", tool_names=frozenset({"mysql_query"})),
-                NamespaceToolMap(namespace="mcp__GenBI_report__", tool_names=frozenset({"create_interactive_report"})),
+                NamespaceToolMap(namespace="mcp__GenBI_report__", tool_names=frozenset({"create_report"})),
             ],
         )
 
         self.assertEqual(rewritten["item"]["namespace"], "mcp__GenBI_report__")
-        self.assertEqual(rewritten["item"]["name"], "create_interactive_report")
+        self.assertEqual(rewritten["item"]["name"], "create_report")
 
     def test_rewrite_sse_chunk_text_rewrites_data_payloads(self) -> None:
         payload = {

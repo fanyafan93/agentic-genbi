@@ -8,10 +8,10 @@ flowchart LR
   API --> Codex["Codex\nThread / Turn / Item"]
   Codex --> Semantic["业务语义库\nFineReport / 指标 / 规则"]
   Codex --> Data["数据层\n受控 SQL / RLS / 审计"]
-  Codex --> Artifact["Artifact 层\n报告 / 图表 / SQL / 版本"]
+  Codex --> Report["Report\n布局 / 筛选 / 图表 / 表格 / 查询"]
   Semantic --> Governance["治理层\n权限 / 发布 / 血缘 / 审计"]
   Data --> Governance
-  Artifact --> Governance
+  Report --> Governance
 ```
 
 ## 最终职责边界
@@ -38,8 +38,9 @@ GenBI 负责：
 - FineReport 语义案例
 - 指标与关联规则
 - 受控 SQL 工具
-- Artifact
-- Artifact 版本和血缘
+- Report
+- Report 分享
+- Report 之外的可复用分析资产
 - 分享、发布和治理
 
 ## 系统对象口径
@@ -49,9 +50,8 @@ Analysis Task：GenBI 的业务任务记录，保存用户、租户、工作空�
 Codex Thread：真实 Agent 任务线程、上下文和压缩状态。
 Codex Turn：用户触发的一轮 Agent 工作。
 Codex Item：Turn 内的消息、推理、工具调用、工具结果、模型输出和产物。
-GenBI Artifact：可复用分析资产，由 Codex Item 产生或更新。
-Artifact Version：Artifact 的不可变版本。
-Artifact Lineage：Artifact / Version 与 Codex Thread / Turn / Item 的来源关系。
+Report：直接持久化的当前报表；更新时全量覆盖，不保存历史版本。
+Report Source：Report 的可选 turnId；有值时通过 Turn 反查来源 Session。
 ```
 
 Analysis Task 不是自研执行层；它只是业务归属和 Codex Thread 指针。
@@ -79,8 +79,9 @@ turn/completed
 item/started
 item/completed
 item/agentMessage/delta
-genbi/artifact/created
-genbi/artifact/updated
+genbi/report/created
+genbi/report/updated
+genbi/report/failed
 genbi/dataAccess/denied
 genbi/approval/requested
 ```
@@ -94,19 +95,30 @@ codex：真实 Codex 通知。
 genbi_projection：GenBI 为展示、审计或业务治理补充的投影事件。
 ```
 
-## Artifact Lineage
+## Report 契约
 
-Artifact source / lineage 只使用：
+Report 主记录保存：
 
 ```text
-artifactId
-artifactVersionId
-codexThreadId
-codexTurnId
-codexItemId
+id
+title
+subtitle
+ownerId
+turnId（可空）
+layout
+filters
+charts
+tables
+queries
+createdAt
+updatedAt
 ```
 
-`artifactId` 表示 Artifact 本体，`artifactVersionId` 表示具体不可变版本。多版本必须共享同一个 `artifactId`。
+`queries` 保存数据源、只读 SQL、筛选参数绑定和分页配置，不保存结果行。后端校验 SQL 后执行查询，ReportContext 保存筛选值并把查询结果交给 ECharts 和 VTable。Puck 只负责布局。
+
+Agent 通过 `GenBI_report` MCP Server 调用 `create_report(report)` 或 `update_report(report_id, report)`。MCP 只接受完整 Report 配置；创建或更新成功后分别投影 `genbi/report/created`、`genbi/report/updated` 事件。
+
+Report 不强制绑定会话。`turnId` 为空时只显示“新建会话”；有来源 Turn 时同时显示“回到会话”和“新建会话”。新建会话在用户首次发送问题时创建，并把当前 Report 作为 `initial_report` 引用上下文。
 
 ## 安全底线
 
@@ -119,6 +131,6 @@ codexItemId
 ## 演进顺序
 
 1. 让分析服务主路径对齐 Codex Thread / Turn / Item。
-2. 让 Artifact source 和 lineage 只依赖 Codex lineage。
-3. 未来的数据访问和业务语义能力只通过受控 Codex tools / MCP / Skill adapters 接入，不恢复旧资源库或报告查询执行层。
+2. 让 Report 查询只通过后端只读数据接口执行。
+3. 未来的数据访问和业务语义能力只通过受控 Codex tools / MCP / Skill adapters 接入。
 4. 完成用户、租户、RLS、分享、发布、治理和审计。

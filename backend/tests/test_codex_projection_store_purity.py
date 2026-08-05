@@ -330,6 +330,7 @@ class CodexProjectionStorePurityTest(unittest.TestCase):
             "complete_turn",
             "upsert_item",
             "get_turn",
+            "get_turn_by_id",
             "list_turns",
             "list_items",
             "get_turn_events",

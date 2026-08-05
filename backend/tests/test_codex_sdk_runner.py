@@ -185,7 +185,7 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
             SimpleNamespace(
                 type="mcpToolCall",
                 server="GenBI_report",
-                tool="create_interactive_report",
+                tool="create_report",
                 status=SimpleNamespace(value="completed"),
                 arguments={"title": "report"},
                 result={"content": [{"type": "text", "text": "{\"ok\":true}"}]},
