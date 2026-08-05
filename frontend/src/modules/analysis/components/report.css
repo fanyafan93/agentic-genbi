@@ -1,0 +1,47 @@
+.report-panel {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.report-preview-body .report-panel {
+  min-height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
+.report-table-block {
+  min-height: 360px;
+}
+
+.report-query-loading,
+.report-query-error {
+  display: grid;
+  min-height: 180px;
+  place-content: center;
+  gap: 0.75rem;
+  color: var(--muted);
+}
+
+.report-query-error {
+  color: #b42318;
+}
+
+.report-query-error button,
+.report-table-pagination button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0.4rem 0.75rem;
+}
+
+.report-table-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+}

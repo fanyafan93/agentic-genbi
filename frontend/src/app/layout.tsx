@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import "antd/dist/reset.css";
 import { Providers } from "./providers";
 import "./globals.css";
 
