@@ -23,12 +23,13 @@ from backend.analysis.asset_store import (
     _require_text,
     _validate_reopen_context,
 )
-from backend.analysis.interactive_report_store import (
-    InteractiveReportRecord,
+from backend.reports.models import (
+    ReportRecord,
     ReportShareRecord,
-    asdict_report,
-    asdict_share,
+    report_to_payload,
+    share_to_payload,
 )
+from backend.reports.schema import report_config_payload
 from backend.business_semantics.knowledge_store import KnowledgeRecord, KnowledgeStore
 
 
@@ -38,9 +39,8 @@ POSTGRES_TURN_TABLE = "analysis_turns"
 POSTGRES_CODEX_ITEM_PROJECTION_TABLE = "analysis_codex_item_projections"
 POSTGRES_ANALYSIS_ASSET_TABLE = "analysis_assets"
 POSTGRES_ARTIFACT_LINEAGE_TABLE = "analysis_artifact_lineage"
-POSTGRES_INTERACTIVE_REPORT_TABLE = "analysis_reports"
-POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE = "analysis_report_versions"
-POSTGRES_REPORT_SHARE_TABLE = "analysis_report_shares"
+POSTGRES_REPORT_TABLE = "reports"
+POSTGRES_REPORT_SHARE_TABLE = "report_shares"
 
 
 def postgres_persistence_enabled() -> bool:
@@ -91,11 +91,11 @@ def build_postgres_codex_projection_store() -> CodexProjectionStore:
     return CodexProjectionStore(backend=backend)
 
 
-def build_postgres_interactive_report_store() -> "PostgresInteractiveReportStore":
+def build_postgres_report_store() -> "PostgresReportStore":
     database_url = get_postgres_database_url()
     if not database_url:
-        raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres interactive report persistence.")
-    return PostgresInteractiveReportStore(database_url)
+        raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres report persistence.")
+    return PostgresReportStore(database_url)
 
 
 def build_postgres_analysis_asset_store() -> "PostgresAnalysisAssetStore":
@@ -848,7 +848,7 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
             )
 
 
-class PostgresInteractiveReportStore:
+class PostgresReportStore:
     def __init__(self, database_url: str) -> None:
         self.database_url = _normalize_postgres_url(database_url)
         self.ensure_schema()
@@ -857,216 +857,181 @@ class PostgresInteractiveReportStore:
         with _connect(self.database_url) as conn:
             conn.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {POSTGRES_INTERACTIVE_REPORT_TABLE} (
+                DROP TABLE IF EXISTS analysis_report_shares;
+                DROP TABLE IF EXISTS analysis_report_versions;
+                DROP TABLE IF EXISTS analysis_reports;
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_REPORT_TABLE} (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     subtitle TEXT NOT NULL,
-                    artifact_type TEXT NOT NULL,
-                    renderer TEXT NOT NULL,
                     owner_id TEXT NOT NULL,
-                    document JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    filters JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    turn_id TEXT REFERENCES {POSTGRES_TURN_TABLE}(id) ON DELETE SET NULL,
+                    layout JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    filters JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    charts JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    tables JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                     queries JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    chart_specs JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    grid_specs JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    datasets JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    origin_type TEXT NOT NULL DEFAULT 'manual',
-                    source_thread_id TEXT,
-                    source_turn_id TEXT,
-                    data_updated_at TEXT,
-                    derived_from_report_id TEXT,
-                    deleted_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
             )
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS document JSONB")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS filters JSONB")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS queries JSONB")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS chart_specs JSONB")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS grid_specs JSONB")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS datasets JSONB")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS origin_type TEXT")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ALTER COLUMN source_thread_id DROP NOT NULL")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ALTER COLUMN source_turn_id DROP NOT NULL")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS data_updated_at TEXT")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS derived_from_report_id TEXT")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
-            conn.execute(
-                f"""
-                DO $$
-                BEGIN
-                    IF to_regclass('{POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE}') IS NOT NULL THEN
-                        WITH latest AS (
-                            SELECT DISTINCT ON (report_id)
-                                report_id, source_thread_id, source_turn_id, document, filters,
-                                queries, chart_specs, grid_specs, datasets
-                            FROM {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE}
-                            ORDER BY report_id, version DESC
-                        )
-                        UPDATE {POSTGRES_INTERACTIVE_REPORT_TABLE} AS report
-                        SET source_thread_id = latest.source_thread_id,
-                            source_turn_id = latest.source_turn_id,
-                            document = latest.document,
-                            filters = latest.filters,
-                            queries = latest.queries,
-                            chart_specs = latest.chart_specs,
-                            grid_specs = latest.grid_specs,
-                            datasets = latest.datasets,
-                            origin_type = CASE
-                                WHEN latest.source_thread_id IS NULL THEN 'manual'
-                                ELSE 'codex'
-                            END
-                        FROM latest
-                        WHERE report.id = latest.report_id;
-                    END IF;
-                END $$;
-                """
-            )
-            conn.execute(
-                f"""
-                UPDATE {POSTGRES_INTERACTIVE_REPORT_TABLE}
-                SET document = COALESCE(document, '{{}}'::jsonb),
-                    filters = COALESCE(filters, '[]'::jsonb),
-                    queries = COALESCE(queries, '{{}}'::jsonb),
-                    chart_specs = COALESCE(chart_specs, '{{}}'::jsonb),
-                    grid_specs = COALESCE(grid_specs, '{{}}'::jsonb),
-                    datasets = COALESCE(datasets, '{{}}'::jsonb),
-                    origin_type = COALESCE(NULLIF(origin_type, ''), CASE
-                        WHEN source_thread_id IS NULL THEN 'manual'
-                        ELSE 'codex'
-                    END)
-                """
-            )
-            for column, default in (
-                ("document", "'{}'::jsonb"),
-                ("filters", "'[]'::jsonb"),
-                ("queries", "'{}'::jsonb"),
-                ("chart_specs", "'{}'::jsonb"),
-                ("grid_specs", "'{}'::jsonb"),
-                ("datasets", "'{}'::jsonb"),
-                ("origin_type", "'manual'"),
-            ):
-                conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ALTER COLUMN {column} SET DEFAULT {default}")
-                conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} ALTER COLUMN {column} SET NOT NULL")
-            conn.execute(f"DROP TABLE IF EXISTS {POSTGRES_INTERACTIVE_REPORT_VERSION_TABLE}")
-            conn.execute(f"ALTER TABLE {POSTGRES_INTERACTIVE_REPORT_TABLE} DROP COLUMN IF EXISTS latest_version")
             conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {POSTGRES_REPORT_SHARE_TABLE} (
-                    report_id TEXT NOT NULL REFERENCES {POSTGRES_INTERACTIVE_REPORT_TABLE}(id) ON DELETE CASCADE,
+                    report_id TEXT NOT NULL REFERENCES {POSTGRES_REPORT_TABLE}(id) ON DELETE CASCADE,
                     recipient_user_id TEXT NOT NULL,
-                    permission TEXT NOT NULL,
+                    permission TEXT NOT NULL CHECK (permission IN ('view', 'view_and_reuse')),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     PRIMARY KEY (report_id, recipient_user_id)
                 )
                 """
             )
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_INTERACTIVE_REPORT_TABLE}_owner_updated ON {POSTGRES_INTERACTIVE_REPORT_TABLE} (owner_id, updated_at DESC) WHERE deleted_at IS NULL")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_INTERACTIVE_REPORT_TABLE}_thread ON {POSTGRES_INTERACTIVE_REPORT_TABLE} (source_thread_id, updated_at DESC)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_REPORT_SHARE_TABLE}_recipient ON {POSTGRES_REPORT_SHARE_TABLE} (recipient_user_id)")
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_REPORT_TABLE}_owner_updated "
+                f"ON {POSTGRES_REPORT_TABLE} (owner_id, updated_at DESC)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_REPORT_TABLE}_turn "
+                f"ON {POSTGRES_REPORT_TABLE} (turn_id, updated_at DESC)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_REPORT_SHARE_TABLE}_recipient "
+                f"ON {POSTGRES_REPORT_SHARE_TABLE} (recipient_user_id)"
+            )
 
-    def save_report(self, payload: dict[str, Any]) -> InteractiveReportRecord:
-        from backend.analysis.interactive_report_store import _validate_payload
-
-        _validate_payload(payload)
-        report_id = str(payload["id"]).strip()
-        report_params = _interactive_report_params(payload)
-        with _connect(self.database_url) as conn:
-            with conn.transaction():
-                report_row = conn.execute(
-                    f"""
-                    INSERT INTO {POSTGRES_INTERACTIVE_REPORT_TABLE} (
-                        id, title, subtitle, artifact_type, renderer, owner_id,
-                        document, filters, queries, chart_specs, grid_specs, datasets,
-                        origin_type, source_thread_id, source_turn_id,
-                        data_updated_at, derived_from_report_id
-                    ) VALUES (
-                        %(id)s, %(title)s, %(subtitle)s, %(artifact_type)s, %(renderer)s, %(owner_id)s,
-                        %(document)s, %(filters)s, %(queries)s, %(chart_specs)s, %(grid_specs)s, %(datasets)s,
-                        %(origin_type)s, %(source_thread_id)s, %(source_turn_id)s,
-                        %(data_updated_at)s, %(derived_from_report_id)s
-                    )
-                    ON CONFLICT (id) DO UPDATE SET
-                        title = EXCLUDED.title,
-                        subtitle = EXCLUDED.subtitle,
-                        artifact_type = EXCLUDED.artifact_type,
-                        renderer = EXCLUDED.renderer,
-                        owner_id = EXCLUDED.owner_id,
-                        document = EXCLUDED.document,
-                        filters = EXCLUDED.filters,
-                        queries = EXCLUDED.queries,
-                        chart_specs = EXCLUDED.chart_specs,
-                        grid_specs = EXCLUDED.grid_specs,
-                        datasets = EXCLUDED.datasets,
-                        origin_type = EXCLUDED.origin_type,
-                        source_thread_id = EXCLUDED.source_thread_id,
-                        source_turn_id = EXCLUDED.source_turn_id,
-                        data_updated_at = EXCLUDED.data_updated_at,
-                        derived_from_report_id = EXCLUDED.derived_from_report_id,
-                        deleted_at = NULL,
-                        updated_at = now()
-                    RETURNING *
-                    """,
-                    report_params,
-                ).fetchone()
-        return _interactive_report_from_row(report_row)
-
-    def list_reports(self, *, owner_id: str | None = None, limit: int = 50) -> list[InteractiveReportRecord]:
-        where = "WHERE deleted_at IS NULL"
-        params: dict[str, Any] = {"limit": limit}
-        if owner_id:
-            where += " AND owner_id = %(owner_id)s"
-            params["owner_id"] = owner_id
-        with _connect(self.database_url) as conn:
-            rows = conn.execute(
-                f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} {where} ORDER BY updated_at DESC LIMIT %(limit)s",
-                params,
-            ).fetchall()
-        return [_interactive_report_from_row(row) for row in rows]
-
-    def get_report(self, report_id: str) -> InteractiveReportRecord | None:
-        with _connect(self.database_url) as conn:
-            report_row = conn.execute(f"SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s AND deleted_at IS NULL", {"id": report_id}).fetchone()
-        return _interactive_report_from_row(report_row) if report_row else None
-
-    def rename_report(self, report_id: str, *, owner_id: str, title: str) -> InteractiveReportRecord | None:
+    def create_report(
+        self,
+        config: dict[str, Any],
+        *,
+        owner_id: str,
+        turn_id: str | None = None,
+        report_id: str | None = None,
+    ) -> ReportRecord:
+        normalized = report_config_payload(config)
+        params = _report_params(
+            normalized,
+            report_id=report_id or f"report_{uuid4().hex}",
+            owner_id=owner_id,
+            turn_id=turn_id,
+        )
         with _connect(self.database_url) as conn:
             row = conn.execute(
                 f"""
-                UPDATE {POSTGRES_INTERACTIVE_REPORT_TABLE}
-                SET title = %(title)s, updated_at = now()
-                WHERE id = %(id)s AND owner_id = %(owner_id)s AND deleted_at IS NULL
+                INSERT INTO {POSTGRES_REPORT_TABLE} (
+                    id, title, subtitle, owner_id, turn_id,
+                    layout, filters, charts, tables, queries
+                ) VALUES (
+                    %(id)s, %(title)s, %(subtitle)s, %(owner_id)s, %(turn_id)s,
+                    %(layout)s, %(filters)s, %(charts)s, %(tables)s, %(queries)s
+                )
                 RETURNING *
                 """,
-                {"id": report_id, "owner_id": owner_id, "title": title.strip()},
+                params,
             ).fetchone()
-        return _interactive_report_from_row(row) if row else None
+        if not row:
+            raise RuntimeError("report_create_failed")
+        return _report_from_row(row)
+
+    def update_report(
+        self,
+        report_id: str,
+        config: dict[str, Any],
+        *,
+        owner_id: str,
+        turn_id: str | None = None,
+    ) -> ReportRecord | None:
+        normalized = report_config_payload(config)
+        params = _report_params(
+            normalized,
+            report_id=report_id,
+            owner_id=owner_id,
+            turn_id=turn_id,
+        )
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"""
+                UPDATE {POSTGRES_REPORT_TABLE}
+                SET title = %(title)s,
+                    subtitle = %(subtitle)s,
+                    turn_id = COALESCE(%(turn_id)s, turn_id),
+                    layout = %(layout)s,
+                    filters = %(filters)s,
+                    charts = %(charts)s,
+                    tables = %(tables)s,
+                    queries = %(queries)s,
+                    updated_at = now()
+                WHERE id = %(id)s AND owner_id = %(owner_id)s
+                RETURNING *
+                """,
+                params,
+            ).fetchone()
+        return _report_from_row(row) if row else None
+
+    def list_reports(
+        self,
+        *,
+        owner_id: str | None = None,
+        turn_ids: set[str] | None = None,
+        limit: int = 50,
+    ) -> list[ReportRecord]:
+        clauses: list[str] = []
+        params: dict[str, Any] = {"limit": limit}
+        if owner_id:
+            clauses.append("owner_id = %(owner_id)s")
+            params["owner_id"] = owner_id
+        if turn_ids is not None:
+            if not turn_ids:
+                return []
+            clauses.append("turn_id = ANY(%(turn_ids)s)")
+            params["turn_ids"] = sorted(turn_ids)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with _connect(self.database_url) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM {POSTGRES_REPORT_TABLE} {where} "
+                "ORDER BY updated_at DESC LIMIT %(limit)s",
+                params,
+            ).fetchall()
+        return [_report_from_row(row) for row in rows]
+
+    def get_report(self, report_id: str) -> ReportRecord | None:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"SELECT * FROM {POSTGRES_REPORT_TABLE} WHERE id = %(id)s",
+                {"id": report_id},
+            ).fetchone()
+        return _report_from_row(row) if row else None
 
     def delete_report(self, report_id: str, *, owner_id: str) -> bool:
         with _connect(self.database_url) as conn:
-            with conn.transaction():
-                row = conn.execute(
-                    f"""
-                    UPDATE {POSTGRES_INTERACTIVE_REPORT_TABLE}
-                    SET deleted_at = now(), updated_at = now()
-                    WHERE id = %(id)s AND owner_id = %(owner_id)s AND deleted_at IS NULL
-                    RETURNING id
-                    """,
-                    {"id": report_id, "owner_id": owner_id},
-                ).fetchone()
-                if not row:
-                    return False
-                conn.execute(f"DELETE FROM {POSTGRES_REPORT_SHARE_TABLE} WHERE report_id = %(id)s", {"id": report_id})
-        return True
+            row = conn.execute(
+                f"""
+                DELETE FROM {POSTGRES_REPORT_TABLE}
+                WHERE id = %(id)s AND owner_id = %(owner_id)s
+                RETURNING id
+                """,
+                {"id": report_id, "owner_id": owner_id},
+            ).fetchone()
+        return row is not None
 
-    def share_report(self, report_id: str, *, owner_id: str, recipient_user_id: str, permission: str) -> ReportShareRecord | None:
+    def share_report(
+        self,
+        report_id: str,
+        *,
+        owner_id: str,
+        recipient_user_id: str,
+        permission: str,
+    ) -> ReportShareRecord | None:
         if permission not in {"view", "view_and_reuse"}:
             raise ValueError("invalid_report_share_permission")
         with _connect(self.database_url) as conn:
             report = conn.execute(
-                f"SELECT 1 FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s AND owner_id = %(owner_id)s AND deleted_at IS NULL",
+                f"SELECT 1 FROM {POSTGRES_REPORT_TABLE} "
+                "WHERE id = %(id)s AND owner_id = %(owner_id)s",
                 {"id": report_id, "owner_id": owner_id},
             ).fetchone()
             if not report:
@@ -1083,10 +1048,17 @@ class PostgresInteractiveReportStore:
             ).fetchone()
         return _report_share_from_row(row) if row else None
 
-    def revoke_report_share(self, report_id: str, *, owner_id: str, recipient_user_id: str) -> bool:
+    def revoke_report_share(
+        self,
+        report_id: str,
+        *,
+        owner_id: str,
+        recipient_user_id: str,
+    ) -> bool:
         with _connect(self.database_url) as conn:
             report = conn.execute(
-                f"SELECT 1 FROM {POSTGRES_INTERACTIVE_REPORT_TABLE} WHERE id = %(id)s AND owner_id = %(owner_id)s AND deleted_at IS NULL",
+                f"SELECT 1 FROM {POSTGRES_REPORT_TABLE} "
+                "WHERE id = %(id)s AND owner_id = %(owner_id)s",
                 {"id": report_id, "owner_id": owner_id},
             ).fetchone()
             if not report:
@@ -1097,12 +1069,17 @@ class PostgresInteractiveReportStore:
             )
         return result.rowcount > 0
 
-    def list_report_center(self, *, user_id: str, limit: int = 50) -> dict[str, list[dict[str, Any]]]:
+    def list_report_center(
+        self,
+        *,
+        user_id: str,
+        limit: int = 50,
+    ) -> dict[str, list[dict[str, Any]]]:
         with _connect(self.database_url) as conn:
             mine_rows = conn.execute(
                 f"""
-                SELECT * FROM {POSTGRES_INTERACTIVE_REPORT_TABLE}
-                WHERE owner_id = %(user_id)s AND deleted_at IS NULL
+                SELECT * FROM {POSTGRES_REPORT_TABLE}
+                WHERE owner_id = %(user_id)s
                 ORDER BY updated_at DESC
                 LIMIT %(limit)s
                 """,
@@ -1113,22 +1090,28 @@ class PostgresInteractiveReportStore:
                 SELECT share.report_id, share.recipient_user_id, share.permission, share.created_at,
                        report.*
                 FROM {POSTGRES_REPORT_SHARE_TABLE} AS share
-                JOIN {POSTGRES_INTERACTIVE_REPORT_TABLE} AS report ON report.id = share.report_id
-                WHERE share.recipient_user_id = %(user_id)s AND report.deleted_at IS NULL
+                JOIN {POSTGRES_REPORT_TABLE} AS report ON report.id = share.report_id
+                WHERE share.recipient_user_id = %(user_id)s
                 ORDER BY report.updated_at DESC
                 LIMIT %(limit)s
                 """,
                 {"user_id": user_id, "limit": limit},
             ).fetchall()
-        mine = [_interactive_report_from_row(row) for row in mine_rows]
+        mine = [_report_from_row(row) for row in mine_rows]
         shared = [
             {
-                **asdict_share(_report_share_from_row(row)),
-                "report": asdict_report(_interactive_report_from_row(row)),
+                **share_to_payload(_report_share_from_row(row)),
+                "report": report_to_payload(_report_from_row(row)),
             }
             for row in shared_rows
         ]
-        return {"mine": [{"report": asdict_report(report)} for report in mine], "sharedWithMe": shared}
+        return {
+            "mine": [
+                {"report": report_to_payload(report)}
+                for report in mine
+            ],
+            "sharedWithMe": shared,
+        }
 
 
 class PostgresKnowledgeStore(KnowledgeStore):
@@ -1485,28 +1468,24 @@ def _artifact_lineage_params(record: ArtifactLineageRecord) -> dict[str, Any]:
     }
 
 
-def _interactive_report_params(payload: dict[str, Any]) -> dict[str, Any]:
-    source = dict(payload.get("source") or {})
-    source_thread_id = str(source.get("threadId") or "").strip() or None
-    source_turn_id = str(source.get("turnId") or "").strip() or None
+def _report_params(
+    config: dict[str, Any],
+    *,
+    report_id: str,
+    owner_id: str,
+    turn_id: str | None,
+) -> dict[str, Any]:
     return {
-        "id": str(payload["id"]).strip(),
-        "title": str(payload["title"]).strip(),
-        "subtitle": str(payload["subtitle"]).strip(),
-        "artifact_type": str(payload["artifactType"]).strip(),
-        "renderer": str(payload["renderer"]).strip(),
-        "owner_id": str(payload["ownerId"]).strip(),
-        "document": _jsonb(payload["document"]),
-        "filters": _jsonb(payload["filters"]),
-        "queries": _jsonb(payload["queries"]),
-        "chart_specs": _jsonb(payload["chartSpecs"]),
-        "grid_specs": _jsonb(payload["gridSpecs"]),
-        "datasets": _jsonb(payload.get("datasets", {})),
-        "origin_type": str(payload.get("originType") or ("codex" if source_thread_id else "manual")).strip(),
-        "source_thread_id": source_thread_id,
-        "source_turn_id": source_turn_id,
-        "data_updated_at": str(payload.get("dataUpdatedAt") or "").strip() or None,
-        "derived_from_report_id": str(payload.get("derivedFromReportId") or "").strip() or None,
+        "id": str(report_id).strip(),
+        "title": str(config["title"]).strip(),
+        "subtitle": str(config["subtitle"]).strip(),
+        "owner_id": str(owner_id).strip(),
+        "turn_id": str(turn_id).strip() if turn_id else None,
+        "layout": _jsonb(config["layout"]),
+        "filters": _jsonb(config["filters"]),
+        "charts": _jsonb(config["charts"]),
+        "tables": _jsonb(config["tables"]),
+        "queries": _jsonb(config["queries"]),
     }
 
 
@@ -1630,28 +1609,20 @@ def _artifact_lineage_from_row(row: dict[str, Any]) -> ArtifactLineageRecord:
     )
 
 
-def _interactive_report_from_row(row: dict[str, Any]) -> InteractiveReportRecord:
-    return InteractiveReportRecord(
+def _report_from_row(row: dict[str, Any]) -> ReportRecord:
+    return ReportRecord(
         id=str(row["id"]),
         title=str(row["title"]),
         subtitle=str(row["subtitle"]),
-        artifactType=str(row["artifact_type"]),
-        renderer=str(row["renderer"]),
         ownerId=str(row["owner_id"]),
-        document=dict(row["document"] or {}),
-        filters=list(row["filters"] or []),
+        turnId=str(row["turn_id"]) if row.get("turn_id") else None,
+        layout=dict(row["layout"] or {}),
+        filters=dict(row["filters"] or {}),
+        charts=dict(row["charts"] or {}),
+        tables=dict(row["tables"] or {}),
         queries=dict(row["queries"] or {}),
-        chartSpecs=dict(row["chart_specs"] or {}),
-        gridSpecs=dict(row["grid_specs"] or {}),
-        datasets=dict(row["datasets"] or {}),
-        originType=str(row.get("origin_type") or ("codex" if row.get("source_thread_id") else "manual")),
-        sourceThreadId=str(row["source_thread_id"]) if row.get("source_thread_id") else None,
-        sourceTurnId=str(row["source_turn_id"]) if row.get("source_turn_id") else None,
         createdAt=_iso(row["created_at"]) or "",
         updatedAt=_iso(row["updated_at"]) or "",
-        dataUpdatedAt=row.get("data_updated_at"),
-        derivedFromReportId=row.get("derived_from_report_id"),
-        deletedAt=_iso(row.get("deleted_at")),
     )
 
 
