@@ -154,7 +154,19 @@ class ArtifactProjector:
                 # error. Returning None here would mask a real save
                 # bug — instead we emit genbi/artifact/failed via the
                 # same event stream elsewhere (in CodexTurnRunner).
-                version_number = None
+                return AgentEvent(
+                    type="genbi/artifact/failed",
+                    turn_id=turn_id,
+                    payload={
+                        "eventSource": "genbi_projection",
+                        "error": "interactive_report_save_failed",
+                        "artifactType": "interactive_report",
+                        "title": report.get("title"),
+                        "codex_thread_id": payload.get("codex_thread_id"),
+                        "codex_turn_id": payload.get("codex_turn_id"),
+                        "codex_item_id": payload.get("codex_item_id"),
+                    },
+                )
         return AgentEvent(
             type="genbi/artifact/updated",
             turn_id=turn_id,

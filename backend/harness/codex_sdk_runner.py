@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import tempfile
@@ -15,6 +16,9 @@ from backend.harness.codex_mcp_config import (
 )
 from backend.harness.events import AgentEvent
 from backend.harness.minimax_codex_adapter import adapter_base_url, adapter_enabled
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 CODEX_ANALYSIS_INSTRUCTIONS = """
@@ -123,7 +127,7 @@ class CodexSdkAnalysisRuntime:
         async for item in self._iter_streamed(question, context=context):
             yield item
 
-    def interrupt_turn(self, thread_id: str, turn_id: str) -> bool:
+    async def interrupt_turn(self, thread_id: str, turn_id: str) -> bool:
         """Interrupt an in-flight Codex turn.
 
         Returns ``True`` when the live Codex turn object was
@@ -161,9 +165,13 @@ class CodexSdkAnalysisRuntime:
             # projection store write that follows picks up the
             # terminal state on the next event tick.
             try:
-                result.close()  # type: ignore[attr-defined]
+                await result
             except Exception:
-                pass
+                LOGGER.exception(
+                    "codex_interrupt_failed",
+                    extra={"thread_id": thread_id, "turn_id": turn_id},
+                )
+                return False
         return True
 
     async def _collect_stream(
@@ -243,15 +251,17 @@ class CodexSdkAnalysisRuntime:
                             "turn_id": provisioned_codex_turn_id,
                         },
                     )
-                async for notification in turn.stream():
-                    event = self._notification_to_event(notification, codex_thread_id=codex_thread_id)
-                    if event:
-                        yield event
-                # The stream ended on its own; clean the
-                # registry so a re-issue of the same id does
-                # not reuse a stale handle.
-                if provisioned_codex_turn_id and codex_thread_id:
-                    self._active_turns.pop((codex_thread_id, provisioned_codex_turn_id), None)
+                try:
+                    async for notification in turn.stream():
+                        event = self._notification_to_event(notification, codex_thread_id=codex_thread_id)
+                        if event:
+                            yield event
+                finally:
+                    # The stream ended or was cancelled; clean
+                    # the registry so a re-issue of the same id
+                    # does not reuse a stale handle.
+                    if provisioned_codex_turn_id and codex_thread_id:
+                        self._active_turns.pop((codex_thread_id, provisioned_codex_turn_id), None)
         except ImportError as exc:
             raise RuntimeError("Install the `openai-codex` Python package to use GENBI_ANALYSIS_RUNTIME=codex.") from exc
 

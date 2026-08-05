@@ -143,6 +143,24 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertEqual(fake_codex.resumed[0], "codex_existing")
         self.assertEqual(events[-1].type, "turn/completed")
 
+    def test_interrupt_turn_awaits_async_sdk_interrupt(self) -> None:
+        class _AsyncInterruptTurn:
+            def __init__(self) -> None:
+                self.awaited = False
+
+            async def interrupt(self) -> None:
+                self.awaited = True
+
+        turn = _AsyncInterruptTurn()
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+        runtime._active_turns[("codex_thread_1", "codex_turn_1")] = turn
+
+        interrupted = asyncio.run(runtime.interrupt_turn("codex_thread_1", "codex_turn_1"))
+
+        self.assertTrue(interrupted)
+        self.assertTrue(turn.awaited)
+        self.assertEqual(runtime._active_turns, {})
+
     def test_thread_start_receives_default_tools_disabled_config(self) -> None:
         fake_codex = _FakeAsyncCodex()
         with patch.dict(

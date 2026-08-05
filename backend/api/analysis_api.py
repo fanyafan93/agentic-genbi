@@ -446,6 +446,7 @@ def create_app(
                 "codexSessionId": detail["codexSessionId"],
                 "codexThreadId": detail["codexSessionId"],
                 "codex_thread_id": detail["codexSessionId"],
+                "metadata": detail.get("metadata", {}),
                 "latestTurnId": detail["latestTurnId"],
                 "latestTurnStatus": detail["latestTurnStatus"],
                 "latest_turn_id": detail["latestTurnId"],
@@ -461,6 +462,7 @@ def create_app(
                 "codexSessionId": detail["codexSessionId"],
                 "codexThreadId": detail["codexSessionId"],
                 "codex_thread_id": detail["codexSessionId"],
+                "metadata": detail.get("metadata", {}),
                 "latestTurnId": detail["latestTurnId"],
                 "latestTurnStatus": detail["latestTurnStatus"],
                 "latest_turn_id": detail["latestTurnId"],
@@ -660,7 +662,7 @@ def create_app(
         return {"session": _session_view_to_thread_dict(refreshed, configured_codex_projection_store)}
 
     @app.post("/api/analysis/sessions/{session_id}/turns/{turn_id}/cancel")
-    def cancel_session_turn(session_id: str, turn_id: str) -> dict[str, Any]:
+    async def cancel_session_turn(session_id: str, turn_id: str) -> dict[str, Any]:
         """Interrupt the live Codex Turn for ``(session_id, turn_id)``.
 
         Owned by ``CodexTurnRunner.interrupt_turn``: it writes the
@@ -674,14 +676,15 @@ def create_app(
         canonical_session_id = configured_session_service.resolve_session_id(session_id)
         if canonical_session_id is None:
             raise HTTPException(status_code=404, detail="analysis_session_not_found")
-        handled, info = configured_turn_runner.interrupt_turn(
+        handled, info = await configured_turn_runner.interrupt_turn(
             session_id=canonical_session_id, turn_id=turn_id
         )
         return {
             "session_id": canonical_session_id,
             "turn_id": turn_id,
             "status": "cancelled" if handled else "no_such_turn_or_already_terminal",
-            "codex_runtime_interrupted": handled,
+            "turn_status_updated": handled,
+            "codex_runtime_interrupted": bool(info.get("codex_runtime_interrupted")),
         }
 
 

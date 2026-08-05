@@ -939,7 +939,10 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        artifact = ArtifactProjector(InteractiveReportStore()).project_interactive_report(event, session_id="thread_report", turn_id="turn_report")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact = ArtifactProjector(
+                InteractiveReportStore(Path(temp_dir) / "reports.json")
+            ).project_interactive_report(event, session_id="thread_report", turn_id="turn_report")
 
         self.assertIsNotNone(artifact)
         assert artifact is not None
@@ -978,7 +981,10 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        artifact = ArtifactProjector(InteractiveReportStore()).project_interactive_report(event, session_id="thread_report", turn_id="turn_report")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact = ArtifactProjector(
+                InteractiveReportStore(Path(temp_dir) / "reports.json")
+            ).project_interactive_report(event, session_id="thread_report", turn_id="turn_report")
 
         self.assertIsNotNone(artifact)
         assert artifact is not None
@@ -986,6 +992,50 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(artifact.payload["source"]["threadId"], "thread_report")
         self.assertEqual(artifact.payload["source"]["turnId"], "turn_report")
         self.assertEqual(artifact.payload["datasets"]["channel_sales"]["rows"][0]["channel"], "A")
+
+    def test_report_projection_emits_failed_event_when_store_save_fails(self) -> None:
+        class _FailingReportStore:
+            def save_report(self, _report: dict) -> None:
+                raise ValueError("boom")
+
+        event = AgentEvent(
+            type="item/completed",
+            turn_id="codex_turn_report",
+            payload={
+                "eventSource": "codex",
+                "codex_item_type": "mcpToolCall",
+                "codex_item_id": "codex_item_report",
+                "mcp_status": "completed",
+                "mcp_result": {
+                    "interactive_report": {
+                        "id": "report_save_failure",
+                        "title": "channel report",
+                        "subtitle": "minimal",
+                        "artifactType": "interactive_report",
+                        "renderer": "puck",
+                        "ownerId": "codex-agent",
+                        "source": {"threadId": "codex_thread_pending", "turnId": "codex_turn_pending"},
+                        "document": {"root": {"props": {"title": "channel report"}}},
+                        "filters": [],
+                        "queries": {},
+                        "chartSpecs": {},
+                        "gridSpecs": {},
+                        "datasets": {"channel_sales": {"rows": [{"channel": "A", "sales": 1}]}},
+                    }
+                },
+            },
+        )
+
+        artifact = ArtifactProjector(_FailingReportStore()).project_interactive_report(
+            event,
+            session_id="thread_report",
+            turn_id="turn_report",
+        )
+
+        self.assertIsNotNone(artifact)
+        assert artifact is not None
+        self.assertEqual(artifact.type, "genbi/artifact/failed")
+        self.assertEqual(artifact.payload["error"], "interactive_report_save_failed")
 
     def test_analysis_asset_api_saves_lists_and_reopens_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1242,8 +1292,9 @@ class SessionlessStartTest(unittest.IsolatedAsyncioTestCase):
     def test_sessions_turns_does_not_persist_thread_until_codex_provisions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            runtime = _FakeCodexRuntime()
             app = create_app(
-                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                analysis_runtime=runtime,  # type: ignore[arg-type]
                 thread_store=thread_store,
             )
             client = TestClient(app)
@@ -2161,8 +2212,9 @@ class LegacySessionIdCompatibilityTest(unittest.TestCase):
                 json.dumps(legacy_payload, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
+            runtime = _FakeCodexRuntime()
             app = create_app(
-                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                analysis_runtime=runtime,  # type: ignore[arg-type]
                 session_catalog=stores.session_catalog,
                 codex_projection_store=stores.codex_projection_store,
             )
@@ -2208,24 +2260,26 @@ class LegacySessionIdCompatibilityTest(unittest.TestCase):
                 json.dumps(legacy_payload, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
+            runtime = _FakeCodexRuntime()
             app = create_app(
-                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                analysis_runtime=runtime,  # type: ignore[arg-type]
                 session_catalog=stores.session_catalog,
                 codex_projection_store=stores.codex_projection_store,
             )
             client = TestClient(app)
 
             # Hit the continuation endpoint with the OLD GenBI
-            # id; the backend must resolve it to the Codex-side
-            # id before forwarding to the runtime so projections
-            # land under the canonical row.
+            # id. The backend keeps storage keyed by the GenBI
+            # row id while forwarding the separate Codex id to
+            # the runtime.
             response = client.post(
                 "/api/analysis/sessions/genbi_legacy_1/turns",
                 json={"message": "follow up", "turn_kind": "message"},
             )
             self.assertEqual(response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["session_id"], "codex_legacy_1")
+            self.assertEqual(payload["session_id"], "genbi_legacy_1")
+            self.assertEqual(runtime.contexts[-1]["codex_session_id"], "codex_legacy_1")
 
 
 class SessionTurnStateDecouplingTest(unittest.IsolatedAsyncioTestCase):

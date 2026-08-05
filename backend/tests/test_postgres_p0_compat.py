@@ -99,6 +99,16 @@ class _FakeConnection:
     def execute(self, sql: str, params: dict | None = None) -> _Result:
         params = self._unwrap(params)
         compact = " ".join(sql.split()).lower()
+        if "from information_schema.columns" in compact:
+            assert params is not None
+            table = str(params["table_name"])
+            column = str(params["column_name"])
+            legacy_columns = {
+                POSTGRES_THREAD_TABLE: {"codex_thread_id"},
+                POSTGRES_TURN_TABLE: {"thread_id", "codex_thread_id"},
+                POSTGRES_CODEX_ITEM_PROJECTION_TABLE: {"codex_thread_id", "genbi_thread_id"},
+            }
+            return _Result([{"exists": column in legacy_columns.get(table, set())}])
         if compact.startswith("create ") or compact.startswith("create index"):
             return _Result()
         if compact.startswith("alter table"):

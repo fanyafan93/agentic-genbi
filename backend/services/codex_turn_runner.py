@@ -393,6 +393,7 @@ class CodexTurnRunner:
         """
         saw_terminal_event = False
         effective_thread_id = session_id
+        runtime_codex_session_id = codex_session_id
         resolved_turn_id = turn_id
         runtime = InMemoryCodexAnalysisRuntime(self._projections)
         async for event in self._runtime.async_stream(
@@ -408,7 +409,9 @@ class CodexTurnRunner:
                     or _string_or_none(event.payload.get("session_id"))
                     or ""
                 )
-                if runtime_thread_id and runtime_thread_id != effective_thread_id:
+                if runtime_thread_id:
+                    runtime_codex_session_id = runtime_thread_id
+                if not session_id and runtime_thread_id and runtime_thread_id != effective_thread_id:
                     effective_thread_id = runtime_thread_id
             if event.type == "genbi/turn/provisioned":
                 provisioned_turn_id = (
@@ -440,7 +443,7 @@ class CodexTurnRunner:
                     input_text=request.question.strip(),
                     status="running",
                     started_at=event.created_at,
-                    codex_session_id=effective_thread_id,
+                    codex_session_id=runtime_codex_session_id or effective_thread_id,
                     codex_turn_id=resolved_turn_id,
                 )
             if effective_thread_id and resolved_turn_id:
@@ -501,7 +504,7 @@ class CodexTurnRunner:
                 "codex_runtime_did_not_emit_turn_id: cannot persist turn without Codex-issued turn id."
             )
         runtime_thread_id = _first_event_codex_thread_id(events)
-        resolved_thread_id = runtime_thread_id or session_id
+        resolved_thread_id = session_id or runtime_thread_id
         self.save_turn(
             resolved_request,
             session_id=resolved_thread_id,
@@ -519,7 +522,7 @@ class CodexTurnRunner:
                             "eventSource": "genbi",
                             "runtime": "openai-codex",
                             "sessionId": resolved_thread_id,
-                            "codexThreadId": resolved_thread_id,
+                            "codexThreadId": runtime_thread_id or resolved_thread_id,
                             "codexTurnId": turn_id,
                             "threadId": resolved_thread_id,
                             "turnId": turn_id,
@@ -564,7 +567,7 @@ class CodexTurnRunner:
 
     # -- interrupt support ---------------------------------------------
 
-    def interrupt_turn(self, *, session_id: str, turn_id: str) -> tuple[bool, dict[str, Any]]:
+    async def interrupt_turn(self, *, session_id: str, turn_id: str) -> tuple[bool, dict[str, Any]]:
         """Mark a turn ``interrupted`` in the store AND ask Codex to stop.
 
         Returns a ``(handled, updated_row)`` tuple: ``handled`` is
@@ -572,18 +575,32 @@ class CodexTurnRunner:
         to a terminal state, and ``updated_row`` carries the updated
         turn metadata the HTTP endpoint can echo back.
         """
-        if not getattr(self._runtime, "enabled", False):
-            return False, {}
-        try:
-            self._runtime.interrupt_turn(thread_id=session_id, turn_id=turn_id)
-        except Exception:
-            LOGGER.warning("codex_interrupt_failed", extra={"session_id": session_id, "turn_id": turn_id})
         existing = self._projections.get_turn(session_id, turn_id)
+        session = self._catalog.get_session(session_id)
+        runtime_session_id = (
+            _string_or_none(getattr(existing, "codexSessionId", None))
+            or _string_or_none(getattr(session, "codexSessionId", None))
+            or session_id
+        )
+        codex_runtime_interrupted = False
+        if getattr(self._runtime, "enabled", False):
+            try:
+                result = self._runtime.interrupt_turn(thread_id=runtime_session_id, turn_id=turn_id)
+                if asyncio.iscoroutine(result):
+                    codex_runtime_interrupted = bool(await result)
+                else:
+                    codex_runtime_interrupted = bool(result)
+            except Exception:
+                LOGGER.warning("codex_interrupt_failed", extra={"session_id": session_id, "turn_id": turn_id})
         if existing is None:
-            return False, {}
+            return False, {"codex_runtime_interrupted": codex_runtime_interrupted}
         existing_status = getattr(existing, "status", None) or ""
         if existing_status in {"completed", "failed", "cancelled"}:
-            return False, {"turn": existing, "already_terminal": True}
+            return False, {
+                "turn": existing,
+                "already_terminal": True,
+                "codex_runtime_interrupted": codex_runtime_interrupted,
+            }
         completed_at = _now_iso()
         updated = self._projections.save_turn(
             session_id=session_id,
@@ -598,7 +615,11 @@ class CodexTurnRunner:
             metadata={**(getattr(existing, "metadata", None) or {}), "interrupted_at": completed_at},
         )
         self._catalog.mark_updated(session_id)
-        return True, {"turn": updated, "completed_at": completed_at}
+        return True, {
+            "turn": updated,
+            "completed_at": completed_at,
+            "codex_runtime_interrupted": codex_runtime_interrupted,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -737,28 +758,10 @@ class _ContinuationTurnStream:
                 )
             raise
         finally:
-            if self._events and self._resolved_turn_id and self._resolved_thread_id:
-                if self._runner.catalog.get_session(self._resolved_thread_id) is None:
-                    try:
-                        self._runner.catalog.register_session(
-                            session_id=self._resolved_thread_id,
-                            product_kind=ANALYSIS_PRODUCT_KIND,
-                            title=self._request.question.strip()[:32] or None,
-                            user_id=self._request.user_id,
-                            status="active",
-                            codex_session_id=self._resolved_thread_id,
-                            metadata={
-                                **(self._request.metadata or {}),
-                                "domain": ANALYSIS_PRODUCT_KIND,
-                                "session_id": self._resolved_thread_id,
-                                "codex_session_id": self._resolved_thread_id,
-                            },
-                        )
-                    except ValueError:
-                        pass
+            if self._events and self._resolved_turn_id and self._session_id:
                 self._runner.save_turn(
                     self._request,
-                    session_id=self._resolved_thread_id,
+                    session_id=self._session_id,
                     turn_id=self._resolved_turn_id,
                     events=self._events,
                 )

@@ -164,6 +164,7 @@ class SessionService:
             "updatedAt": session.updatedAt,
             "productKind": session.productKind,
             "codexSessionId": session.codexSessionId,
+            "metadata": dict(session.metadata or {}),
             "latestTurnId": view.latestTurnId,
             "latestTurnStatus": view.latestTurnStatus,
             "turns": turn_dicts,

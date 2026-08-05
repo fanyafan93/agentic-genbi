@@ -134,20 +134,20 @@ class PostgresSessionCatalogBackend:
             conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS tenant_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS workspace_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS codex_session_id TEXT")
-            conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS codex_thread_id TEXT")
             # Backfill the new canonical column from the legacy
             # ``codex_thread_id`` column. Idempotent: only fires
             # on rows where the new column is still null. The
             # ``id == codex_session_id`` invariant does not hold
             # for legacy rows (one row may carry a GenBI id AND
             # a Codex-issued id); the read path tolerates that.
-            conn.execute(
-                f"""
-                UPDATE {POSTGRES_THREAD_TABLE}
-                SET codex_session_id = codex_thread_id
-                WHERE codex_session_id IS NULL AND codex_thread_id IS NOT NULL
-                """
-            )
+            if _column_exists(conn, POSTGRES_THREAD_TABLE, "codex_thread_id"):
+                conn.execute(
+                    f"""
+                    UPDATE {POSTGRES_THREAD_TABLE}
+                    SET codex_session_id = codex_thread_id
+                    WHERE codex_session_id IS NULL AND codex_thread_id IS NOT NULL
+                    """
+                )
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_updated ON {POSTGRES_THREAD_TABLE} (updated_at DESC NULLS LAST)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_product ON {POSTGRES_THREAD_TABLE} (product_kind)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_codex ON {POSTGRES_THREAD_TABLE} (codex_session_id)")
@@ -238,20 +238,24 @@ class PostgresCodexProjectionBackend:
             conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS input_text TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ")
             conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ")
-            conn.execute(
-                f"""
-                UPDATE {POSTGRES_TURN_TABLE}
-                SET session_id = thread_id
-                WHERE session_id IS NULL AND thread_id IS NOT NULL
-                """
-            )
-            conn.execute(
-                f"""
-                UPDATE {POSTGRES_TURN_TABLE}
-                SET codex_session_id = codex_thread_id
-                WHERE codex_session_id IS NULL AND codex_thread_id IS NOT NULL
-                """
-            )
+            has_legacy_turn_thread_id = _column_exists(conn, POSTGRES_TURN_TABLE, "thread_id")
+            has_legacy_turn_codex_thread_id = _column_exists(conn, POSTGRES_TURN_TABLE, "codex_thread_id")
+            if has_legacy_turn_thread_id:
+                conn.execute(
+                    f"""
+                    UPDATE {POSTGRES_TURN_TABLE}
+                    SET session_id = thread_id
+                    WHERE session_id IS NULL AND thread_id IS NOT NULL
+                    """
+                )
+            if has_legacy_turn_codex_thread_id:
+                conn.execute(
+                    f"""
+                    UPDATE {POSTGRES_TURN_TABLE}
+                    SET codex_session_id = codex_thread_id
+                    WHERE codex_session_id IS NULL AND codex_thread_id IS NOT NULL
+                    """
+                )
             conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
@@ -276,20 +280,22 @@ class PostgresCodexProjectionBackend:
             conn.execute(f"ALTER TABLE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} ADD COLUMN IF NOT EXISTS sequence INTEGER NOT NULL DEFAULT 0")
             # Backfill canonical columns from the legacy aliases.
             # Idempotent.
-            conn.execute(
-                f"""
-                UPDATE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
-                SET codex_session_id = codex_thread_id
-                WHERE codex_session_id IS NULL AND codex_thread_id IS NOT NULL
-                """
-            )
-            conn.execute(
-                f"""
-                UPDATE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
-                SET genbi_session_id = genbi_thread_id
-                WHERE genbi_session_id IS NULL AND genbi_thread_id IS NOT NULL
-                """
-            )
+            if _column_exists(conn, POSTGRES_CODEX_ITEM_PROJECTION_TABLE, "codex_thread_id"):
+                conn.execute(
+                    f"""
+                    UPDATE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
+                    SET codex_session_id = codex_thread_id
+                    WHERE codex_session_id IS NULL AND codex_thread_id IS NOT NULL
+                    """
+                )
+            if _column_exists(conn, POSTGRES_CODEX_ITEM_PROJECTION_TABLE, "genbi_thread_id"):
+                conn.execute(
+                    f"""
+                    UPDATE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
+                    SET genbi_session_id = genbi_thread_id
+                    WHERE genbi_session_id IS NULL AND genbi_thread_id IS NOT NULL
+                    """
+                )
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_session ON {POSTGRES_TURN_TABLE} (session_id, created_at)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_codex ON {POSTGRES_TURN_TABLE} (codex_session_id, codex_turn_id)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_session ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (genbi_session_id, created_at)")
@@ -298,17 +304,34 @@ class PostgresCodexProjectionBackend:
     def write_state(self, state: dict[str, Any]) -> None:
         with _connect(self.database_url) as conn:
             for turn in state["turns"].values():
+                params = _turn_params(turn)
+                legacy_columns: list[str] = []
+                legacy_values: list[str] = []
+                legacy_updates: list[str] = []
+                if _column_exists(conn, POSTGRES_TURN_TABLE, "thread_id"):
+                    legacy_columns.append("thread_id")
+                    legacy_values.append("%(thread_id)s")
+                    legacy_updates.append("thread_id = EXCLUDED.thread_id")
+                    params["thread_id"] = params["session_id"]
+                if _column_exists(conn, POSTGRES_TURN_TABLE, "codex_thread_id"):
+                    legacy_columns.append("codex_thread_id")
+                    legacy_values.append("%(codex_thread_id)s")
+                    legacy_updates.append("codex_thread_id = EXCLUDED.codex_thread_id")
+                    params["codex_thread_id"] = params["codex_session_id"]
+                extra_columns = f", {', '.join(legacy_columns)}" if legacy_columns else ""
+                extra_values = f", {', '.join(legacy_values)}" if legacy_values else ""
+                extra_updates = (",\n                        " + ",\n                        ".join(legacy_updates)) if legacy_updates else ""
                 conn.execute(
                     f"""
                     INSERT INTO {POSTGRES_TURN_TABLE} (
                         id, session_id, input_kind, question, input_text, status,
                         created_at, updated_at, started_at, completed_at,
-                        codex_session_id, codex_turn_id, metadata
+                        codex_session_id, codex_turn_id, metadata{extra_columns}
                     )
                     VALUES (
                         %(id)s, %(session_id)s, %(input_kind)s, %(question)s, %(input_text)s, %(status)s,
                         %(created_at)s, %(updated_at)s, %(started_at)s, %(completed_at)s,
-                        %(codex_session_id)s, %(codex_turn_id)s, %(metadata)s
+                        %(codex_session_id)s, %(codex_turn_id)s, %(metadata)s{extra_values}
                     )
                     ON CONFLICT (id) DO UPDATE SET
                         input_kind = EXCLUDED.input_kind,
@@ -320,20 +343,37 @@ class PostgresCodexProjectionBackend:
                         completed_at = EXCLUDED.completed_at,
                         codex_session_id = EXCLUDED.codex_session_id,
                         codex_turn_id = EXCLUDED.codex_turn_id,
-                        metadata = EXCLUDED.metadata
+                        metadata = EXCLUDED.metadata{extra_updates}
                     """,
-                    _turn_params(turn),
+                    params,
                 )
             for item in state["projections"]:
+                params = _codex_item_projection_params(item)
+                legacy_columns: list[str] = []
+                legacy_values: list[str] = []
+                legacy_updates: list[str] = []
+                if _column_exists(conn, POSTGRES_CODEX_ITEM_PROJECTION_TABLE, "codex_thread_id"):
+                    legacy_columns.append("codex_thread_id")
+                    legacy_values.append("%(codex_thread_id)s")
+                    legacy_updates.append("codex_thread_id = EXCLUDED.codex_thread_id")
+                    params["codex_thread_id"] = params["codex_session_id"]
+                if _column_exists(conn, POSTGRES_CODEX_ITEM_PROJECTION_TABLE, "genbi_thread_id"):
+                    legacy_columns.append("genbi_thread_id")
+                    legacy_values.append("%(genbi_thread_id)s")
+                    legacy_updates.append("genbi_thread_id = EXCLUDED.genbi_thread_id")
+                    params["genbi_thread_id"] = params["genbi_session_id"]
+                extra_columns = f", {', '.join(legacy_columns)}" if legacy_columns else ""
+                extra_values = f", {', '.join(legacy_values)}" if legacy_values else ""
+                extra_updates = (",\n                        " + ",\n                        ".join(legacy_updates)) if legacy_updates else ""
                 conn.execute(
                     f"""
                     INSERT INTO {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
                         codex_item_id, codex_session_id, codex_turn_id, item_type, status, sequence, payload,
-                        created_at, completed_at, genbi_session_id, genbi_turn_id
+                        created_at, completed_at, genbi_session_id, genbi_turn_id{extra_columns}
                     )
                     VALUES (
                         %(codex_item_id)s, %(codex_session_id)s, %(codex_turn_id)s, %(item_type)s, %(status)s, %(sequence)s, %(payload)s,
-                        %(created_at)s, %(completed_at)s, %(genbi_session_id)s, %(genbi_turn_id)s
+                        %(created_at)s, %(completed_at)s, %(genbi_session_id)s, %(genbi_turn_id)s{extra_values}
                     )
                     ON CONFLICT (codex_item_id) DO UPDATE SET
                         codex_session_id = EXCLUDED.codex_session_id,
@@ -344,9 +384,9 @@ class PostgresCodexProjectionBackend:
                         payload = EXCLUDED.payload,
                         completed_at = EXCLUDED.completed_at,
                         genbi_session_id = EXCLUDED.genbi_session_id,
-                        genbi_turn_id = EXCLUDED.genbi_turn_id
+                        genbi_turn_id = EXCLUDED.genbi_turn_id{extra_updates}
                     """,
-                    _codex_item_projection_params(item),
+                    params,
                 )
 
     def read_state(self) -> dict[str, Any]:
@@ -1174,6 +1214,24 @@ def _connect(database_url: str) -> Any:
     except ImportError as exc:  # pragma: no cover - exercised only without optional dependency
         raise RuntimeError("Install psycopg from backend/requirements.txt to use Postgres persistence.") from exc
     return psycopg.connect(database_url, autocommit=True, row_factory=dict_row)
+
+
+def _column_exists(conn: Any, table_name: str, column_name: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = %(table_name)s
+              AND column_name = %(column_name)s
+        ) AS exists
+        """,
+        {"table_name": table_name, "column_name": column_name},
+    ).fetchone()
+    if not row:
+        return False
+    return bool(row.get("exists"))
 
 
 def _normalize_postgres_url(raw: str) -> str:
