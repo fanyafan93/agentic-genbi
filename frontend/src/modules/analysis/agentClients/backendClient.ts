@@ -1,5 +1,5 @@
 import type { ArtifactKind } from "@/modules/analysis/types/artifact";
-import type { InteractiveReport } from "@/modules/analysis/types/interactive-report";
+import type { Report } from "@/modules/analysis/types/report";
 import type { FlowActivity, FlowNode } from "../hooks/use-flow";
 import type { AgentClient, AgentEvent, AgentInput } from "./types";
 
@@ -709,24 +709,27 @@ export function* mapBackendEvents(
       continue;
     }
 
-    if (event.type === "genbi/artifact/updated" && asString(event.payload.artifactType) === "interactive_report") {
-      const report = asInteractiveReport(event.payload);
+    if (
+      event.type === "genbi/report/created"
+      || event.type === "genbi/report/updated"
+    ) {
+      const report = asReport(event.payload);
       if (report) {
         yield {
-          type: "report-artifact",
+          type: "report",
           report,
           ...context,
-          threadId: report.source?.threadId || context.threadId,
-          turnId: report.source?.turnId || context.turnId,
+          threadId: report.sourceSessionId || context.threadId,
+          turnId: report.turnId || context.turnId,
         };
       }
       continue;
     }
 
-    if (event.type === "genbi/artifact/failed") {
+    if (event.type === "genbi/report/failed") {
       yield {
         type: "error",
-        message: asString(event.payload.error) || "Artifact save failed",
+        message: asString(event.payload.error) || "Report save failed",
         ...context,
       };
       continue;
@@ -849,36 +852,23 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function asInteractiveReport(payload: Record<string, unknown>): InteractiveReport | null {
-  const source = asRecord(payload.source);
-  const document = asRecord(payload.document);
+function asReport(payload: Record<string, unknown>): Report | null {
+  const layout = asRecord(payload.layout);
   if (
-    payload.artifactType !== "interactive_report"
-    || payload.schemaVersion !== "1.0"
-    || typeof payload.id !== "string"
+    typeof payload.id !== "string"
     || typeof payload.title !== "string"
     || typeof payload.subtitle !== "string"
-    || payload.renderer !== "puck"
-    || !document
-    || !asRecord(document.root)
-    || !Array.isArray(document.content)
-    || !asRecord(document.zones)
-    || !Array.isArray(payload.filters)
+    || typeof payload.ownerId !== "string"
+    || !layout
+    || !asRecord(layout.root)
+    || !Array.isArray(layout.content)
+    || !asRecord(layout.zones)
+    || !asRecord(payload.filters)
     || !asRecord(payload.queries)
-    || !asRecord(payload.chartSpecs)
-    || !asRecord(payload.gridSpecs)
-    || !source
-    || typeof source.threadId !== "string"
-    || typeof source.turnId !== "string"
+    || !asRecord(payload.charts)
+    || !asRecord(payload.tables)
   ) return null;
-  return {
-    ...payload,
-    source: {
-      ...source,
-      turnId: asString(source.turnId),
-    },
-    datasets: asRecord(payload.datasets) || undefined,
-  } as unknown as InteractiveReport;
+  return payload as unknown as Report;
 }
 
 function isArtifactKind(value: string): value is ArtifactKind {

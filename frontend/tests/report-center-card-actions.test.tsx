@@ -12,17 +12,25 @@ vi.hoisted(() => {
   };
 });
 
-import { MyAnalysisPage } from "../src/modules/analysis/components/MyAnalysisPage";
-import type { SavedInteractiveReport } from "../src/modules/analysis/api/interactive-report-service";
-import { interactiveReportFixture } from "./fixtures/interactive-report";
+vi.mock("echarts-for-react", () => ({
+  default: () => <div data-testid="echarts-native" />,
+}));
 
-const savedReport: SavedInteractiveReport = {
+vi.mock("@visactor/react-vtable", () => ({
+  ListTable: () => <div data-testid="vtable-native" />,
+}));
+
+import { MyAnalysisPage } from "../src/modules/analysis/components/MyAnalysisPage";
+import type { SavedReport } from "../src/modules/analysis/types/report";
+import { reportFixture } from "./fixtures/report";
+
+const savedReport: SavedReport = {
   report: {
-    ...interactiveReportFixture,
-    originType: "codex",
+    ...reportFixture,
     title: "渠道销售概览",
     subtitle: "按渠道聚合",
-    document: {
+    sourceSessionId: "session-source",
+    layout: {
       root: { props: { title: "渠道销售概览" } },
       content: [
         {
@@ -36,7 +44,6 @@ const savedReport: SavedInteractiveReport = {
       zones: {},
     },
   },
-  savedAt: "2026-08-04T10:00:00+08:00",
 };
 
 afterEach(cleanup);
@@ -77,12 +84,11 @@ describe("report center cards", () => {
   test("shows only new-session action for a report without a source session", () => {
     const onOpenReport = vi.fn();
     const onCreateAnalysis = vi.fn();
-    const seedReport: SavedInteractiveReport = {
+    const seedReport: SavedReport = {
       ...savedReport,
       report: {
         ...savedReport.report,
-        originType: "seed",
-        source: undefined,
+        sourceSessionId: null,
       },
     };
 

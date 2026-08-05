@@ -4,16 +4,14 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import type { AgentEvent, AgentInput } from "../src/modules/analysis/agentClients/types";
-import type { SavedInteractiveReport } from "../src/modules/analysis/api/interactive-report-service";
-import { interactiveReportFixture } from "./fixtures/interactive-report";
+import type { SavedReport } from "../src/modules/analysis/types/report";
+import { reportFixture } from "./fixtures/report";
 
 const {
   mockAgentSend,
-  mockCreateAnalysisThreadFromReport,
   mockGetBackendAnalysisSession,
 } = vi.hoisted(() => ({
   mockAgentSend: vi.fn(),
-  mockCreateAnalysisThreadFromReport: vi.fn(),
   mockGetBackendAnalysisSession: vi.fn(),
 }));
 
@@ -25,15 +23,14 @@ vi.hoisted(() => {
   };
 });
 
-const savedReport: SavedInteractiveReport = {
+const savedReport: SavedReport = {
   report: {
-    ...interactiveReportFixture,
+    ...reportFixture,
     id: "report_draft_context",
     title: "抖音销售日报",
-    source: undefined,
-    originType: "seed",
+    sourceSessionId: null,
+    turnId: null,
   },
-  savedAt: "2026-08-05T10:00:00.000Z",
 };
 
 vi.mock("next-auth/react", () => ({
@@ -55,34 +52,36 @@ vi.mock("../src/modules/analysis/agentClients/backendClient", () => ({
   deleteBackendAnalysisSession: () => Promise.resolve(),
 }));
 
-vi.mock("../src/modules/analysis/api/interactive-report-service", () => ({
-  shouldUseBackendInteractiveReports: () => true,
-  listReportCenterFromBackend: () => Promise.resolve({ mine: [savedReport], sharedWithMe: [] }),
-  listInteractiveReportsByThreadFromBackend: () => Promise.resolve([]),
-  saveInteractiveReportToBackend: vi.fn(),
-  createAnalysisThreadFromReportBackend: mockCreateAnalysisThreadFromReport,
+vi.mock("../src/modules/analysis/api/report-service", () => ({
+  shouldUseBackendReports: () => true,
+  listReportCenter: () => Promise.resolve({ mine: [savedReport], sharedWithMe: [] }),
+  listReportsBySession: () => Promise.resolve([]),
+  executeReportQuery: vi.fn().mockResolvedValue({
+    columns: [],
+    rows: [],
+    page: 1,
+    pageSize: 50,
+    total: 0,
+  }),
+}));
+
+vi.mock("echarts-for-react", () => ({
+  default: () => <div data-testid="echarts-native" />,
+}));
+
+vi.mock("@visactor/react-vtable", () => ({
+  ListTable: () => <div data-testid="vtable-native" />,
 }));
 
 import { AnalysisWorkspace } from "../src/modules/analysis/components/AnalysisWorkspace";
 
 afterEach(() => {
   mockAgentSend.mockReset();
-  mockCreateAnalysisThreadFromReport.mockReset();
   mockGetBackendAnalysisSession.mockReset();
   window.history.replaceState({}, "", "/");
 });
 
 test("opens a report-backed draft and creates the Codex session with the first question", async () => {
-  mockCreateAnalysisThreadFromReport.mockResolvedValue({
-    thread: {
-      id: "premature_empty_thread",
-      title: "抖音销售日报 新会话",
-      status: "active",
-      createdAt: "2026-08-05T10:00:00.000Z",
-      updatedAt: "2026-08-05T10:00:00.000Z",
-    },
-    saved: savedReport,
-  });
   mockGetBackendAnalysisSession.mockResolvedValue({
     session: {
       id: "codex_report_session",
@@ -90,7 +89,7 @@ test("opens a report-backed draft and creates the Codex session with the first q
       status: "active",
       createdAt: "2026-08-05T10:01:00.000Z",
       updatedAt: "2026-08-05T10:01:00.000Z",
-      metadata: { initial_report_artifact: savedReport.report },
+      metadata: { initial_report: savedReport.report },
     },
     turns: [],
     codexItemProjections: [],
@@ -119,8 +118,6 @@ test("opens a report-backed draft and creates the Codex session with the first q
     expect(screen.getByLabelText("分析结果")).toBeTruthy();
     expect(window.location.pathname).toBe("/analysis/new");
   });
-  expect(mockCreateAnalysisThreadFromReport).not.toHaveBeenCalled();
-
   const question = "哪一天的 GMV 最高？";
   fireEvent.change(
     screen.getByPlaceholderText("输入待解决的业务问题，按回车发送"),

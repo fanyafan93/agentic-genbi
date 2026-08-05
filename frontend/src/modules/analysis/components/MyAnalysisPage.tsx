@@ -1,18 +1,18 @@
 "use client";
 
 import { useState } from "react";
-import type { SavedInteractiveReport, SharedInteractiveReport } from "../api/interactive-report-service";
-import { InteractiveReportPanel } from "./InteractiveReportPanel";
+import type { SavedReport, SharedReport } from "../types/report";
+import { ReportPanel } from "./ReportPanel";
 
 type Props = {
-  reports: SavedInteractiveReport[];
-  sharedReports: SharedInteractiveReport[];
-  onOpenReport: (saved: SavedInteractiveReport) => void | Promise<void>;
-  onCreateAnalysis: (saved: SavedInteractiveReport) => void | Promise<void>;
+  reports: SavedReport[];
+  sharedReports: SharedReport[];
+  onOpenReport: (saved: SavedReport) => void | Promise<void>;
+  onCreateAnalysis: (saved: SavedReport) => void | Promise<void>;
 };
 
 export function MyAnalysisPage({ reports, sharedReports, onOpenReport, onCreateAnalysis }: Props) {
-  const [previewReport, setPreviewReport] = useState<SavedInteractiveReport | null>(null);
+  const [previewReport, setPreviewReport] = useState<SavedReport | null>(null);
 
   return (
     <section className="my-analysis-page" aria-label="报表中心">
@@ -83,10 +83,10 @@ function ReportCard({
   onOpenReport,
   onCreateAnalysis,
 }: {
-  saved: SavedInteractiveReport;
-  onPreview: (saved: SavedInteractiveReport) => void;
-  onOpenReport: (saved: SavedInteractiveReport) => void | Promise<void>;
-  onCreateAnalysis?: (saved: SavedInteractiveReport) => void | Promise<void>;
+  saved: SavedReport;
+  onPreview: (saved: SavedReport) => void;
+  onOpenReport: (saved: SavedReport) => void | Promise<void>;
+  onCreateAnalysis?: (saved: SavedReport) => void | Promise<void>;
 }) {
   return (
     <article className="report-center-card">
@@ -95,7 +95,7 @@ function ReportCard({
         <div className="report-card-actions">
           <button type="button" onClick={() => onPreview(saved)}>预览</button>
           <button type="button" onClick={() => window.alert("删除功能待接入后端。")}>删除</button>
-          {saved.report.source?.threadId ? (
+          {saved.report.sourceSessionId ? (
             <button type="button" onClick={() => onOpenReport(saved)}>回到会话</button>
           ) : null}
           <button type="button" disabled={!onCreateAnalysis} onClick={() => onCreateAnalysis?.(saved)}>新建会话</button>
@@ -105,7 +105,7 @@ function ReportCard({
   );
 }
 
-function ReportPreviewDialog({ saved, onClose }: { saved: SavedInteractiveReport; onClose: () => void }) {
+function ReportPreviewDialog({ saved, onClose }: { saved: SavedReport; onClose: () => void }) {
   return (
     <div className="report-preview-backdrop" role="dialog" aria-modal="true" aria-label="报表预览">
       <section className="report-preview-dialog">
@@ -114,7 +114,7 @@ function ReportPreviewDialog({ saved, onClose }: { saved: SavedInteractiveReport
           <button type="button" onClick={onClose} aria-label="关闭预览">×</button>
         </header>
         <div className="report-preview-body">
-          <InteractiveReportPanel
+          <ReportPanel
             taskTitle={saved.report.title}
             running={false}
             initialReport={saved.report}

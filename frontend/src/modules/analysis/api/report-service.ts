@@ -66,11 +66,11 @@ export async function getReport(
 
 export async function listReportsBySession(
   sessionId: string,
-): Promise<Report[]> {
+): Promise<SavedReport[]> {
   const payload = await requestJson<{ reports: Report[] }>(
     `/api/reports?session_id=${encodeURIComponent(sessionId)}`,
   );
-  return payload.reports;
+  return payload.reports.map((report) => ({ report }));
 }
 
 export async function listReportCenter(

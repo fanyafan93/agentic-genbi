@@ -75,8 +75,12 @@ const assetLibraryServiceSource = readFileSync(
   "utf8",
 );
 
-const interactiveReportSource = readFileSync(
-  resolve(process.cwd(), "src/modules/analysis/components/InteractiveReportPanel.tsx"),
+const reportSource = readFileSync(
+  resolve(process.cwd(), "src/modules/analysis/components/ReportPanel.tsx"),
+  "utf8",
+);
+const reportTableSource = readFileSync(
+  resolve(process.cwd(), "src/modules/analysis/components/ReportTable.tsx"),
   "utf8",
 );
 
@@ -103,7 +107,7 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain(">分析工作台</button>");
     expect(workspaceSource).toContain(">分析结果</button>");
     expect(workspaceSource).toContain("新分析");
-    expect(workspaceSource).toContain("InteractiveReportPanel");
+    expect(workspaceSource).toContain("ReportPanel");
     expect(workspaceSource).toContain("SystemAdminPage");
 
     expect(workspaceSource).not.toContain('label: "会话"');
@@ -116,16 +120,14 @@ describe("analysis task product language", () => {
   });
 
   test("keeps the current interactive result in the analysis workspace and moves reusable items to my analysis", () => {
-    expect(workspaceSource).toContain("InteractiveReportPanel");
+    expect(workspaceSource).toContain("ReportPanel");
     expect(workspaceSource).toContain("MyAnalysisPage");
     expect(workspaceSource).not.toContain("AnalysisAssetLibraryPage");
-    expect(interactiveReportSource).toContain('aria-label="分析结果"');
-    expect(interactiveReportSource).toContain("@puckeditor/core");
-    expect(interactiveReportSource).toContain("AgGridReact");
-    expect(interactiveReportSource).toContain("EChartRenderer");
-    expect(workspaceSource).not.toContain("loadSavedInteractiveReports");
-    expect(workspaceSource).not.toContain("saveInteractiveReport(");
-    expect(workspaceSource).toContain("saveInteractiveReportToBackend");
+    expect(reportSource).toContain('aria-label="分析结果"');
+    expect(reportSource).toContain("@puckeditor/core");
+    expect(reportTableSource).toContain("@visactor/react-vtable");
+    expect(reportSource).toContain("echarts-for-react");
+    expect(workspaceSource).toContain("listReportCenter");
   });
 
   test("adds a business semantic library for structured knowledge and semantics", () => {
@@ -216,8 +218,8 @@ describe("analysis task product language", () => {
     expect(backendClientSource).toContain("/turns");
     expect(backendClientSource).toContain("item/completed");
     expect(backendClientSource).toContain("item/agentMessage/delta");
-    expect(backendClientSource).toContain("genbi/artifact/created");
-    expect(backendClientSource).toContain("genbi/artifact/updated");
+    expect(backendClientSource).toContain("genbi/report/created");
+    expect(backendClientSource).toContain("genbi/report/updated");
     expect(backendClientSource).toContain("mapBackendEvents");
     expect(backendClientSource).toContain("event.payload.session_id");
     expect(backendClientSource).toContain("listBackendAnalysisSessions");
@@ -309,10 +311,9 @@ describe("analysis task product language", () => {
       expect(workspaceSource).toContain("loading={currentPanelReportLoading}");
       expect(workspaceSource).not.toContain("onListVersions=");
       expect(workspaceSource).not.toContain("onLoadVersion=");
-      expect(interactiveReportSource).toContain("onSaveReport");
-      expect(interactiveReportSource).not.toContain("历史版本");
-      expect(interactiveReportSource).not.toContain("新的报告版本");
-      expect(interactiveReportSource).not.toContain("INTERACTIVE RESULT · v");
+      expect(reportSource).not.toContain("历史版本");
+      expect(reportSource).not.toContain("新的报告版本");
+      expect(reportSource).not.toContain("INTERACTIVE RESULT · v");
   });
 
   test("opens a saved report as a sessionless draft and carries it into the first turn", () => {

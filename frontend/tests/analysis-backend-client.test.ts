@@ -67,14 +67,13 @@ test("maps a failed completed turn to one visible error and done event", () => {
   ]);
 });
 
-test("maps failed interactive report artifact events to a visible error", () => {
+test("maps failed Report events to a visible error", () => {
   const events = Array.from(mapBackendEvents([
     {
-      type: "genbi/artifact/failed",
+      type: "genbi/report/failed",
       turn_id: "turn_artifact_failed",
       payload: {
-        artifactType: "interactive_report",
-        error: "interactive_report_save_failed",
+        error: "report_save_failed",
         title: "Broken report",
       },
       created_at: "2026-08-05T00:00:00Z",
@@ -84,7 +83,7 @@ test("maps failed interactive report artifact events to a visible error", () => 
   expect(events).toEqual([
     expect.objectContaining({
       type: "error",
-      message: "interactive_report_save_failed",
+      message: "report_save_failed",
       turnId: "turn_artifact_failed",
     }),
   ]);
@@ -369,42 +368,36 @@ describe("analysis backend client event mapping", () => {
     ]);
   });
 
-  test("maps an interactive report artifact as a dedicated result event", () => {
+  test("maps a direct Report event without Artifact fields", () => {
     const events = Array.from(mapBackendEvents([
       {
-        type: "genbi/artifact/updated",
+        type: "genbi/report/updated",
         turn_id: "turn_analysis_report",
         created_at: "2026-08-01T00:00:00Z",
         payload: {
-          artifactType: "interactive_report",
-          schemaVersion: "1.0",
           id: "report_turn_analysis_report",
           title: "channel sales analysis",
           subtitle: "pending query validation",
-          renderer: "puck",
-          document: { root: { props: {} }, content: [], zones: {} },
-          filters: [],
+          ownerId: "owner-1",
+          turnId: "turn_analysis_report",
+          layout: { root: { props: {} }, content: [], zones: {} },
+          filters: {},
           queries: {},
-          chartSpecs: {},
-          gridSpecs: {},
-          datasets: { channel_sales: { rows: [{ channel: "direct", salesAmount: 1000 }] } },
-          source: {
-            threadId: "thread_analysis_report",
-            turnId: "turn_analysis_report",
-          },
+          charts: {},
+          tables: {},
         },
       },
     ], "start"));
 
     expect(events).toEqual([expect.objectContaining({
-      type: "report-artifact",
+      type: "report",
       report: expect.objectContaining({
         id: "report_turn_analysis_report",
         title: "channel sales analysis",
-        datasets: { channel_sales: { rows: [{ channel: "direct", salesAmount: 1000 }] } },
+        turnId: "turn_analysis_report",
+        queries: {},
       }),
       turnId: "turn_analysis_report",
-      threadId: "thread_analysis_report",
     })]);
   });
 

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction 
 import { getAgentClient } from "@/modules/analysis/agentClients";
 import type { AgentClient, AgentEvent, AgentInput } from "@/modules/analysis/agentClients";
 import type { ArtifactFolder, ArtifactKind } from "../types/artifact";
-import type { InteractiveReport } from "../types/interactive-report";
+import type { Report } from "../types/report";
 
 export type FlowRole = "user" | "agent" | "ask";
 
@@ -49,7 +49,7 @@ type FlowSessionSnapshot = {
   currentTurnId: string | null;
   nodes: FlowNode[];
   artifacts: ArtifactFolder[];
-  reportArtifact: InteractiveReport | null;
+  report: Report | null;
   codexLineage: FlowCodexLineage;
   running: boolean;
 };
@@ -82,7 +82,7 @@ export function useFlow(
   const [currentTurnId, setDisplayedCurrentTurnId] = useState<string | null>(null);
   const [nodes, setDisplayedNodes] = useState<FlowNode[]>(initial);
   const [artifacts, setDisplayedArtifacts] = useState<ArtifactFolder[]>([]);
-  const [reportArtifact, setDisplayedReportArtifact] = useState<InteractiveReport | null>(null);
+  const [report, setDisplayedReport] = useState<Report | null>(null);
   const [codexLineage, setDisplayedCodexLineage] = useState<FlowCodexLineage>({});
   const [running, setDisplayedRunning] = useState(false);
 
@@ -90,7 +90,7 @@ export function useFlow(
     setDisplayedCurrentTurnId(snapshot.currentTurnId);
     setDisplayedNodes(snapshot.nodes);
     setDisplayedArtifacts(snapshot.artifacts);
-    setDisplayedReportArtifact(snapshot.reportArtifact);
+    setDisplayedReport(snapshot.report);
     setDisplayedCodexLineage(snapshot.codexLineage);
     setDisplayedRunning(snapshot.running);
   }, []);
@@ -131,11 +131,11 @@ export function useFlow(
       artifacts: resolveStateAction(update, snapshot.artifacts),
     }));
   }, [mutationKey, updateSessionSnapshot]);
-  const setReportArtifact = useCallback((update: SetStateAction<InteractiveReport | null>) => {
+  const setReport = useCallback((update: SetStateAction<Report | null>) => {
     const key = mutationKey();
     updateSessionSnapshot(key, (snapshot) => ({
       ...snapshot,
-      reportArtifact: resolveStateAction(update, snapshot.reportArtifact),
+      report: resolveStateAction(update, snapshot.report),
     }));
   }, [mutationKey, updateSessionSnapshot]);
   const setCodexLineage = useCallback((update: SetStateAction<FlowCodexLineage>) => {
@@ -563,8 +563,8 @@ export function useFlow(
       return currentNodes;
     }
 
-    if (event.type === "report-artifact") {
-      setReportArtifact(event.report);
+    if (event.type === "report") {
+      setReport(event.report);
       return currentNodes;
     }
 
@@ -604,7 +604,7 @@ export function useFlow(
     }
 
     return currentNodes;
-  }, [setArtifacts, setCodexLineage, setCurrentTurnId, setNodes, setReportArtifact]);
+  }, [setArtifacts, setCodexLineage, setCurrentTurnId, setNodes, setReport]);
 
   // Intentionally use a hand-written discriminated union instead of
   // ``Omit<AgentInput, "sessionId">`` because ``Omit`` collapses
@@ -762,7 +762,7 @@ export function useFlow(
     currentTurnId,
     nodes,
     artifacts,
-    reportArtifact,
+    report,
     codexLineage,
     running,
     start,
@@ -781,7 +781,7 @@ function createFlowSessionSnapshot(nodes: FlowNode[]): FlowSessionSnapshot {
     currentTurnId: null,
     nodes: [...nodes],
     artifacts: [],
-    reportArtifact: null,
+    report: null,
     codexLineage: {},
     running: false,
   };

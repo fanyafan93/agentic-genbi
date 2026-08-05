@@ -109,6 +109,7 @@ class ReportProjector:
             turn_id=turn_id,
             payload={
                 **report_to_payload(saved),
+                "sourceSessionId": session_id,
                 "eventSource": "genbi_projection",
                 "codex_item_id": payload.get("codex_item_id"),
             },

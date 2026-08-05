@@ -16,8 +16,8 @@ const { mockGetBackendAnalysisSession } = vi.hoisted(() => ({
 vi.mock("next-auth/react", () => ({
   useSession: () => ({ data: { user: { id: "owner_1" } } }),
 }));
-vi.mock("../src/modules/analysis/components/InteractiveReportPanel", () => ({
-  InteractiveReportPanel: () => null,
+vi.mock("../src/modules/analysis/components/ReportPanel", () => ({
+  ReportPanel: () => null,
 }));
 vi.mock("../src/modules/analysis/hooks/use-flow", () => ({
   useFlow: () => ({
@@ -26,7 +26,7 @@ vi.mock("../src/modules/analysis/hooks/use-flow", () => ({
     // the component can still observe session A's running snapshot until the
     // hook displays B's cached snapshot in its effect.
     running: true,
-    reportArtifact: undefined,
+    report: undefined,
     start: vi.fn(),
     send: vi.fn(),
     reply: vi.fn(),
@@ -57,12 +57,10 @@ vi.mock("../src/modules/analysis/agentClients/backendClient", () => ({
   flowNodesFromBackendSession: () => [],
   deleteBackendAnalysisSession: () => Promise.resolve(),
 }));
-vi.mock("../src/modules/analysis/api/interactive-report-service", () => ({
-  shouldUseBackendInteractiveReports: () => false,
-  listReportCenterFromBackend: () => Promise.resolve({ mine: [], sharedWithMe: [] }),
-  listInteractiveReportsByThreadFromBackend: () => Promise.resolve([]),
-  saveInteractiveReportToBackend: vi.fn(),
-  createAnalysisThreadFromReportBackend: vi.fn(),
+vi.mock("../src/modules/analysis/api/report-service", () => ({
+  shouldUseBackendReports: () => false,
+  listReportCenter: () => Promise.resolve({ mine: [], sharedWithMe: [] }),
+  listReportsBySession: () => Promise.resolve([]),
 }));
 
 const routePath = resolve(process.cwd(), "src/app/analysis/[sessionId]/page.tsx");

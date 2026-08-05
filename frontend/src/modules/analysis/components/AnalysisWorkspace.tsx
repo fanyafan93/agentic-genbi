@@ -10,7 +10,7 @@ import {
 } from "@/modules/business-semantics/components/BusinessSemanticLibrary";
 import { useFlow, type FlowNode } from "../hooks/use-flow";
 import { AnalysisTaskThread } from "./AnalysisTaskThread";
-import { InteractiveReportPanel } from "./InteractiveReportPanel";
+import { ReportPanel } from "./ReportPanel";
 import { MyAnalysisPage } from "./MyAnalysisPage";
 import {
   SystemAdminPage,
@@ -26,13 +26,14 @@ import {
   type BackendAnalysisSessionSummary,
 } from "../agentClients/backendClient";
 import {
-  listInteractiveReportsByThreadFromBackend,
-  listReportCenterFromBackend,
-  saveInteractiveReportToBackend,
-  shouldUseBackendInteractiveReports,
-  type SavedInteractiveReport,
-  type SharedInteractiveReport,
-} from "../api/interactive-report-service";
+  listReportCenter,
+  listReportsBySession,
+  shouldUseBackendReports,
+} from "../api/report-service";
+import type {
+  SavedReport,
+  SharedReport,
+} from "../types/report";
 
 const navItems = [
   { id: "workspace", label: "工作台", icon: "dashboard" },
@@ -143,12 +144,11 @@ function threadDate(thread: BackendAnalysisSessionSummary): Date {
   return new Date(thread.updatedAt || thread.createdAt || 0);
 }
 
-function savedReportFromThreadMetadata(metadata: Record<string, unknown> | null | undefined): SavedInteractiveReport | null {
-  const report = metadata?.initial_report_artifact;
+function savedReportFromThreadMetadata(metadata: Record<string, unknown> | null | undefined): SavedReport | null {
+  const report = metadata?.initial_report;
   if (!report || typeof report !== "object") return null;
   return {
-    report: report as SavedInteractiveReport["report"],
-    savedAt: String(metadata?.initial_report_saved_at ?? metadata?.created_at ?? new Date().toISOString()),
+    report: report as SavedReport["report"],
   };
 }
 
@@ -170,8 +170,8 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
   const [businessSemanticSection, setBusinessSemanticSection] = useState<BusinessSemanticSection>("structured");
   const [structuredKnowledgeSource, setStructuredKnowledgeSource] = useState<StructuredKnowledgeSource>("finereport");
   const [systemSection, setSystemSection] = useState<SystemSection>("overview");
-  const [savedReports, setSavedReports] = useState<SavedInteractiveReport[]>([]);
-  const [sharedReports, setSharedReports] = useState<SharedInteractiveReport[]>([]);
+  const [savedReports, setSavedReports] = useState<SavedReport[]>([]);
+  const [sharedReports, setSharedReports] = useState<SharedReport[]>([]);
   const [analysisThreads, setAnalysisThreads] = useState<BackendAnalysisSessionSummary[]>([]);
   const [analysisThreadsLoading, setAnalysisThreadsLoading] = useState(false);
   const [selectingAnalysisThreads, setSelectingAnalysisThreads] = useState(false);
@@ -226,11 +226,11 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
   }, [currentAnalysisTaskId, localNewSession]);
   useEffect(() => {
     let cancelled = false;
-    if (!shouldUseBackendInteractiveReports()) {
+    if (!shouldUseBackendReports()) {
       setSavedReports([]);
       return () => { cancelled = true; };
     }
-    void listReportCenterFromBackend(reportOwnerId)
+    void listReportCenter(reportOwnerId)
       .then((center) => {
         if (cancelled) return;
         setSavedReports(center.mine);
@@ -265,7 +265,7 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     const reportLoadRequestId = ++reportLoadRequestRef.current;
     setCurrentAnalysisTaskId(initialSessionId);
     setAnalysisTaskNotice("");
-    if (shouldUseBackendInteractiveReports()) setOpenedReportLoadingThreadId(initialSessionId);
+    if (shouldUseBackendReports()) setOpenedReportLoadingThreadId(initialSessionId);
 
     void getBackendAnalysisSession(initialSessionId)
       .then(async (detail) => {
@@ -302,9 +302,9 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
           ]);
         }
 
-        if (shouldUseBackendInteractiveReports()) {
+        if (shouldUseBackendReports()) {
           try {
-            const reports = await listInteractiveReportsByThreadFromBackend(initialSessionId);
+            const reports = await listReportsBySession(initialSessionId);
             if (cancelled || reportLoadRequestId !== reportLoadRequestRef.current) return;
             const latest = reports[0];
             if (latest) {
@@ -378,14 +378,14 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
   const showSystemEntry = Boolean(session?.user);
   const isNewAnalysisTask = currentAnalysisTaskId === null && selectedAnalysisTask === null;
   const openedReport = savedReports.find((saved) => saved.report.id === openedReportId);
-  const openedReportBelongsToCurrentTask = openedReport?.report.source?.threadId === currentAnalysisTaskId
+  const openedReportBelongsToCurrentTask = openedReport?.report.sourceSessionId === currentAnalysisTaskId
     || (currentAnalysisTaskId ? openedReportThreadId === currentAnalysisTaskId : false)
     || (localNewSession && draftReportIdRef.current === openedReport?.report.id);
   const flowReportBelongsToCurrentTask = Boolean(
-    flow.reportArtifact
-    && (flow.reportArtifact.source?.threadId === currentAnalysisTaskId),
+    flow.report
+    && (flow.report.sourceSessionId === currentAnalysisTaskId),
   );
-  const currentPanelReport = flowReportBelongsToCurrentTask ? flow.reportArtifact : openedReportBelongsToCurrentTask && openedReport ? openedReport.report : undefined;
+  const currentPanelReport = flowReportBelongsToCurrentTask ? flow.report : openedReportBelongsToCurrentTask && openedReport ? openedReport.report : undefined;
   const currentPanelReportLoading = Boolean(
     currentAnalysisTaskId && openedReportLoadingThreadId === currentAnalysisTaskId,
   );
@@ -455,7 +455,7 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     setOpenedReportThreadId(null);
     const reportLoadRequestId = ++reportLoadRequestRef.current;
     let restoredInitialReport = false;
-    if (shouldUseBackendInteractiveReports()) setOpenedReportLoadingThreadId(thread.id);
+    if (shouldUseBackendReports()) setOpenedReportLoadingThreadId(thread.id);
     try {
       const detail = await getBackendAnalysisSession(thread.id);
       if (reportLoadRequestId !== reportLoadRequestRef.current) return;
@@ -475,9 +475,9 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
       if (reportLoadRequestId !== reportLoadRequestRef.current) return;
       setInitialFlowMessages([]);
     }
-    if (shouldUseBackendInteractiveReports()) {
+    if (shouldUseBackendReports()) {
       try {
-        const reports = await listInteractiveReportsByThreadFromBackend(thread.id);
+        const reports = await listReportsBySession(thread.id);
         const latest = reports[0];
         if (reportLoadRequestId !== reportLoadRequestRef.current) return;
         if (latest || !restoredInitialReport) setOpenedReportId(latest?.report.id ?? null);
@@ -605,21 +605,14 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     void flow.start(question, sourceReportId ? { sourceReportId } : undefined);
   }
 
-  async function handleSaveReport(saved: SavedInteractiveReport): Promise<SavedInteractiveReport> {
-    if (!shouldUseBackendInteractiveReports()) throw new Error("分析结果存储不可用。");
-    const persisted = await saveInteractiveReportToBackend(saved.report, reportOwnerId);
-    setSavedReports((reports) => [persisted, ...reports.filter((item) => item.report.id !== persisted.report.id)]);
-    return persisted;
-  }
-
-  async function handleOpenReport(saved: SavedInteractiveReport) {
+  async function handleOpenReport(saved: SavedReport) {
     if (flow.running) {
       setAnalysisTaskNotice("当前任务正在分析，停止回答后再切换报表。");
       return;
     }
     setAnalysisTaskNotice("");
     draftReportIdRef.current = null;
-    const sourceThreadId = saved.report.source?.threadId;
+    const sourceThreadId = saved.report.sourceSessionId;
     if (!sourceThreadId) return;
     setOpenedReportId(saved.report.id);
     setOpenedReportThreadId(null);
@@ -629,7 +622,7 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     setActiveTool("analysis-workspace");
     setMobilePane("analysisTask");
     const reportLoadRequestId = ++reportLoadRequestRef.current;
-    if (shouldUseBackendInteractiveReports()) setOpenedReportLoadingThreadId(sourceThreadId);
+    if (shouldUseBackendReports()) setOpenedReportLoadingThreadId(sourceThreadId);
     try {
       const detail = await getBackendAnalysisSession(sourceThreadId);
       if (reportLoadRequestId !== reportLoadRequestRef.current) return;
@@ -651,13 +644,13 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     }
   }
 
-  function handleCreateAnalysisFromReport(saved: SavedInteractiveReport) {
+  function handleCreateAnalysisFromReport(saved: SavedReport) {
     if (flow.running) {
       setAnalysisTaskNotice("当前任务正在分析，停止回答后再新建会话。");
       return;
     }
     setAnalysisTaskNotice("");
-    if (!shouldUseBackendInteractiveReports()) return;
+    if (!shouldUseBackendReports()) return;
     const title = `${saved.report.title} 新会话`;
     draftReportIdRef.current = saved.report.id;
     setSelectedAnalysisTask(title);
@@ -902,7 +895,7 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
                 <div className="workspace-resizer" role="separator" aria-label="调整分析工作台和当前任务资产宽度" aria-orientation="vertical" onPointerDown={startResize} onDoubleClick={() => setSplitPercent(40)}><span /></div>
 
                 <div className={`analysis-result-pane ${mobilePane !== "assetLibrary" ? "mobile-hidden" : ""}`}>
-                  <InteractiveReportPanel taskTitle={selectedAnalysisTask ?? "当前分析任务"} running={flow.running} loading={currentPanelReportLoading} initialReport={currentPanelReport ?? undefined} onSaveReport={handleSaveReport} />
+                  <ReportPanel taskTitle={selectedAnalysisTask ?? "当前分析任务"} running={flow.running} loading={currentPanelReportLoading} initialReport={currentPanelReport ?? undefined} />
                 </div>
               </section>
           </div>

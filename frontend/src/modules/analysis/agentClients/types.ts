@@ -1,4 +1,4 @@
-﻿import type { InteractiveReport } from "../types/interactive-report";
+﻿import type { Report } from "../types/report";
 
 export type AgentEventSystemContext = {
   // ``sessionId`` is the only durable id a frontend has to track a
@@ -31,7 +31,7 @@ export type AgentEvent =
   | ({ type: "step"; label: string; state: "queued" | "running" | "done" | "failed"; nodeId?: string; detail?: string } & AgentEventSystemContext)
   | ({ type: "ask"; nodeId: string; question: string; options: { id: string; label: string }[] } & AgentEventSystemContext)
   | ({ type: "tokens"; nodeId: string; text: string } & AgentEventSystemContext)
-  | ({ type: "report-artifact"; report: InteractiveReport } & AgentEventSystemContext)
+  | ({ type: "report"; report: Report } & AgentEventSystemContext)
   | ({ type: "artifact"; path: string; kind: "html" | "sql" | "python" | "csv" | "markdown" | "json" } & AgentEventSystemContext)
   | ({ type: "error"; message: string } & AgentEventSystemContext)
   | ({ type: "session/created"; sessionId: string } & AgentEventSystemContext)
