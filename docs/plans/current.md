@@ -97,6 +97,32 @@
     - `test_projection_sequence_renumbers_after_save`：replay 时 sequence 重新按 createdAt 顺序编号为 0/1。
   - 测试：后端 `NoGenBIItemTest` 4 个用例；前端 `analysis-backend-client.test.ts` 新增 `replay is projection-only (no GenBI Item rows required)`。
   - 后端 119/119、前端 95/95、tsc 全过。
+- **拆掉万能 ThreadStore**（用户规范）：会话/turn/codex projection 各归其位。
+  - `SessionCatalog`（`backend/harness/session_catalog.py`）只管 session 行 + 状态机（`active`/`archived`），API 严格按规范：
+    - `list_sessions` / `get_session` / `register_session` / `rename_session` / `archive_session`（外加 `reactivate_session` / `delete_session` / `mark_updated` / `bind_latest_turn_provider` / `get_view` / `list_views`）。
+    - 通过 `LatestTurnProvider` 协议从 `CodexProjectionStore` 读 `latest_turn_status` / `latest_turn_id`，**不直接**访问 projection 表。
+    - 拒绝 `running` / `completed` / `failed` / `needs_input` / `waiting_for_question` 等历史 session 状态。
+  - `CodexProjectionStore`（`backend/harness/codex_projection_store.py`）只管 `analysis_turns` + `analysis_codex_item_projections`，API 严格按规范：
+    - `save_turn` / `complete_turn` / `upsert_item` / `list_turns` / `list_items`（外加 `get_turn` / `get_turn_events` / `latest_turn_status` / `latest_turn_id` / `bind_session_touch`）。
+    - 输入为**已构造**的标准化字段；不接收 `events` / `agent_events` / Codex item payload 译码。
+    - 不接收 session-level 状态（`active`/`archived` 走 catalog）、不接受 user 权限、收藏、分享、Artifact 业务规则。
+  - `CodexAnalysisRuntime`（`backend/harness/analysis_runtime.py`）承担 Codex Runtime 责任：
+    - `thread_start` / `thread_resume` / `turn.stream` / `interrupt`。
+    - 状态机（`turn_status_from_events`）只在这里。
+    - 投影 accumulator 顺序化 + 重排 `sequence`。
+    - 不落盘；落盘全交给两个薄 store。
+  - `analysis_api.py` 重写：组合 `SessionCatalog` + `CodexProjectionStore` + `CodexAnalysisRuntime`，`create_app` 接受 `session_catalog=` / `codex_projection_store=`，保留 `thread_store=` legacy kwarg 作为 shim。
+  - `postgres_stores.py` 拆成 `PostgresSessionCatalogBackend` + `PostgresCodexProjectionBackend`，分别建 `analysis_threads` 与 `analysis_turns` + `analysis_codex_item_projections` schema；`analysis_items` 表删除。
+  - `backend/harness/thread_store.py` 删除。`ItemRecord` / `_items_from_events` / `state["items"]` / `create_turn_only` / `save_turn` / `archive_thread` / `get_runtime_thread_id` / `get_thread_metadata` 一并删除。
+  - 验收（后端 `SessionCatalogPurityTest` + `CodexProjectionStorePurityTest`）：
+    - SessionCatalog 公共方法签名只暴露 session 操作；`save_turn` / `upsert_item` / `get_turn_events` / `list_turns` / `list_items` 一律不出现。
+    - SessionCatalog 模块不导入 `AgentEvent` / `ToolCall` / `CodexItemProjectionRecord` / `TurnRecord`。
+    - CodexProjectionStore 公共方法不含 `archive_session` / `save_artifact` / `share_artifact` 等。
+    - CodexProjectionStore.save_turn 签名不含 `events` / `agent_events`。
+    - CodexProjectionStore.complete_turn 拒绝 `active`（session 状态）。
+    - CodexProjectionStore.upsert_item 拒绝不存在的 turn。
+    - CodexProjectionStore 模块不导出 `user_id` / `tenant_id` / `permission` / `share_token`。
+  - 测试：后端 126/126、前端 95/95、tsc 全过。
 - 恢复主开发分支到 `29c0e0f merge: feature/report-artifact-design → Agentic-GenBI`。
 - 确认 `119e4c5 fix(frontend): align flow.start/send/reply signature with AgentInput threadId` 内容已包含在恢复点中，cherry-pick 为空补丁。
 - 修复 FineReport 报表画像加载：

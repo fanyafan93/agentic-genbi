@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,9 +18,152 @@ from backend.analysis.interactive_report_store import InteractiveReportStore
 import backend.api.analysis_api as analysis_api
 from backend.api.analysis_api import create_app
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
+from backend.harness.codex_projection_store import CodexProjectionStore
 from backend.harness.events import AgentEvent
-from backend.harness.thread_store import ThreadStore
+from backend.harness.session_catalog import SessionCatalog
 from backend.business_semantics.knowledge_store import KnowledgeStore
+
+
+# Backwards-compat shim: legacy tests construct ``ThreadStore(...)`` and
+# call ``create_thread`` / ``save_turn`` / ``get_thread`` on the
+# returned object. The new ``create_app`` takes a ``session_catalog``
+# and a ``codex_projection_store`` instead; this helper bundles the
+# two and proxies the legacy names so the existing test bodies keep
+# reading naturally while exercising the new components.
+class _TestStores:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self.session_catalog = SessionCatalog(path=path.with_name(path.stem + "-sessions.jsonl"))
+        self.codex_projection_store = CodexProjectionStore(path=path.with_name(path.stem + "-projections.jsonl"))
+        # Bind the sidebar signal.
+        self.session_catalog.bind_latest_turn_provider(self.codex_projection_store)
+        self.codex_projection_store.bind_session_touch(self.session_catalog)
+
+    def create_thread(
+        self,
+        *,
+        thread_id: str,
+        product_kind: str,
+        title: str | None,
+        user_id: str | None,
+        status: str = "active",
+        codex_thread_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict[str, Any]:
+        session = self.session_catalog.register_session(
+            session_id=thread_id,
+            product_kind=product_kind,
+            title=title,
+            user_id=user_id,
+            status=status,
+            codex_session_id=codex_thread_id or thread_id,
+            metadata=metadata,
+        )
+        return {"thread": asdict(session), "turns": [], "codexItemProjections": []}
+
+    def create_turn_only(self, *, thread_id: str, turn_id: str, codex_turn_id: str | None = None) -> Any:
+        return self.codex_projection_store.save_turn(
+            session_id=thread_id,
+            turn_id=turn_id,
+            input_kind="start",
+            input_text="",
+            status="running",
+            codex_session_id=thread_id,
+            codex_turn_id=codex_turn_id or turn_id,
+        )
+
+    def save_turn(self, *, thread_id: str, turn_id: str, question: str, **kwargs: Any) -> dict[str, Any]:
+        from backend.harness.analysis_runtime import InMemoryCodexAnalysisRuntime
+
+        events: list[AgentEvent] = kwargs.get("events", [])
+        runtime = InMemoryCodexAnalysisRuntime(self.codex_projection_store)
+        stream = runtime.turn_stream(
+            session_id=thread_id,
+            turn_id=turn_id,
+            catalog=self.session_catalog,
+            projection_store=self.codex_projection_store,
+            input_text=question,
+            turn_kind=kwargs.get("input_kind", "start"),
+            events=events,
+        )
+        # The Runtime owns the state machine. We always run its
+        # collect path so the projection and turn row are written
+        # via the same code the API uses.
+        stream._persist_turn(_turn_status_for(events))
+        stream._persist_projections()
+        return {"turn": asdict(stream.turn_record)}
+
+    def get_thread(self, thread_id: str) -> dict[str, Any] | None:
+        view = self.session_catalog.get_view(thread_id)
+        if view is None:
+            return None
+        turns = self.codex_projection_store.list_turns(thread_id)
+        projections = self.codex_projection_store.list_items(session_id=thread_id)
+        thread_row = asdict(view.session)
+        thread_row["latest_turn_status"] = view.latestTurnStatus
+        thread_row["latest_turn_id"] = view.latestTurnId
+        thread_row["latestTurnStatus"] = view.latestTurnStatus
+        thread_row["latestTurnId"] = view.latestTurnId
+        thread_row["codexThreadId"] = view.session.codexSessionId
+        thread_row["codex_thread_id"] = view.session.codexSessionId
+        return {
+            "thread": thread_row,
+            "turns": [asdict(t) for t in turns],
+            "codexItemProjections": [asdict(p) for p in projections],
+        }
+
+    def get_turn(self, thread_id: str, turn_id: str) -> dict[str, Any] | None:
+        turn = self.codex_projection_store.get_turn(thread_id, turn_id)
+        if turn is None:
+            return None
+        projections = self.codex_projection_store.list_items(session_id=thread_id, turn_id=turn_id)
+        session = self.session_catalog.get_session(thread_id)
+        return {
+            "thread": asdict(session) if session else None,
+            "turn": asdict(turn),
+            "codexItemProjections": [asdict(p) for p in projections],
+        }
+
+    def list_threads(self, *, limit: int = 50, product_kind: str | None = None) -> list[dict[str, Any]]:
+        views = self.session_catalog.list_views(limit=limit, product_kind=product_kind)
+        rows: list[dict[str, Any]] = []
+        for v in views:
+            row = asdict(v.session)
+            row["latest_turn_status"] = v.latestTurnStatus
+            row["latest_turn_id"] = v.latestTurnId
+            # ``latestQuestion`` is the sidebar title fallback.
+            turns = self.codex_projection_store.list_turns(v.session.id)
+            latest_turn = turns[-1] if turns else None
+            row["latestQuestion"] = (latest_turn.inputText if latest_turn else "") or None
+            row["latest_turn_status"] = latest_turn.status if latest_turn else None
+            row["codexThreadId"] = v.session.codexSessionId
+            row["codex_thread_id"] = v.session.codexSessionId
+            rows.append(row)
+        return rows
+
+    def get_turn_events(self, turn_id: str) -> list[dict[str, Any]]:
+        # The projection store splits turns by ``session_id``. We
+        # scan the (small) in-memory state to find the owning
+        # session id; this is only used in tests.
+        for _turn_id, turn in self.codex_projection_store._read_state()["turns"].items():  # type: ignore[attr-defined]
+            if turn.id == turn_id:
+                return self.codex_projection_store.get_turn_events(turn.sessionId, turn_id)
+        return []
+
+    def archive_thread(self, thread_id: str) -> None:
+        self.session_catalog.archive_session(thread_id)
+
+    def reactivate_thread(self, thread_id: str) -> None:
+        self.session_catalog.reactivate_session(thread_id)
+
+
+# Legacy alias so existing test bodies keep working.
+ThreadStore = _TestStores
+
+
+def _turn_status_for(events: list[AgentEvent]) -> str:
+    from backend.harness.analysis_runtime import turn_status_from_events
+    return turn_status_from_events(events) if events else "running"
 
 
 class _FakeCodexRuntime:
@@ -222,21 +366,27 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(service, runtime)
                 from_env.assert_called_once()
 
-    def test_create_app_uses_postgres_thread_store_when_enabled(self) -> None:
+    def test_create_app_uses_postgres_session_and_projection_stores_when_enabled(self) -> None:
         with patch.dict("os.environ", {"GENBI_PERSISTENCE": "postgres"}, clear=False):
-            with patch.object(analysis_api, "build_postgres_thread_store") as build_thread_store:
-                thread_store = ThreadStore(Path("unused-thread-store.jsonl"))
-                build_thread_store.return_value = thread_store
+            with patch.object(analysis_api, "build_postgres_session_catalog") as build_session_catalog, patch.object(
+                analysis_api, "build_postgres_codex_projection_store"
+            ) as build_codex_projection_store:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    session_catalog = SessionCatalog(path=Path(temp_dir) / "sessions.jsonl")
+                    codex_projection_store = CodexProjectionStore(path=Path(temp_dir) / "projections.jsonl")
+                    build_session_catalog.return_value = session_catalog
+                    build_codex_projection_store.return_value = codex_projection_store
 
-                app = create_app(
-                    knowledge_store=KnowledgeStore(),
-                    analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
-                    analysis_asset_store=AnalysisAssetStore(Path("unused-assets.jsonl")),
-                    interactive_report_store=InteractiveReportStore(Path("unused-reports.jsonl")),
-                )
+                    app = create_app(
+                        knowledge_store=KnowledgeStore(),
+                        analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
+                        analysis_asset_store=AnalysisAssetStore(Path("unused-assets.jsonl")),
+                        interactive_report_store=InteractiveReportStore(Path("unused-reports.jsonl")),
+                    )
 
-                self.assertIsNotNone(app)
-                build_thread_store.assert_called_once()
+                    self.assertIsNotNone(app)
+                    build_session_catalog.assert_called_once()
+                    build_codex_projection_store.assert_called_once()
 
     def test_system_mcp_server_api_lists_trusted_report_tool(self) -> None:
         with patch.dict("os.environ", {
@@ -458,15 +608,16 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
 
             payload = await analysis_api._create_analysis_turn_payload(
                 _AsyncOnlyRuntime(),  # type: ignore[arg-type]
-                thread_store,
+                thread_store.session_catalog,
+                thread_store.codex_projection_store,
                 InteractiveReportStore(Path(temp_dir) / "interactive-reports.json"),
                 body,
                 thread_id="codex_thread_async_create",
             )
 
-            self.assertEqual(payload["thread_id"], "codex_thread_async_create")
+            self.assertEqual(payload["thread_id"], "codex_thread_async")
             self.assertEqual(payload["events"][0]["type"], "genbi/thread/provisioned")
-            self.assertEqual(thread_store.get_thread("codex_thread_async_create")["thread"]["codexThreadId"], "codex_thread_async")  # type: ignore[index]
+            self.assertEqual(thread_store.get_thread("codex_thread_async")["thread"]["codexThreadId"], "codex_thread_async")  # type: ignore[index]
 
     def test_enrich_analysis_event_adds_question_to_user_message_items(self) -> None:
         event = AgentEvent(
@@ -1183,7 +1334,11 @@ class SessionTurnStateDecouplingTest(unittest.IsolatedAsyncioTestCase):
                 json={"message": "first question"},
             )
             self.assertEqual(first.status_code, 200)
-            session_id = "codex_thread_1"
+            # The Runtime is the only thing allowed to assign
+            # the session id; we read it back from the registry.
+            sessions = thread_store.list_threads(product_kind="analysis_task")
+            self.assertEqual(len(sessions), 1)
+            session_id = sessions[0]["id"]
             first_turn_id = "codex_turn_1"
 
             # 2. Force the first turn into ``failed`` by overriding the

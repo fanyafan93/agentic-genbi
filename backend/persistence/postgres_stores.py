@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from dataclasses import asdict
@@ -7,7 +7,12 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-from backend.harness.thread_store import CodexItemProjectionRecord, ThreadProductKind, ThreadRecord, ThreadStore, TurnRecord
+from backend.harness.codex_projection_store import (
+    CodexItemProjectionRecord,
+    CodexProjectionStore,
+    TurnRecord,
+)
+from backend.harness.session_catalog import SessionCatalog, SessionRecord, SessionView
 from backend.analysis.asset_store import (
     AnalysisAssetRecord,
     AnalysisAssetReopenContext,
@@ -60,11 +65,32 @@ def build_postgres_stores() -> "PostgresKnowledgeStore":
         raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres persistence.")
     return PostgresKnowledgeStore(database_url)
 
-def build_postgres_thread_store() -> "PostgresThreadStore":
+def build_postgres_session_catalog() -> SessionCatalog:
+    """Build the Postgres-backed :class:`SessionCatalog`.
+
+    Returns an in-memory :class:`SessionCatalog` (the JSONL file
+    implementation) wrapped with the same API. The store is the
+    thin owner of ``analysis_threads``; it never sees Codex item
+    payloads or turn execution.
+    """
     database_url = get_postgres_database_url()
     if not database_url:
-        raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres ThreadStore persistence.")
-    return PostgresThreadStore(database_url)
+        raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres SessionCatalog persistence.")
+    backend = PostgresSessionCatalogBackend(database_url)
+    return SessionCatalog.from_backend(backend)  # type: ignore[attr-defined]
+
+
+def build_postgres_codex_projection_store() -> CodexProjectionStore:
+    """Build the Postgres-backed :class:`CodexProjectionStore`.
+
+    Owns ``analysis_turns`` + ``analysis_codex_item_projections``
+    and never sees session-level state.
+    """
+    database_url = get_postgres_database_url()
+    if not database_url:
+        raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres CodexProjectionStore persistence.")
+    backend = PostgresCodexProjectionBackend(database_url)
+    return CodexProjectionStore(backend=backend)
 
 
 def build_postgres_interactive_report_store() -> "PostgresInteractiveReportStore":
@@ -81,7 +107,7 @@ def build_postgres_analysis_asset_store() -> "PostgresAnalysisAssetStore":
     return PostgresAnalysisAssetStore(database_url)
 
 
-class PostgresThreadStore(ThreadStore):
+class PostgresSessionCatalogBackend:
     def __init__(self, database_url: str) -> None:
         self.database_url = _normalize_postgres_url(database_url)
         self.ensure_schema()
@@ -97,7 +123,7 @@ class PostgresThreadStore(ThreadStore):
                     tenant_id TEXT,
                     user_id TEXT,
                     workspace_id TEXT,
-                    codex_thread_id TEXT,
+                    codex_session_id TEXT,
                     status TEXT NOT NULL,
                     created_at TIMESTAMPTZ,
                     updated_at TIMESTAMPTZ,
@@ -107,91 +133,25 @@ class PostgresThreadStore(ThreadStore):
             )
             conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS tenant_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS workspace_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS codex_session_id TEXT")
             conn.execute(f"ALTER TABLE {POSTGRES_THREAD_TABLE} ADD COLUMN IF NOT EXISTS codex_thread_id TEXT")
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {POSTGRES_TURN_TABLE} (
-                    id TEXT PRIMARY KEY,
-                    thread_id TEXT NOT NULL REFERENCES {POSTGRES_THREAD_TABLE}(id) ON DELETE CASCADE,
-                    input_kind TEXT NOT NULL,
-                    question TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TIMESTAMPTZ,
-                    updated_at TIMESTAMPTZ,
-                    codex_thread_id TEXT,
-                    codex_turn_id TEXT,
-                    metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb
-                )
-                """
-            )
-            conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS codex_thread_id TEXT")
-            conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS codex_turn_id TEXT")
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {POSTGRES_ITEM_TABLE} (
-                    id TEXT PRIMARY KEY,
-                    thread_id TEXT NOT NULL REFERENCES {POSTGRES_THREAD_TABLE}(id) ON DELETE CASCADE,
-                    turn_id TEXT NOT NULL REFERENCES {POSTGRES_TURN_TABLE}(id) ON DELETE CASCADE,
-                    kind TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    payload JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    created_at TIMESTAMPTZ
-                )
-                """
-            )
-            conn.execute(
-                f"""
-                DO $$
-                BEGIN
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_name = '{POSTGRES_ITEM_TABLE}'
-                          AND column_name = 'run_id'
-                    ) THEN
-                        ALTER TABLE {POSTGRES_ITEM_TABLE} ALTER COLUMN run_id DROP NOT NULL;
-                    END IF;
-                END $$;
-                """
-            )
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
-                    codex_item_id TEXT PRIMARY KEY,
-                    codex_thread_id TEXT,
-                    codex_turn_id TEXT,
-                    item_type TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    payload JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    created_at TIMESTAMPTZ,
-                    completed_at TIMESTAMPTZ,
-                    genbi_thread_id TEXT REFERENCES {POSTGRES_THREAD_TABLE}(id) ON DELETE CASCADE,
-                    genbi_turn_id TEXT REFERENCES {POSTGRES_TURN_TABLE}(id) ON DELETE SET NULL
-                )
-                """
-            )
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_updated ON {POSTGRES_THREAD_TABLE} (updated_at DESC NULLS LAST)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_product ON {POSTGRES_THREAD_TABLE} (product_kind)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_codex ON {POSTGRES_THREAD_TABLE} (codex_thread_id)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_codex ON {POSTGRES_THREAD_TABLE} (codex_session_id)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_tenant_user ON {POSTGRES_THREAD_TABLE} (tenant_id, user_id)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_thread ON {POSTGRES_TURN_TABLE} (thread_id, created_at)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_codex ON {POSTGRES_TURN_TABLE} (codex_thread_id, codex_turn_id)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_ITEM_TABLE}_thread ON {POSTGRES_ITEM_TABLE} (thread_id, created_at)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_thread ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (genbi_thread_id, created_at)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_turn ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (codex_thread_id, codex_turn_id)")
 
-    def _write_state(self, state: dict[str, Any]) -> None:
+    def _write_state(self, state: dict[str, SessionRecord]) -> None:
         with _connect(self.database_url) as conn:
-            for thread in state["threads"].values():
+            for record in state.values():
                 conn.execute(
                     f"""
                     INSERT INTO {POSTGRES_THREAD_TABLE} (
-                        id, product_kind, title, tenant_id, user_id, workspace_id, codex_thread_id,
+                        id, product_kind, title, tenant_id, user_id, workspace_id, codex_session_id,
                         status, created_at, updated_at, metadata
                     )
                     VALUES (
                         %(id)s, %(product_kind)s, %(title)s, %(tenant_id)s, %(user_id)s, %(workspace_id)s,
-                        %(codex_thread_id)s, %(status)s, %(created_at)s, %(updated_at)s, %(metadata)s
+                        %(codex_session_id)s, %(status)s, %(created_at)s, %(updated_at)s, %(metadata)s
                     )
                     ON CONFLICT (id) DO UPDATE SET
                         product_kind = EXCLUDED.product_kind,
@@ -199,55 +159,141 @@ class PostgresThreadStore(ThreadStore):
                         tenant_id = EXCLUDED.tenant_id,
                         user_id = EXCLUDED.user_id,
                         workspace_id = EXCLUDED.workspace_id,
-                        codex_thread_id = EXCLUDED.codex_thread_id,
+                        codex_session_id = EXCLUDED.codex_session_id,
                         status = EXCLUDED.status,
                         updated_at = EXCLUDED.updated_at,
                         metadata = EXCLUDED.metadata
                     """,
-                    _thread_params(thread),
+                    _session_params(record),
                 )
+
+    def _read_state(self) -> dict[str, SessionRecord]:
+        with _connect(self.database_url) as conn:
+            records = {
+                str(row["id"]): _session_record_from_row(row)
+                for row in conn.execute(f"SELECT * FROM {POSTGRES_THREAD_TABLE}").fetchall()
+            }
+        return records
+
+    def clear(self) -> int:
+        with _connect(self.database_url) as conn:
+            return conn.execute(f"DELETE FROM {POSTGRES_THREAD_TABLE}").rowcount or 0
+
+
+class PostgresCodexProjectionBackend:
+    """Postgres-backed implementation of the Codex projection store.
+
+    Owns ``analysis_turns`` + ``analysis_codex_item_projections``.
+    The catalog owns sessions; this backend never sees
+    ``analysis_threads`` rows.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        self.database_url = _normalize_postgres_url(database_url)
+        self.ensure_schema()
+
+    def ensure_schema(self) -> None:
+        with _connect(self.database_url) as conn:
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_TURN_TABLE} (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    input_kind TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    input_text TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    created_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ,
+                    started_at TIMESTAMPTZ,
+                    completed_at TIMESTAMPTZ,
+                    codex_session_id TEXT,
+                    codex_turn_id TEXT,
+                    metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb
+                )
+                """
+            )
+            conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS codex_session_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS codex_turn_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS input_text TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ")
+            conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ")
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
+                    codex_item_id TEXT PRIMARY KEY,
+                    codex_session_id TEXT,
+                    codex_turn_id TEXT,
+                    item_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    sequence INTEGER NOT NULL DEFAULT 0,
+                    payload JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    created_at TIMESTAMPTZ,
+                    completed_at TIMESTAMPTZ,
+                    genbi_session_id TEXT,
+                    genbi_turn_id TEXT
+                )
+                """
+            )
+            conn.execute(f"ALTER TABLE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} ADD COLUMN IF NOT EXISTS codex_session_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} ADD COLUMN IF NOT EXISTS codex_turn_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} ADD COLUMN IF NOT EXISTS genbi_session_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} ADD COLUMN IF NOT EXISTS genbi_turn_id TEXT")
+            conn.execute(f"ALTER TABLE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} ADD COLUMN IF NOT EXISTS sequence INTEGER NOT NULL DEFAULT 0")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_session ON {POSTGRES_TURN_TABLE} (session_id, created_at)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_codex ON {POSTGRES_TURN_TABLE} (codex_session_id, codex_turn_id)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_session ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (genbi_session_id, created_at)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_turn ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (codex_session_id, codex_turn_id)")
+
+    def _write_state(self, state: dict[str, Any]) -> None:
+        with _connect(self.database_url) as conn:
             for turn in state["turns"].values():
                 conn.execute(
                     f"""
                     INSERT INTO {POSTGRES_TURN_TABLE} (
-                        id, thread_id, input_kind, question, status, created_at, updated_at,
-                        codex_thread_id, codex_turn_id, metadata
+                        id, session_id, input_kind, question, input_text, status,
+                        created_at, updated_at, started_at, completed_at,
+                        codex_session_id, codex_turn_id, metadata
                     )
                     VALUES (
-                        %(id)s, %(thread_id)s, %(input_kind)s, %(question)s, %(status)s,
-                        %(created_at)s, %(updated_at)s, %(codex_thread_id)s, %(codex_turn_id)s, %(metadata)s
+                        %(id)s, %(session_id)s, %(input_kind)s, %(question)s, %(input_text)s, %(status)s,
+                        %(created_at)s, %(updated_at)s, %(started_at)s, %(completed_at)s,
+                        %(codex_session_id)s, %(codex_turn_id)s, %(metadata)s
                     )
                     ON CONFLICT (id) DO UPDATE SET
                         input_kind = EXCLUDED.input_kind,
                         question = EXCLUDED.question,
+                        input_text = EXCLUDED.input_text,
                         status = EXCLUDED.status,
                         updated_at = EXCLUDED.updated_at,
-                        codex_thread_id = EXCLUDED.codex_thread_id,
+                        started_at = EXCLUDED.started_at,
+                        completed_at = EXCLUDED.completed_at,
+                        codex_session_id = EXCLUDED.codex_session_id,
                         codex_turn_id = EXCLUDED.codex_turn_id,
                         metadata = EXCLUDED.metadata
                     """,
                     _turn_params(turn),
                 )
-            for item in state["codex_item_projections"]:
+            for item in state["projections"]:
                 conn.execute(
                     f"""
                     INSERT INTO {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
-                        codex_item_id, codex_thread_id, codex_turn_id, item_type, status, sequence, payload,
-                        created_at, completed_at, genbi_thread_id, genbi_turn_id
+                        codex_item_id, codex_session_id, codex_turn_id, item_type, status, sequence, payload,
+                        created_at, completed_at, genbi_session_id, genbi_turn_id
                     )
                     VALUES (
-                        %(codex_item_id)s, %(codex_thread_id)s, %(codex_turn_id)s, %(item_type)s, %(status)s, %(sequence)s, %(payload)s,
-                        %(created_at)s, %(completed_at)s, %(genbi_thread_id)s, %(genbi_turn_id)s
+                        %(codex_item_id)s, %(codex_session_id)s, %(codex_turn_id)s, %(item_type)s, %(status)s, %(sequence)s, %(payload)s,
+                        %(created_at)s, %(completed_at)s, %(genbi_session_id)s, %(genbi_turn_id)s
                     )
                     ON CONFLICT (codex_item_id) DO UPDATE SET
-                        codex_thread_id = EXCLUDED.codex_thread_id,
+                        codex_session_id = EXCLUDED.codex_session_id,
                         codex_turn_id = EXCLUDED.codex_turn_id,
                         item_type = EXCLUDED.item_type,
                         status = EXCLUDED.status,
                         sequence = EXCLUDED.sequence,
                         payload = EXCLUDED.payload,
                         completed_at = EXCLUDED.completed_at,
-                        genbi_thread_id = EXCLUDED.genbi_thread_id,
+                        genbi_session_id = EXCLUDED.genbi_session_id,
                         genbi_turn_id = EXCLUDED.genbi_turn_id
                     """,
                     _codex_item_projection_params(item),
@@ -255,10 +301,6 @@ class PostgresThreadStore(ThreadStore):
 
     def _read_state(self) -> dict[str, Any]:
         with _connect(self.database_url) as conn:
-            threads = {
-                str(row["id"]): _thread_record_from_row(row)
-                for row in conn.execute(f"SELECT * FROM {POSTGRES_THREAD_TABLE}").fetchall()
-            }
             turns = {
                 str(row["id"]): _turn_record_from_row(row)
                 for row in conn.execute(f"SELECT * FROM {POSTGRES_TURN_TABLE}").fetchall()
@@ -267,29 +309,11 @@ class PostgresThreadStore(ThreadStore):
                 _codex_item_projection_from_row(row)
                 for row in conn.execute(f"SELECT * FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}").fetchall()
             ]
-        return {"threads": threads, "turns": turns, "codex_item_projections": codex_item_projections}
+        return {"turns": turns, "projections": codex_item_projections}
 
     def clear(self) -> int:
         with _connect(self.database_url) as conn:
-            item_count = conn.execute(f"DELETE FROM {POSTGRES_ITEM_TABLE}").rowcount or 0
-            conn.execute(f"DELETE FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}")
-            conn.execute(f"DELETE FROM {POSTGRES_TURN_TABLE}")
-            conn.execute(f"DELETE FROM {POSTGRES_THREAD_TABLE}")
-            return item_count
-
-    def delete_thread(self, thread_id: str, *, product_kind: ThreadProductKind | None = None) -> bool:
-        with _connect(self.database_url) as conn:
-            if product_kind:
-                result = conn.execute(
-                    f"DELETE FROM {POSTGRES_THREAD_TABLE} WHERE id = %(id)s AND product_kind = %(product_kind)s",
-                    {"id": thread_id, "product_kind": product_kind},
-                )
-            else:
-                result = conn.execute(
-                    f"DELETE FROM {POSTGRES_THREAD_TABLE} WHERE id = %(id)s",
-                    {"id": thread_id},
-                )
-            return bool(result.rowcount)
+            return conn.execute(f"DELETE FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}").rowcount or 0
 
 
 class PostgresAnalysisAssetStore(AnalysisAssetStore):
@@ -1129,7 +1153,7 @@ def _knowledge_params(record: KnowledgeRecord) -> dict[str, Any]:
     }
 
 
-def _thread_params(record: ThreadRecord) -> dict[str, Any]:
+def _session_params(record: SessionRecord) -> dict[str, Any]:
     return {
         "id": record.id,
         "product_kind": record.productKind,
@@ -1137,7 +1161,7 @@ def _thread_params(record: ThreadRecord) -> dict[str, Any]:
         "tenant_id": record.tenantId,
         "user_id": record.userId,
         "workspace_id": record.workspaceId,
-        "codex_thread_id": record.codexThreadId,
+        "codex_session_id": record.codexSessionId,
         "status": record.status,
         "created_at": record.createdAt,
         "updated_at": record.updatedAt,
@@ -1148,7 +1172,7 @@ def _thread_params(record: ThreadRecord) -> dict[str, Any]:
 def _turn_params(record: TurnRecord) -> dict[str, Any]:
     return {
         "id": record.id,
-        "thread_id": record.threadId,
+        "session_id": record.sessionId,
         "input_kind": record.inputKind,
         # ``inputText`` is the canonical field per the latest spec;
         # we still write ``question`` for legacy backends that read
@@ -1160,7 +1184,7 @@ def _turn_params(record: TurnRecord) -> dict[str, Any]:
         "updated_at": record.updatedAt,
         "started_at": record.startedAt,
         "completed_at": record.completedAt,
-        "codex_thread_id": record.codexThreadId,
+        "codex_session_id": record.codexSessionId,
         "codex_turn_id": record.codexTurnId,
         "metadata": _jsonb(record.metadata),
     }
@@ -1169,7 +1193,7 @@ def _turn_params(record: TurnRecord) -> dict[str, Any]:
 def _codex_item_projection_params(record: CodexItemProjectionRecord) -> dict[str, Any]:
     return {
         "codex_item_id": record.codexItemId,
-        "codex_thread_id": record.codexThreadId,
+        "codex_session_id": record.codexSessionId,
         "codex_turn_id": record.codexTurnId,
         "item_type": record.itemType,
         "status": record.status,
@@ -1177,7 +1201,7 @@ def _codex_item_projection_params(record: CodexItemProjectionRecord) -> dict[str
         "payload": _jsonb(record.payload),
         "created_at": record.createdAt,
         "completed_at": record.completedAt,
-        "genbi_thread_id": record.genbiThreadId,
+        "genbi_session_id": record.genbiSessionId,
         "genbi_turn_id": record.genbiTurnId,
     }
 
@@ -1257,15 +1281,16 @@ def _interactive_report_version_params(payload: dict[str, Any], *, version: int)
     }
 
 
-def _thread_record_from_row(row: dict[str, Any]) -> ThreadRecord:
-    return ThreadRecord(
+def _session_record_from_row(row: dict[str, Any]) -> SessionRecord:
+    codex_session_id = row.get("codex_session_id") or row.get("codex_thread_id")
+    return SessionRecord(
         id=str(row["id"]),
         productKind=str(row["product_kind"]),  # type: ignore[arg-type]
         title=row.get("title"),
         tenantId=row.get("tenant_id"),
         userId=row.get("user_id"),
         workspaceId=row.get("workspace_id"),
-        codexThreadId=row.get("codex_thread_id"),
+        codexSessionId=codex_session_id,
         status=str(row["status"]),
         createdAt=_iso(row.get("created_at")) or "",
         updatedAt=_iso(row.get("updated_at")) or "",
@@ -1282,7 +1307,7 @@ def _turn_record_from_row(row: dict[str, Any]) -> TurnRecord:
         input_text = raw_question
     return TurnRecord(
         id=str(row["id"]),
-        threadId=str(row["thread_id"]),
+        sessionId=str(row.get("session_id") or row.get("thread_id")),
         inputKind=str(row["input_kind"]),  # type: ignore[arg-type]
         question=raw_question,
         inputText=str(input_text),
@@ -1291,7 +1316,7 @@ def _turn_record_from_row(row: dict[str, Any]) -> TurnRecord:
         updatedAt=_iso(row.get("updated_at")) or "",
         startedAt=_iso(row.get("started_at")),
         completedAt=_iso(row.get("completed_at")),
-        codexThreadId=row.get("codex_thread_id"),
+        codexSessionId=row.get("codex_session_id") or row.get("codex_thread_id"),
         codexTurnId=row.get("codex_turn_id"),
         metadata=dict(row.get("metadata") or {}),
     )
@@ -1302,7 +1327,7 @@ def _codex_item_projection_from_row(row: dict[str, Any]) -> CodexItemProjectionR
     sequence = int(raw_sequence) if raw_sequence is not None else 0
     return CodexItemProjectionRecord(
         codexItemId=str(row["codex_item_id"]),
-        codexThreadId=row.get("codex_thread_id"),
+        codexSessionId=row.get("codex_session_id") or row.get("codex_thread_id"),
         codexTurnId=row.get("codex_turn_id"),
         itemType=str(row["item_type"]),
         status=str(row["status"]),
@@ -1310,7 +1335,7 @@ def _codex_item_projection_from_row(row: dict[str, Any]) -> CodexItemProjectionR
         payload=dict(row.get("payload") or {}),
         createdAt=_iso(row.get("created_at")) or "",
         completedAt=_iso(row.get("completed_at")),
-        genbiThreadId=row.get("genbi_thread_id"),
+        genbiSessionId=row.get("genbi_session_id") or row.get("genbi_thread_id"),
         genbiTurnId=row.get("genbi_turn_id"),
     )
 
