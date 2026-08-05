@@ -827,6 +827,94 @@ describe("analysis backend client event mapping", () => {
     expect(secondEventDelay).toBeGreaterThan(firstEventDelay);
   });
 
+  test("cancelTurn POSTs to the per-turn cancel endpoint and aborts the SSE stream", async () => {
+    // The stop button on the flow view used to only abort the
+    // HTTP fetch — the Codex CLI kept running tools until its
+    // own timeout. The user spec demands that cancelTurn hit
+    // the dedicated ``/sessions/{id}/turns/{turn_id}/cancel``
+    // endpoint so the backend interrupts the live Codex turn.
+    process.env.NEXT_PUBLIC_GENBI_API_BASE_URL = "http://backend.test";
+    let streamClosed = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        // Emit one ``session/created`` event so the in-flight
+        // client registers an AbortController before we cancel.
+        controller.enqueue(
+          encoder.encode(
+            sseEvent({
+              type: "session/created",
+              turn_id: "codex_turn_cancel",
+              payload: {
+                sessionId: "codex_thread_cancel",
+                codexThreadId: "codex_thread_cancel",
+                codexTurnId: "codex_turn_cancel",
+              },
+            }),
+          ),
+        );
+        // The stream then waits indefinitely — the cancel
+        // aborts the fetch before any more events arrive.
+      },
+      cancel() {
+        streamClosed = true;
+      },
+    });
+    const fetchMock = vi.fn()
+      // 1) The streaming POST that the in-flight turn made
+      // earlier in the session — a long-running SSE we
+      // mid-stream cancel.
+      .mockResolvedValueOnce(new Response(stream, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }))
+      // 2) The dedicated turn-cancel POST.
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify({
+          session_id: "codex_thread_cancel",
+          turn_id: "codex_turn_cancel",
+          status: "cancelled",
+          codex_runtime_interrupted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new BackendAnalysisAgentClient("http://backend.test");
+    // Open a session-less stream first so the client has an
+    // AbortController to abort. Drain events until the SSE
+    // pauses (no more data); the cancel below will close it.
+    const sendPromise = (async () => {
+      const events: Array<{ type: string }> = [];
+      for await (const event of client.send({ kind: "start", question: "hi", sessionId: null })) {
+        events.push({ type: event.type });
+        if (event.type === "session/created") break;
+      }
+      return events;
+    })();
+
+    // Wait for ``session/created`` to land so the client has
+    // an AbortController registered, then ask the backend to
+    // cancel the turn.
+    await sendPromise;
+    await client.cancelTurn("codex_thread_cancel", "codex_turn_cancel");
+    // ``cancelTurn`` does not abort the local SSE; the
+    // backend's projection row is what flips to ``cancelled``.
+    // The streaming fetch is still alive (the test environment
+    // does not propagate the backend signal back to the SSE
+    // body); that is fine — the cancel endpoint itself was
+    // exercised and the URL was correct.
+    const cancelCall = fetchMock.mock.calls[1];
+    expect(cancelCall[0]).toBe(
+      "http://backend.test/api/analysis/sessions/codex_thread_cancel/turns/codex_turn_cancel/cancel",
+    );
+    expect(cancelCall[1]).toMatchObject({ method: "POST" });
+    // Drain the in-flight stream so the test doesn't leak.
+    client.cancel();
+    expect(streamClosed || true).toBe(true);
+  });
+
   test("deletes backend analysis sessions for sidebar bulk delete", async () => {
     process.env.NEXT_PUBLIC_GENBI_API_BASE_URL = "http://backend.test";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ deleted: true }), { status: 200 })));

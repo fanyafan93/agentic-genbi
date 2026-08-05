@@ -211,6 +211,39 @@ export class BackendAnalysisAgentClient implements AgentClient {
     this.abortController?.abort();
     this.abortController = null;
   }
+
+  async cancelTurn(sessionId: string, turnId: string): Promise<void> {
+    // Stop button handler: ask the backend to interrupt the live
+    // Codex turn (separate from ``session/archived``). The
+    // backend endpoint POSTs to
+    // ``/api/analysis/sessions/{id}/turns/{turn_id}/cancel``,
+    // which calls ``CodexSdkAnalysisRuntime.interrupt_turn``
+    // and stamps the projection row ``cancelled`` so the UI sees
+    // the terminal transition without waiting for the SSE
+    // stream to close.
+    if (!sessionId || !turnId) return;
+    const url = `${this.apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/cancel`;
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!response.ok) {
+        // The cancel request itself failed; the SSE stream is
+        // still being aborted by ``cancel()``, but the runtime
+        // is not asked to stop. Surface the failure so the
+        // caller's ``catch`` block can decide what to do.
+        throw new Error(`Cancel turn returned ${response.status}`);
+      }
+    } catch (error) {
+      // Don't propagate — the SSE abort in ``cancel()`` still
+      // cleans up the local stream. We log so the operator can
+      // see the failed cancel against the live Codex turn.
+      if (typeof console !== "undefined") {
+        console.warn("backend_cancel_turn_failed", error);
+      }
+    }
+  }
 }
 
 export function shouldUseBackendAnalysisClient(): boolean {

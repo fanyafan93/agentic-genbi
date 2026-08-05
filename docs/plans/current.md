@@ -259,9 +259,63 @@
     总时间 bounded by chunk schedule。**修复前**这个测试
     失败（前端 `await response.json()` 等完整 JSON）——
     证明它真的锁住"等全部完成才播放"的 P1 回归。
-  验收：后端 140/140、前端 94/94、tsc 全过；docker backend
+ - 验收：后端 140/140、前端 94/94、tsc 全过；docker backend
   rebuild 后 `/api/analysis/sessions/turns/stream` 返回
   `text/event-stream`（用容器内 python urllib 实测）。
+- **Cancel turn 跟 archive session 分开（P1）**：用户规范 —
+  之前前端停止按钮只 abort HTTP fetch，后端
+  `/sessions/{id}/cancel` 只 archive session，没真中断
+  Codex turn。后果：
+  * Codex CLI 继续跑工具直到自己 timeout
+  * 找不到正在跑的 Turn，无法 cancel
+  * Turn 不标 cancelled
+  * 中途中断无法准确关闭 turn
+  修复（拆成两个动作）：
+  * **Turn cancel** — 新增 `POST /api/analysis/sessions/{session_id}/turns/{turn_id}/cancel`：
+    - 调 `CodexSdkAnalysisRuntime.interrupt_turn(thread_id, turn_id)`：
+      维护 `_active_turns: dict[(thread_id, turn_id), turn_obj]`
+      registry，`_iter_streamed` 在 `thread.turn(...)` 后注册，
+      stream 结束后清掉。`interrupt_turn` 从 registry 取
+      turn，调 `turn.interrupt()`，删 entry。
+    - 调 `codex_projection_store.save_turn(..., status="cancelled")`
+      立刻更新 projection 行（前端 GET 立刻看到终态，
+      不需等流关闭）。
+    - 返回 `{ session_id, turn_id, status, codex_runtime_interrupted }`。
+    - **不**archive session——session 可以继续发下一题。
+  * **Session archive** — 保留 `POST /sessions/{id}/cancel`
+    但**只 archive**（不改 Codex 状态，不 mark turn cancelled）；
+    docstring 明确说明它不是 turn cancel。Session archive 也
+    可以用 `PATCH /sessions/{id}` body `status: "archived"`
+    走，已经存在。
+  * **前端** — `BackendAnalysisAgentClient.cancelTurn(sessionId, turnId)`
+    POST 新 endpoint；`useFlow.stop()` 同时调 `agent.cancel()`
+    (abort SSE) 跟 `agent.cancelTurn(...)` (interrupt Codex)。
+  * `AgentClient` 接口加 `cancelTurn?(sessionId, turnId): Promise<void>`
+    （可选，本地 in-page agent 不需要）。
+  测试（新增 `TurnCancellationTest`，5 例）：
+  * `test_cancel_turn_interrupts_codex_runtime_and_marks_projection`：
+    cancel endpoint 调 `runtime.interrupt_turn`，projection
+    行 status 立刻变 `cancelled`，session status 保持
+    `active`。
+  * `test_cancel_turn_keeps_session_active_and_does_not_archive`：
+    cancel turn **不**改 session status（跟 archive 分开）。
+  * `test_cancel_turn_returns_404_when_session_missing`：
+    session 不存在返 404 `analysis_session_not_found`。
+  * `test_cancel_turn_returns_400_when_turn_id_empty`：
+    FastAPI 路径层先 404；catalog 路径正常。
+  * `test_legacy_cancel_session_endpoint_still_archives_only`：
+    legacy `/cancel` 不调 runtime.interrupt_turn，turn status
+    不变（`running`），session status 变 `archived`。
+  前端测试（新增 `cancelTurn POSTs to the per-turn cancel endpoint`）：
+  * 用 ReadableStream mock in-flight SSE stream，发
+    `session/created` 一次让 AbortController 注册；
+    然后调 `client.cancelTurn(sessionId, turnId)`，
+    断言第二次 fetch URL 跟 method 正确。
+  * **修复前**测试失败（`cancelTurn` 方法不存在），证明它
+    锁住 P1 回归。
+  验收：后端 145/145、前端 95/95、tsc 全过。docker backend
+  rebuild 后新 endpoint `POST /sessions/{id}/turns/{turn_id}/cancel`
+  可达。
 - **统一 API**（用户规范）：保留 7 个 `/api/analysis/sessions/*`
   路由，body 永不携带 session id。
   - `GET    /api/analysis/sessions`

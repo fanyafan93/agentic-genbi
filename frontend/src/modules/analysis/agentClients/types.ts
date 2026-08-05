@@ -45,4 +45,8 @@ export type AgentInput =
 export interface AgentClient {
   send(input: AgentInput): AsyncIterable<AgentEvent>;
   cancel?(): void;
+  // Optional: backend-only hook that asks the server to
+  // interrupt the live Codex turn. Local in-page agents
+  // (Codex SDK / mock clients) implement ``cancel`` only.
+  cancelTurn?(sessionId: string, turnId: string): Promise<void>;
 }

@@ -394,11 +394,23 @@ export function useFlow(
   );
   const stop = useCallback(() => {
     if (!runningRef.current) return;
+    // Two actions, run together: abort the SSE stream locally so
+    // the UI stops consuming events, AND ask the backend to
+    // interrupt the live Codex turn so the CLI actually stops
+    // running tools. The backend endpoint
+    // ``POST /sessions/{id}/turns/{turn_id}/cancel`` is the only
+    // place that calls ``CodexSdkAnalysisRuntime.interrupt_turn``;
+    // before the user spec was applied, the cancel button only
+    // aborted the HTTP fetch, so the Codex turn kept running
+    // until its own timeout.
     agent.cancel?.();
+    if (sessionId && currentTurnId && typeof agent.cancelTurn === "function") {
+      void agent.cancelTurn(sessionId, currentTurnId);
+    }
     runningRef.current = false;
     setRunning(false);
     setNodes((current) => current.filter((node) => node.id !== "agent-pending"));
-  }, [agent]);
+  }, [agent, sessionId, currentTurnId]);
 
   return {
     currentTurnId,

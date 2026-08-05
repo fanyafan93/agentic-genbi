@@ -628,12 +628,18 @@ def create_app(
 
     @app.post("/api/analysis/sessions/{session_id}/cancel")
     def cancel_session(session_id: str) -> dict[str, Any]:
-        """Mark the in-flight turn (if any) as ``cancelled`` and archive the session.
+        """Archive a session (legacy endpoint; does NOT cancel a turn).
 
         The catalog is the only thing allowed to own the
-        ``active`` / ``archived`` transition; the in-flight turn
-        row (if any) is closed through the projection store when
-        the Runtime writes its terminal event.
+        ``active`` / ``archived`` transition. To stop a live
+        Codex Turn mid-stream use
+        ``POST /api/analysis/sessions/{session_id}/turns/{turn_id}/cancel``
+        instead — that endpoint calls ``turn.interrupt()`` on the
+        Codex runtime and marks the projection row ``cancelled``
+        immediately so the UI sees the terminal transition without
+        waiting for the SSE stream to close. This endpoint is
+        preserved for back-compat with existing callers that only
+        need to archive the session row.
         """
         canonical_id = configured_session_catalog.resolve_session_id(session_id)
         if canonical_id is None:
@@ -642,6 +648,58 @@ def create_app(
         refreshed = configured_session_catalog.get_view(canonical_id)
         assert refreshed is not None
         return {"session": _session_view_to_thread_dict(refreshed, configured_codex_projection_store)}
+
+    @app.post("/api/analysis/sessions/{session_id}/turns/{turn_id}/cancel")
+    def cancel_session_turn(session_id: str, turn_id: str) -> dict[str, Any]:
+        """Interrupt the live Codex Turn for ``(session_id, turn_id)``.
+
+        Two actions, run together:
+
+        * Call ``CodexSdkAnalysisRuntime.interrupt_turn`` so the
+          Codex CLI stops tool execution and emits a terminal
+          ``cancelled`` notification.
+        * Mark the projection row ``cancelled`` so the sidebar /
+          flow view reflects the terminal state immediately,
+          without waiting for the stream to close.
+
+        The session row is **not** archived; archiving is a
+        separate user action (use ``PATCH /sessions/{id}`` with
+        ``status: "archived"``). Cancelling a turn keeps the
+        session reusable so the user can send the next question
+        right away.
+        """
+        if not turn_id.strip():
+            raise HTTPException(status_code=400, detail="turn_id_required")
+        canonical_session_id = configured_session_catalog.resolve_session_id(session_id)
+        if canonical_session_id is None:
+            raise HTTPException(status_code=404, detail="analysis_session_not_found")
+        runtime_interrupted = configured_analysis_runtime.interrupt_turn(
+            thread_id=canonical_session_id,
+            turn_id=turn_id,
+        )
+        existing_turn = configured_codex_projection_store.get_turn(canonical_session_id, turn_id)
+        if existing_turn is not None:
+            # ``save_turn`` accepts a terminal ``cancelled`` status
+            # and overwrites the existing row in-place, so the UI
+            # sees the projection transition without waiting for
+            # the Codex stream to close.
+            configured_codex_projection_store.save_turn(
+                session_id=canonical_session_id,
+                turn_id=turn_id,
+                input_kind=existing_turn.inputKind,
+                input_text=existing_turn.inputText,
+                status="cancelled",
+                started_at=existing_turn.startedAt,
+                completed_at=_now_iso(),
+                codex_session_id=existing_turn.codexSessionId or canonical_session_id,
+                codex_turn_id=existing_turn.codexTurnId or turn_id,
+            )
+        return {
+            "session_id": canonical_session_id,
+            "turn_id": turn_id,
+            "status": "cancelled",
+            "codex_runtime_interrupted": runtime_interrupted,
+        }
 
 
     @app.get("/api/analysis/assets")
@@ -1731,6 +1789,19 @@ def _string_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _now_iso() -> str:
+    """Return the current time as an ISO 8601 UTC string.
+
+    Used by the turn-cancel endpoint to stamp the projection
+    row's ``completed_at`` field without depending on the
+    Runtime's own terminal event (the SSE stream may still be
+    draining when we respond).
+    """
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def build_default_analysis_runtime() -> CodexSdkAnalysisRuntime:

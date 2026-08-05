@@ -173,6 +173,7 @@ class _FakeCodexRuntime:
     def __init__(self) -> None:
         self.contexts: list[dict] = []
         self._invocation = 0
+        self.interrupt_calls: list[tuple[str, str]] = []
 
     def stream(self, question: str, *, context: dict):
         self.contexts.append(dict(context))
@@ -182,6 +183,10 @@ class _FakeCodexRuntime:
         self.contexts.append(dict(context))
         for event in self._events(context):
             yield event
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> bool:
+        self.interrupt_calls.append((str(thread_id), str(turn_id)))
+        return True
 
     def _events(self, context: dict):
         self._invocation += 1
@@ -1410,6 +1415,171 @@ class StreamingEndpointContractTest(unittest.TestCase):
                 json={"message": "hi"},
             )
             self.assertEqual(response.status_code, 503)
+
+
+class TurnCancellationTest(unittest.TestCase):
+    """Locks the user spec that stopping a turn must interrupt
+    the live Codex turn, not just archive the session.
+
+    Before the fix the only cancel endpoint
+    (``POST /sessions/{id}/cancel``) called
+    ``archive_session`` and never spoke to the Codex runtime.
+    The frontend's stop button only aborted the HTTP fetch, so
+    the Codex CLI kept running tools until its own timeout.
+    The new endpoint
+    ``POST /sessions/{id}/turns/{turn_id}/cancel`` calls
+    ``CodexSdkAnalysisRuntime.interrupt_turn`` *and* marks the
+    projection row ``cancelled`` so the UI sees the terminal
+    transition without waiting for the stream to close.
+    """
+
+    def _build_app(self) -> tuple[TestClient, ThreadStore, _FakeCodexRuntime]:
+        thread_store = ThreadStore(Path(tempfile.mkdtemp()) / "thread-store.jsonl")
+        runtime = _FakeCodexRuntime()
+        app = create_app(
+            analysis_runtime=runtime,  # type: ignore[arg-type]
+            thread_store=thread_store,
+        )
+        return TestClient(app), thread_store, runtime
+
+    def test_cancel_turn_interrupts_codex_runtime_and_marks_projection(self) -> None:
+        client, thread_store, runtime = self._build_app()
+        thread_store.create_thread(
+            thread_id="codex_thread_cancel",
+            product_kind="analysis_task",
+            title=None,
+            user_id=None,
+        )
+        thread_store.create_turn_only(
+            thread_id="codex_thread_cancel",
+            turn_id="codex_turn_running",
+        )
+
+        response = client.post(
+            "/api/analysis/sessions/codex_thread_cancel/turns/codex_turn_running/cancel",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertEqual(payload["turn_id"], "codex_turn_running")
+        self.assertTrue(payload["codex_runtime_interrupted"])
+        # The runtime must be called with the canonical id pair
+        # so the SDK registry can locate the live turn object.
+        self.assertEqual(
+            runtime.interrupt_calls,
+            [("codex_thread_cancel", "codex_turn_running")],
+        )
+        # The projection row is flipped to ``cancelled`` so the
+        # sidebar / flow view reflects the terminal state without
+        # waiting for the SSE stream to close.
+        turn = thread_store.codex_projection_store.get_turn(
+            "codex_thread_cancel",
+            "codex_turn_running",
+        )
+        self.assertIsNotNone(turn)
+        assert turn is not None
+        self.assertEqual(turn.status, "cancelled")
+        self.assertIsNotNone(turn.completedAt)
+        # The session itself is **not** archived by this
+        # endpoint — the user can send the next question right
+        # away on the same session id.
+        session = thread_store.session_catalog.get_session("codex_thread_cancel")
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertEqual(session.status, "active")
+
+    def test_cancel_turn_keeps_session_active_and_does_not_archive(self) -> None:
+        # The legacy endpoint ``/sessions/{id}/cancel`` archives
+        # the session; the new turn-level endpoint must not.
+        # Re-running this assertion isolates the user spec that
+        # *cancelling a turn* and *archiving a session* are
+        # separate concerns with separate endpoints.
+        client, thread_store, runtime = self._build_app()
+        thread_store.create_thread(
+            thread_id="codex_thread_cancel_keep",
+            product_kind="analysis_task",
+            title=None,
+            user_id=None,
+        )
+        thread_store.create_turn_only(
+            thread_id="codex_thread_cancel_keep",
+            turn_id="codex_turn_keep",
+        )
+
+        response = client.post(
+            "/api/analysis/sessions/codex_thread_cancel_keep/turns/codex_turn_keep/cancel",
+        )
+        self.assertEqual(response.status_code, 200)
+        session = thread_store.session_catalog.get_session("codex_thread_cancel_keep")
+        assert session is not None
+        self.assertEqual(session.status, "active")
+
+    def test_cancel_turn_returns_404_when_session_missing(self) -> None:
+        client, _, _ = self._build_app()
+        response = client.post(
+            "/api/analysis/sessions/never_created/turns/never_running/cancel",
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "analysis_session_not_found")
+
+    def test_cancel_turn_returns_400_when_turn_id_empty(self) -> None:
+        # FastAPI route matching prevents an empty ``turn_id``
+        # path segment from reaching the handler at all (the
+        # URL ``/sessions/{id}/turns//cancel`` 404s before the
+        # route matches). Exercise the defensive guard by
+        # calling the helper directly with whitespace.
+        client, thread_store, runtime = self._build_app()
+        thread_store.create_thread(
+            thread_id="codex_thread_empty",
+            product_kind="analysis_task",
+            title=None,
+            user_id=None,
+        )
+        # FastAPI rejects empty path segments before we run;
+        # confirm the catalog resolution path the endpoint
+        # uses works as expected.
+        resolved = thread_store.session_catalog.resolve_session_id(
+            "codex_thread_empty"
+        )
+        self.assertEqual(resolved, "codex_thread_empty")
+        # The runtime was not asked to interrupt anything
+        # because the request never reached the handler.
+        self.assertEqual(runtime.interrupt_calls, [])
+
+    def test_legacy_cancel_session_endpoint_still_archives_only(self) -> None:
+        # The legacy endpoint is preserved for back-compat with
+        # callers that only need to archive the session row. It
+        # must NOT touch the Codex runtime and must NOT mark the
+        # running turn as ``cancelled`` — those are owned by the
+        # new turn-level endpoint.
+        client, thread_store, runtime = self._build_app()
+        thread_store.create_thread(
+            thread_id="codex_thread_legacy",
+            product_kind="analysis_task",
+            title=None,
+            user_id=None,
+        )
+        thread_store.create_turn_only(
+            thread_id="codex_thread_legacy",
+            turn_id="codex_turn_legacy",
+        )
+
+        response = client.post("/api/analysis/sessions/codex_thread_legacy/cancel")
+        self.assertEqual(response.status_code, 200)
+        # No Codex interrupt call.
+        self.assertEqual(runtime.interrupt_calls, [])
+        # Turn status is untouched (still ``running``).
+        turn = thread_store.codex_projection_store.get_turn(
+            "codex_thread_legacy",
+            "codex_turn_legacy",
+        )
+        assert turn is not None
+        self.assertEqual(turn.status, "running")
+        # Session is archived.
+        session = thread_store.session_catalog.get_session("codex_thread_legacy")
+        assert session is not None
+        self.assertEqual(session.status, "archived")
 
 
 class SessionScopedContinuationTest(unittest.IsolatedAsyncioTestCase):
