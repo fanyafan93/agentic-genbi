@@ -6,63 +6,78 @@
 
 - 当前分支：`feature/session-management`
 - 基线：`Agentic-GenBI`
-- 本轮目标：处理 GPT review 指出的 Session/Turn/Codex runtime 阻塞问题。
+- 本轮目标：只处理 PostgreSQL 行级 CRUD，不改权限、UI 或 Session/Turn/Item 模型。
 
 ## 本轮已处理
 
-1. Postgres 兼容迁移
-   - `analysis_threads` / `analysis_turns` / `analysis_codex_item_projections` 的 legacy backfill 先检查旧列是否存在。
-   - 新写入 `analysis_turns` 时，如果旧库仍有 `thread_id` / `codex_thread_id`，会同步写入 legacy 列，避免旧 `NOT NULL thread_id` 卡住 INSERT。
-   - projection 写入同样兼容 `codex_thread_id` / `genbi_thread_id`。
+1. PostgreSQL SessionCatalogBackend 改为行级 CRUD
+   - 新增 `get_session`、`resolve_session_id`、`list_sessions`、`insert_session`、`update_session`、`archive_session`、`touch_session`、`delete_session`。
+   - `SessionCatalog` 在 backend 具备 row-level 方法时不再走 `_read_state()` / `_write_state()`。
+   - `touch_session` 是单行 `UPDATE analysis_threads ... WHERE id = ...`。
 
-2. Codex turn 中断
-   - `CodexSdkAnalysisRuntime.interrupt_turn()` 改为 async，并真实 await SDK 的 `turn.interrupt()`。
-   - stream 结束或取消时都会清理 `_active_turns`。
-   - cancel API 返回区分：
-     - `turn_status_updated`
-     - `codex_runtime_interrupted`
+2. PostgreSQL CodexProjectionBackend 改为行级 CRUD
+   - 新增 `get_turn`、`list_turns`、`latest_turn`、`upsert_turn`、`upsert_item`、`list_items`。
+   - `CodexProjectionStore` 在 backend 具备 row-level 方法时不再走 `_read_state()` / `_write_state()`。
+   - Postgres projection backend 不再暴露通用 `read_state()` / `write_state()`。
+   - Item 写入只对当前 item 执行 `INSERT ... ON CONFLICT DO UPDATE`。
 
-3. storage session id 与 Codex thread id 分离
-   - 已有 session 续写时，数据库主键保持 storage session id。
-   - Codex runtime 继续使用 session 记录里的 `codexSessionId`。
-   - 避免 legacy alias 场景下注册重复 session。
+3. PostgreSQL migration / index
+   - 新增索引：
+     - `analysis_threads (tenant_id, user_id, updated_at DESC)`
+     - `analysis_turns (session_id, updated_at DESC)`
+     - `analysis_codex_item_projections (genbi_session_id, genbi_turn_id, sequence)`
+   - 历史 item replay 按 `sequence` 排序。
+   - legacy projection 迁移补齐 `genbi_turn_id = codex_turn_id`，避免旧 item 无法按 turn 恢复。
 
-4. 报表 artifact 投影
-   - `InteractiveReportStore.save_report()` 失败时不再伪装成 `genbi/artifact/updated`。
-   - 改为发 `genbi/artifact/failed`，错误码：`interactive_report_save_failed`。
-
-5. 报表创建后的 session reopen
-   - `SessionService.get_session_detail()` 和 `GET /api/analysis/sessions/{id}` envelope 都返回 `metadata`。
-   - 前端可继续从 metadata 读取 `initial_report_artifact`。
+4. 并发不覆盖测试
+   - 覆盖不同 Session 写 item 不互相覆盖。
+   - 覆盖一个 Session 的 Turn 从 `running` 到 `completed`，同时另一个 Session 写新 Turn，不会把 completed 覆盖回 running。
+   - 覆盖两个 Session 分别 touch `updatedAt`，两个时间都保留。
 
 ## 已验证
 
 - `python -m pytest backend\tests\test_postgres_p0_compat.py -q`
-  - 6 passed
-- `python -m pytest backend\tests\test_codex_sdk_runner.py -q`
-  - 12 passed
+  - 9 passed
+- `python -m pytest backend\tests\test_session_catalog_purity.py backend\tests\test_codex_projection_store_purity.py -q`
+  - 19 passed
 - `python -m pytest backend\tests\test_analysis_api.py -q`
   - 65 passed
-- `python -m pytest backend\tests\test_postgres_p0_compat.py backend\tests\test_codex_sdk_runner.py -q`
-  - 18 passed
+- `python -m pytest backend\tests\test_postgres_p0_compat.py backend\tests\test_session_catalog_purity.py backend\tests\test_codex_projection_store_purity.py backend\tests\test_analysis_api.py -q`
+  - 93 passed
+- `git diff --check`
+  - passed
+- 真实 Docker PostgreSQL smoke
+  - 使用 backend 容器和两个临时真实 PostgreSQL 数据库验证：
+    - 全新数据库启动
+    - 重复 `ensure_schema()` 幂等
+    - Session/Turn/Item 行级写入
+    - 两个 Session 写 item 不丢数据
+    - Turn completed 不被另一个 Session 写入覆盖
+    - 两个 Session touch `updatedAt` 不互相覆盖
+    - 旧 schema + 旧数据迁移
+  - 输出：`REAL_POSTGRES_SMOKE_OK`
 
-测试警告：pytest cache 目录无写权限，不影响测试结果。
+测试警告：本机 pytest cache 目录无写权限；不影响测试结果。
 
 ## 尚未处理
 
-1. 多用户隔离
-   - review 提到 `GET/PATCH/DELETE/continue/cancel` 需要 principal/tenant/user/workspace 级隔离。
-   - 当前分支没有在本轮新增认证/权限模型，避免在 session-management 切片里做半套假权限。
+1. Principal 多用户隔离
+   - `GET/PATCH/DELETE/continue/cancel` 仍需接入 `tenant_id/user_id/workspace_id/roles` 校验。
+   - 本轮按范围约束未处理权限。
 
-2. 真 PostgreSQL 迁移验证
-   - 当前新增的是 fake Postgres 单测。
-   - 还需要在 docker Postgres 上跑一次真实 schema migration smoke。
+2. 单 worker 强制限制
+   - `_active_turns` 仍是进程内字典。
+   - V1 仍需启动时限制 backend 单 worker，后续再做跨进程 turn registry。
 
-3. `_active_turns` 仍是单进程内存态
-   - v1 要限制 backend 单 worker，或后续做跨进程 turn registry / reconciliation。
+3. 小 P1 收尾
+   - 前端处理 `genbi/artifact/failed`。
+   - `session/created` 时更早记录 `codexTurnId`。
+   - 删除默认示例问题。
+   - `_active_turns` 在 interrupt 成功后再 `pop`。
+   - 报表创建 Session 时禁止客户端伪造 Codex ID。
 
 ## 下一步
 
-1. 做真实 Postgres migration smoke。
-2. 补 principal 隔离方案和测试。
-3. 浏览器验证 cancel、legacy session reopen、report reopen 三条链路。
+1. Principal 多用户隔离。
+2. 强制单 worker。
+3. 小 P1 收尾。

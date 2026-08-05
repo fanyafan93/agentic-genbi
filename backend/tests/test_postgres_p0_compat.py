@@ -3,9 +3,9 @@
 The user spec demands:
 * ``build_postgres_session_catalog()`` returns a usable
   ``SessionCatalog`` (no ``from_backend``).
-* The Postgres backend exposes the **public** ``read_state`` /
-  ``write_state`` methods that the catalog / projection store
-  call.
+* The Postgres-backed catalog / projection store use row-level
+  CRUD methods instead of whole-table ``read_state`` /
+  ``write_state`` snapshots.
 * Old rows persisted under ``codex_thread_id`` /
   ``thread_id`` / ``genbi_thread_id`` survive the migration
   intact and the new read path returns the canonical
@@ -65,8 +65,8 @@ class _Transaction:
 class _FakeConnection:
     """Fake psycopg connection that pretends to be a PostgreSQL
     server. ``ensure_schema`` is a no-op for any statement we
-    don't recognise; ``read_state`` / ``write_state`` map to a
-    tiny in-memory store keyed by table name.
+    don't recognise; row-level SQL maps to a tiny in-memory store
+    keyed by table name.
 
     The fake supports enough of the surface to:
     * Round-trip sessions and turns through the catalog /
@@ -86,6 +86,7 @@ class _FakeConnection:
         self.legacy_thread_id: dict[str, str] = {}
         self.legacy_codex_thread_id: dict[str, str] = {}
         self.legacy_genbi_thread_id: dict[str, str] = {}
+        self.sql_log: list[str] = []
 
     def __enter__(self) -> "_FakeConnection":
         return self
@@ -99,6 +100,7 @@ class _FakeConnection:
     def execute(self, sql: str, params: dict | None = None) -> _Result:
         params = self._unwrap(params)
         compact = " ".join(sql.split()).lower()
+        self.sql_log.append(compact)
         if "from information_schema.columns" in compact:
             assert params is not None
             table = str(params["table_name"])
@@ -114,6 +116,14 @@ class _FakeConnection:
         if compact.startswith("alter table"):
             return _Result()
         if compact.startswith("update "):
+            if compact.startswith("update analysis_threads") and params and "id" in params:
+                row = self.rows[POSTGRES_THREAD_TABLE].get(str(params["id"]))
+                if row is not None:
+                    if "set status = 'archived'" in compact:
+                        row["status"] = "archived"
+                    if "updated_at" in params:
+                        row["updated_at"] = params["updated_at"]
+                return _Result(rowcount=1 if row is not None else 0)
             return _Result(rowcount=1)
         if "insert into analysis_threads" in compact:
             assert params is not None
@@ -128,10 +138,42 @@ class _FakeConnection:
             self.rows[POSTGRES_CODEX_ITEM_PROJECTION_TABLE][str(params["codex_item_id"])] = dict(params)
             return _Result(rowcount=1)
         if "select * from analysis_threads" in compact:
+            if " where id =" in compact and params and "id" in params:
+                row = self.rows[POSTGRES_THREAD_TABLE].get(str(params["id"]))
+                return _Result([row] if row else [])
             return _Result(list(self.rows[POSTGRES_THREAD_TABLE].values()))
+        if "select id from analysis_threads" in compact:
+            assert params is not None
+            raw_id = str(params["id"])
+            direct = self.rows[POSTGRES_THREAD_TABLE].get(raw_id)
+            if direct:
+                return _Result([{"id": direct["id"]}])
+            for row in self.rows[POSTGRES_THREAD_TABLE].values():
+                if row.get("codex_session_id") == raw_id or row.get("codex_thread_id") == raw_id:
+                    return _Result([{"id": row["id"]}])
+            return _Result()
         if "select * from analysis_turns" in compact:
+            if " where id =" in compact and params and "id" in params:
+                row = self.rows[POSTGRES_TURN_TABLE].get(str(params["id"]))
+                if row and row.get("session_id") == params.get("session_id"):
+                    return _Result([row])
+                return _Result()
+            if " where session_id =" in compact and params and "session_id" in params:
+                rows = [
+                    row for row in self.rows[POSTGRES_TURN_TABLE].values()
+                    if row.get("session_id") == params["session_id"]
+                ]
+                return _Result(rows)
             return _Result(list(self.rows[POSTGRES_TURN_TABLE].values()))
         if "select * from analysis_codex_item_projections" in compact:
+            if " where genbi_session_id =" in compact and params and "session_id" in params:
+                rows = [
+                    row for row in self.rows[POSTGRES_CODEX_ITEM_PROJECTION_TABLE].values()
+                    if row.get("genbi_session_id") == params["session_id"]
+                    and ("turn_id" not in params or row.get("genbi_turn_id") == params["turn_id"])
+                ]
+                rows.sort(key=lambda row: (row.get("sequence", 0), row.get("created_at") or "", row.get("codex_item_id") or ""))
+                return _Result(rows)
             return _Result(list(self.rows[POSTGRES_CODEX_ITEM_PROJECTION_TABLE].values()))
         return _Result()
 
@@ -183,18 +225,17 @@ class PostgresSessionCatalogP0Test(unittest.TestCase):
         self.assertIsInstance(catalog, SessionCatalog)
         self.assertIsInstance(catalog.backend, PostgresSessionCatalogBackend)
 
-    def test_backend_exposes_public_read_and_write_state(self) -> None:
-        # The catalog / projection store call ``read_state`` and
-        # ``write_state`` on the backend; the old Postgres
-        # backend defined them as ``_read_state`` / ``_write_state``
-        # and the call raised ``AttributeError`` on the first
-        # read or write.
+    def test_catalog_uses_row_level_session_crud(self) -> None:
+        # Postgres-backed catalogs must not fall back to whole-table
+        # snapshot reads/writes. Session creation, lookup, alias
+        # resolution, and touch are row-level operations.
         backend = PostgresSessionCatalogBackend("postgresql://unused")
-        # Ensure the public names are the actual method objects,
-        # not aliases that re-execute the underscored names.
-        self.assertTrue(callable(getattr(backend, "read_state", None)))
-        self.assertTrue(callable(getattr(backend, "write_state", None)))
-        # And the round-trip is reachable through the catalog.
+        self.assertTrue(callable(getattr(backend, "get_session", None)))
+        self.assertTrue(callable(getattr(backend, "insert_session", None)))
+        self.assertTrue(callable(getattr(backend, "update_session", None)))
+        self.assertTrue(callable(getattr(backend, "touch_session", None)))
+        self.assertFalse(callable(getattr(backend, "read_state", None)))
+        self.assertFalse(callable(getattr(backend, "write_state", None)))
         catalog = SessionCatalog(backend=backend)
         catalog.register_session(
             session_id="p0_session_1",
@@ -203,11 +244,12 @@ class PostgresSessionCatalogP0Test(unittest.TestCase):
             user_id=None,
             status="active",
         )
-        catalog = SessionCatalog(backend=PostgresSessionCatalogBackend("postgresql://unused"))
+        catalog.mark_updated("p0_session_1", when="2026-08-02T00:00:00+00:00")
         view = catalog.get_view("p0_session_1")
         self.assertIsNotNone(view)
         assert view is not None
         self.assertEqual(view.session.id, "p0_session_1")
+        self.assertEqual(view.session.updatedAt, "2026-08-02T00:00:00+00:00")
 
     def test_legacy_codex_thread_id_is_backfilled_into_codex_session_id(self) -> None:
         # Old ``analysis_threads`` rows persisted under
@@ -236,10 +278,33 @@ class PostgresSessionCatalogP0Test(unittest.TestCase):
         }
         # The first call to ensure_schema backfills the row.
         backend.ensure_schema()  # type: ignore[no-untyped-call]
-        # ``read_state`` should now expose the canonical column.
-        state = backend.read_state()
-        self.assertIn("legacy_session_1", state)
-        self.assertEqual(state["legacy_session_1"].codexSessionId, "codex_legacy_1")
+        # Row-level alias resolution should expose the canonical
+        # session row without scanning every session.
+        self.assertEqual(backend.resolve_session_id("codex_legacy_1"), "legacy_session_1")
+        record = backend.get_session("legacy_session_1")
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.codexSessionId, "codex_legacy_1")
+
+    def test_touching_different_sessions_preserves_both_updated_at_values(self) -> None:
+        catalog = SessionCatalog(backend=PostgresSessionCatalogBackend("postgresql://unused"))
+        for session_id in ("session_a", "session_b"):
+            catalog.register_session(
+                session_id=session_id,
+                product_kind="analysis_task",
+                title=session_id,
+                user_id=None,
+                status="active",
+            )
+        catalog.mark_updated("session_a", when="2026-08-01T00:00:01+00:00")
+        catalog.mark_updated("session_b", when="2026-08-01T00:00:02+00:00")
+        session_a = catalog.get_session("session_a")
+        session_b = catalog.get_session("session_b")
+        self.assertIsNotNone(session_a)
+        self.assertIsNotNone(session_b)
+        assert session_a is not None and session_b is not None
+        self.assertEqual(session_a.updatedAt, "2026-08-01T00:00:01+00:00")
+        self.assertEqual(session_b.updatedAt, "2026-08-01T00:00:02+00:00")
 
     def test_legacy_thread_id_is_backfilled_into_session_id(self) -> None:
         # Old ``analysis_turns`` rows persisted under
@@ -280,10 +345,11 @@ class PostgresSessionCatalogP0Test(unittest.TestCase):
             codex_session_id="codex_legacy_1",
             codex_turn_id="new_turn_2",
         )
-        state = backend.read_state()
-        self.assertIn("new_turn_2", state["turns"])
-        self.assertEqual(state["turns"]["new_turn_2"].sessionId, "genbi_legacy_1")
-        self.assertEqual(state["turns"]["new_turn_2"].codexSessionId, "codex_legacy_1")
+        turn = backend.get_turn("genbi_legacy_1", "new_turn_2")
+        self.assertIsNotNone(turn)
+        assert turn is not None
+        self.assertEqual(turn.sessionId, "genbi_legacy_1")
+        self.assertEqual(turn.codexSessionId, "codex_legacy_1")
 
 
 class PostgresCodexProjectionP0Test(unittest.TestCase):
@@ -305,6 +371,8 @@ class PostgresCodexProjectionP0Test(unittest.TestCase):
         store = build_postgres_codex_projection_store()
         self.assertIsInstance(store, CodexProjectionStore)
         self.assertIsInstance(store.backend, PostgresCodexProjectionBackend)
+        self.assertFalse(callable(getattr(store.backend, "read_state", None)))
+        self.assertFalse(callable(getattr(store.backend, "write_state", None)))
 
     def test_round_trip_turns_and_projections(self) -> None:
         backend = PostgresCodexProjectionBackend("postgresql://unused")
@@ -318,7 +386,78 @@ class PostgresCodexProjectionP0Test(unittest.TestCase):
             codex_session_id="p0_session",
             codex_turn_id="turn_1",
         )
-        state = backend.read_state()
-        self.assertIn("turn_1", state["turns"])
-        self.assertEqual(state["turns"]["turn_1"].sessionId, "p0_session")
-        self.assertEqual(state["turns"]["turn_1"].inputText, "hi")
+        turn = backend.get_turn("p0_session", "turn_1")
+        self.assertIsNotNone(turn)
+        assert turn is not None
+        self.assertEqual(turn.sessionId, "p0_session")
+        self.assertEqual(turn.inputText, "hi")
+
+    def test_projection_store_uses_row_level_turn_and_item_writes(self) -> None:
+        backend = PostgresCodexProjectionBackend("postgresql://unused")
+        store = CodexProjectionStore(backend=backend)
+        store.save_turn(
+            session_id="session_a",
+            turn_id="turn_a",
+            input_kind="message",
+            input_text="a",
+            status="running",
+            codex_session_id="session_a",
+            codex_turn_id="turn_a",
+        )
+        self.builder.conn.sql_log.clear()
+        store.upsert_item(
+            session_id="session_a",
+            turn_id="turn_a",
+            codex_item_id="item_a",
+            item_type="message",
+            status="completed",
+            sequence=7,
+            payload={"text": "a"},
+            created_at="2026-08-01T00:00:00+00:00",
+            completed_at="2026-08-01T00:00:01+00:00",
+            codex_session_id="session_a",
+            codex_turn_id="turn_a",
+        )
+        full_scans = [
+            sql for sql in self.builder.conn.sql_log
+            if sql == "select * from analysis_turns"
+            or sql == "select * from analysis_codex_item_projections"
+        ]
+        item_upserts = [
+            sql for sql in self.builder.conn.sql_log
+            if "insert into analysis_codex_item_projections" in sql
+        ]
+        self.assertEqual(full_scans, [])
+        self.assertEqual(len(item_upserts), 1)
+
+    def test_cross_session_row_writes_do_not_overwrite_each_other(self) -> None:
+        backend = PostgresCodexProjectionBackend("postgresql://unused")
+        store = CodexProjectionStore(backend=backend)
+        for session_id, turn_id in (("session_a", "turn_a"), ("session_b", "turn_b")):
+            store.save_turn(
+                session_id=session_id,
+                turn_id=turn_id,
+                input_kind="message",
+                input_text=session_id,
+                status="running",
+                codex_session_id=session_id,
+                codex_turn_id=turn_id,
+            )
+        store.complete_turn(
+            session_id="session_a",
+            turn_id="turn_a",
+            status="completed",
+            completed_at="2026-08-01T00:01:00+00:00",
+        )
+        store.save_turn(
+            session_id="session_b",
+            turn_id="turn_b2",
+            input_kind="message",
+            input_text="b2",
+            status="running",
+            codex_session_id="session_b",
+            codex_turn_id="turn_b2",
+        )
+        self.assertEqual(store.get_turn("session_a", "turn_a").status, "completed")
+        self.assertEqual(store.get_turn("session_b", "turn_b").status, "running")
+        self.assertEqual(store.get_turn("session_b", "turn_b2").status, "running")

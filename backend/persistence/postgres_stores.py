@@ -152,41 +152,106 @@ class PostgresSessionCatalogBackend:
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_product ON {POSTGRES_THREAD_TABLE} (product_kind)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_codex ON {POSTGRES_THREAD_TABLE} (codex_session_id)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_tenant_user ON {POSTGRES_THREAD_TABLE} (tenant_id, user_id)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_THREAD_TABLE}_tenant_user_updated ON {POSTGRES_THREAD_TABLE} (tenant_id, user_id, updated_at DESC)")
 
-    def write_state(self, state: dict[str, SessionRecord]) -> None:
+    def get_session(self, session_id: str) -> SessionRecord | None:
         with _connect(self.database_url) as conn:
-            for record in state.values():
-                conn.execute(
-                    f"""
-                    INSERT INTO {POSTGRES_THREAD_TABLE} (
-                        id, product_kind, title, tenant_id, user_id, workspace_id, codex_session_id,
-                        status, created_at, updated_at, metadata
-                    )
-                    VALUES (
-                        %(id)s, %(product_kind)s, %(title)s, %(tenant_id)s, %(user_id)s, %(workspace_id)s,
-                        %(codex_session_id)s, %(status)s, %(created_at)s, %(updated_at)s, %(metadata)s
-                    )
-                    ON CONFLICT (id) DO UPDATE SET
-                        product_kind = EXCLUDED.product_kind,
-                        title = EXCLUDED.title,
-                        tenant_id = EXCLUDED.tenant_id,
-                        user_id = EXCLUDED.user_id,
-                        workspace_id = EXCLUDED.workspace_id,
-                        codex_session_id = EXCLUDED.codex_session_id,
-                        status = EXCLUDED.status,
-                        updated_at = EXCLUDED.updated_at,
-                        metadata = EXCLUDED.metadata
-                    """,
-                    _session_params(record),
+            row = conn.execute(
+                f"SELECT * FROM {POSTGRES_THREAD_TABLE} WHERE id = %(id)s",
+                {"id": session_id},
+            ).fetchone()
+        return _session_record_from_row(row) if row else None
+
+    def resolve_session_id(self, raw_id: str) -> str | None:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"""
+                SELECT id FROM {POSTGRES_THREAD_TABLE}
+                WHERE id = %(id)s OR codex_session_id = %(id)s
+                ORDER BY CASE WHEN id = %(id)s THEN 0 ELSE 1 END, updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                {"id": raw_id},
+            ).fetchone()
+        return str(row["id"]) if row else None
+
+    def list_sessions(
+        self,
+        *,
+        limit: int = 50,
+        product_kind: str | None = None,
+    ) -> list[SessionRecord]:
+        clauses: list[str] = []
+        params: dict[str, Any] = {"limit": limit}
+        if product_kind:
+            clauses.append("product_kind = %(product_kind)s")
+            params["product_kind"] = product_kind
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with _connect(self.database_url) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM {POSTGRES_THREAD_TABLE}
+                {where}
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT %(limit)s
+                """,
+                params,
+            ).fetchall()
+        return [_session_record_from_row(row) for row in rows]
+
+    def insert_session(self, record: SessionRecord) -> None:
+        self._upsert_session(record)
+
+    def update_session(self, record: SessionRecord) -> None:
+        self._upsert_session(record)
+
+    def archive_session(self, session_id: str, *, updated_at: str) -> None:
+        with _connect(self.database_url) as conn:
+            conn.execute(
+                f"""
+                UPDATE {POSTGRES_THREAD_TABLE}
+                SET status = 'archived', updated_at = %(updated_at)s
+                WHERE id = %(id)s
+                """,
+                {"id": session_id, "updated_at": updated_at},
+            )
+
+    def touch_session(self, session_id: str, updated_at: str) -> None:
+        with _connect(self.database_url) as conn:
+            conn.execute(
+                f"UPDATE {POSTGRES_THREAD_TABLE} SET updated_at = %(updated_at)s WHERE id = %(id)s",
+                {"id": session_id, "updated_at": updated_at},
+            )
+
+    def delete_session(self, session_id: str) -> bool:
+        with _connect(self.database_url) as conn:
+            return bool(conn.execute(f"DELETE FROM {POSTGRES_THREAD_TABLE} WHERE id = %(id)s", {"id": session_id}).rowcount)
+
+    def _upsert_session(self, record: SessionRecord) -> None:
+        with _connect(self.database_url) as conn:
+            conn.execute(
+                f"""
+                INSERT INTO {POSTGRES_THREAD_TABLE} (
+                    id, product_kind, title, tenant_id, user_id, workspace_id, codex_session_id,
+                    status, created_at, updated_at, metadata
                 )
-
-    def read_state(self) -> dict[str, SessionRecord]:
-        with _connect(self.database_url) as conn:
-            records = {
-                str(row["id"]): _session_record_from_row(row)
-                for row in conn.execute(f"SELECT * FROM {POSTGRES_THREAD_TABLE}").fetchall()
-            }
-        return records
+                VALUES (
+                    %(id)s, %(product_kind)s, %(title)s, %(tenant_id)s, %(user_id)s, %(workspace_id)s,
+                    %(codex_session_id)s, %(status)s, %(created_at)s, %(updated_at)s, %(metadata)s
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    product_kind = EXCLUDED.product_kind,
+                    title = EXCLUDED.title,
+                    tenant_id = EXCLUDED.tenant_id,
+                    user_id = EXCLUDED.user_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    codex_session_id = EXCLUDED.codex_session_id,
+                    status = EXCLUDED.status,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+                """,
+                _session_params(record),
+            )
 
     def clear(self) -> int:
         with _connect(self.database_url) as conn:
@@ -203,6 +268,10 @@ class PostgresCodexProjectionBackend:
 
     def __init__(self, database_url: str) -> None:
         self.database_url = _normalize_postgres_url(database_url)
+        self._has_legacy_turn_thread_id = False
+        self._has_legacy_turn_codex_thread_id = False
+        self._has_legacy_item_codex_thread_id = False
+        self._has_legacy_item_genbi_thread_id = False
         self.ensure_schema()
 
     def ensure_schema(self) -> None:
@@ -240,6 +309,8 @@ class PostgresCodexProjectionBackend:
             conn.execute(f"ALTER TABLE {POSTGRES_TURN_TABLE} ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ")
             has_legacy_turn_thread_id = _column_exists(conn, POSTGRES_TURN_TABLE, "thread_id")
             has_legacy_turn_codex_thread_id = _column_exists(conn, POSTGRES_TURN_TABLE, "codex_thread_id")
+            self._has_legacy_turn_thread_id = has_legacy_turn_thread_id
+            self._has_legacy_turn_codex_thread_id = has_legacy_turn_codex_thread_id
             if has_legacy_turn_thread_id:
                 conn.execute(
                     f"""
@@ -280,7 +351,9 @@ class PostgresCodexProjectionBackend:
             conn.execute(f"ALTER TABLE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} ADD COLUMN IF NOT EXISTS sequence INTEGER NOT NULL DEFAULT 0")
             # Backfill canonical columns from the legacy aliases.
             # Idempotent.
-            if _column_exists(conn, POSTGRES_CODEX_ITEM_PROJECTION_TABLE, "codex_thread_id"):
+            has_legacy_item_codex_thread_id = _column_exists(conn, POSTGRES_CODEX_ITEM_PROJECTION_TABLE, "codex_thread_id")
+            self._has_legacy_item_codex_thread_id = has_legacy_item_codex_thread_id
+            if has_legacy_item_codex_thread_id:
                 conn.execute(
                     f"""
                     UPDATE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
@@ -288,7 +361,9 @@ class PostgresCodexProjectionBackend:
                     WHERE codex_session_id IS NULL AND codex_thread_id IS NOT NULL
                     """
                 )
-            if _column_exists(conn, POSTGRES_CODEX_ITEM_PROJECTION_TABLE, "genbi_thread_id"):
+            has_legacy_item_genbi_thread_id = _column_exists(conn, POSTGRES_CODEX_ITEM_PROJECTION_TABLE, "genbi_thread_id")
+            self._has_legacy_item_genbi_thread_id = has_legacy_item_genbi_thread_id
+            if has_legacy_item_genbi_thread_id:
                 conn.execute(
                     f"""
                     UPDATE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
@@ -296,110 +371,171 @@ class PostgresCodexProjectionBackend:
                     WHERE genbi_session_id IS NULL AND genbi_thread_id IS NOT NULL
                     """
                 )
+            conn.execute(
+                f"""
+                UPDATE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
+                SET genbi_turn_id = codex_turn_id
+                WHERE genbi_turn_id IS NULL AND codex_turn_id IS NOT NULL
+                """
+            )
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_session ON {POSTGRES_TURN_TABLE} (session_id, created_at)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_session_updated ON {POSTGRES_TURN_TABLE} (session_id, updated_at DESC)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_TURN_TABLE}_codex ON {POSTGRES_TURN_TABLE} (codex_session_id, codex_turn_id)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_session ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (genbi_session_id, created_at)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_session_turn_sequence ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (genbi_session_id, genbi_turn_id, sequence)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{POSTGRES_CODEX_ITEM_PROJECTION_TABLE}_turn ON {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (codex_session_id, codex_turn_id)")
 
-    def write_state(self, state: dict[str, Any]) -> None:
+    def get_turn(self, session_id: str, turn_id: str) -> TurnRecord | None:
         with _connect(self.database_url) as conn:
-            for turn in state["turns"].values():
-                params = _turn_params(turn)
-                legacy_columns: list[str] = []
-                legacy_values: list[str] = []
-                legacy_updates: list[str] = []
-                if _column_exists(conn, POSTGRES_TURN_TABLE, "thread_id"):
-                    legacy_columns.append("thread_id")
-                    legacy_values.append("%(thread_id)s")
-                    legacy_updates.append("thread_id = EXCLUDED.thread_id")
-                    params["thread_id"] = params["session_id"]
-                if _column_exists(conn, POSTGRES_TURN_TABLE, "codex_thread_id"):
-                    legacy_columns.append("codex_thread_id")
-                    legacy_values.append("%(codex_thread_id)s")
-                    legacy_updates.append("codex_thread_id = EXCLUDED.codex_thread_id")
-                    params["codex_thread_id"] = params["codex_session_id"]
-                extra_columns = f", {', '.join(legacy_columns)}" if legacy_columns else ""
-                extra_values = f", {', '.join(legacy_values)}" if legacy_values else ""
-                extra_updates = (",\n                        " + ",\n                        ".join(legacy_updates)) if legacy_updates else ""
-                conn.execute(
-                    f"""
-                    INSERT INTO {POSTGRES_TURN_TABLE} (
-                        id, session_id, input_kind, question, input_text, status,
-                        created_at, updated_at, started_at, completed_at,
-                        codex_session_id, codex_turn_id, metadata{extra_columns}
-                    )
-                    VALUES (
-                        %(id)s, %(session_id)s, %(input_kind)s, %(question)s, %(input_text)s, %(status)s,
-                        %(created_at)s, %(updated_at)s, %(started_at)s, %(completed_at)s,
-                        %(codex_session_id)s, %(codex_turn_id)s, %(metadata)s{extra_values}
-                    )
-                    ON CONFLICT (id) DO UPDATE SET
-                        input_kind = EXCLUDED.input_kind,
-                        question = EXCLUDED.question,
-                        input_text = EXCLUDED.input_text,
-                        status = EXCLUDED.status,
-                        updated_at = EXCLUDED.updated_at,
-                        started_at = EXCLUDED.started_at,
-                        completed_at = EXCLUDED.completed_at,
-                        codex_session_id = EXCLUDED.codex_session_id,
-                        codex_turn_id = EXCLUDED.codex_turn_id,
-                        metadata = EXCLUDED.metadata{extra_updates}
-                    """,
-                    params,
-                )
-            for item in state["projections"]:
-                params = _codex_item_projection_params(item)
-                legacy_columns: list[str] = []
-                legacy_values: list[str] = []
-                legacy_updates: list[str] = []
-                if _column_exists(conn, POSTGRES_CODEX_ITEM_PROJECTION_TABLE, "codex_thread_id"):
-                    legacy_columns.append("codex_thread_id")
-                    legacy_values.append("%(codex_thread_id)s")
-                    legacy_updates.append("codex_thread_id = EXCLUDED.codex_thread_id")
-                    params["codex_thread_id"] = params["codex_session_id"]
-                if _column_exists(conn, POSTGRES_CODEX_ITEM_PROJECTION_TABLE, "genbi_thread_id"):
-                    legacy_columns.append("genbi_thread_id")
-                    legacy_values.append("%(genbi_thread_id)s")
-                    legacy_updates.append("genbi_thread_id = EXCLUDED.genbi_thread_id")
-                    params["genbi_thread_id"] = params["genbi_session_id"]
-                extra_columns = f", {', '.join(legacy_columns)}" if legacy_columns else ""
-                extra_values = f", {', '.join(legacy_values)}" if legacy_values else ""
-                extra_updates = (",\n                        " + ",\n                        ".join(legacy_updates)) if legacy_updates else ""
-                conn.execute(
-                    f"""
-                    INSERT INTO {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
-                        codex_item_id, codex_session_id, codex_turn_id, item_type, status, sequence, payload,
-                        created_at, completed_at, genbi_session_id, genbi_turn_id{extra_columns}
-                    )
-                    VALUES (
-                        %(codex_item_id)s, %(codex_session_id)s, %(codex_turn_id)s, %(item_type)s, %(status)s, %(sequence)s, %(payload)s,
-                        %(created_at)s, %(completed_at)s, %(genbi_session_id)s, %(genbi_turn_id)s{extra_values}
-                    )
-                    ON CONFLICT (codex_item_id) DO UPDATE SET
-                        codex_session_id = EXCLUDED.codex_session_id,
-                        codex_turn_id = EXCLUDED.codex_turn_id,
-                        item_type = EXCLUDED.item_type,
-                        status = EXCLUDED.status,
-                        sequence = EXCLUDED.sequence,
-                        payload = EXCLUDED.payload,
-                        completed_at = EXCLUDED.completed_at,
-                        genbi_session_id = EXCLUDED.genbi_session_id,
-                        genbi_turn_id = EXCLUDED.genbi_turn_id{extra_updates}
-                    """,
-                    params,
-                )
+            row = conn.execute(
+                f"""
+                SELECT * FROM {POSTGRES_TURN_TABLE}
+                WHERE id = %(id)s AND session_id = %(session_id)s
+                """,
+                {"id": turn_id, "session_id": session_id},
+            ).fetchone()
+        return _turn_record_from_row(row) if row else None
 
-    def read_state(self) -> dict[str, Any]:
+    def list_turns(self, session_id: str) -> list[TurnRecord]:
         with _connect(self.database_url) as conn:
-            turns = {
-                str(row["id"]): _turn_record_from_row(row)
-                for row in conn.execute(f"SELECT * FROM {POSTGRES_TURN_TABLE}").fetchall()
-            }
-            codex_item_projections = [
-                _codex_item_projection_from_row(row)
-                for row in conn.execute(f"SELECT * FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}").fetchall()
-            ]
-        return {"turns": turns, "projections": codex_item_projections}
+            rows = conn.execute(
+                f"""
+                SELECT * FROM {POSTGRES_TURN_TABLE}
+                WHERE session_id = %(session_id)s
+                ORDER BY created_at ASC NULLS LAST, id ASC
+                """,
+                {"session_id": session_id},
+            ).fetchall()
+        return [_turn_record_from_row(row) for row in rows]
+
+    def latest_turn(self, session_id: str) -> TurnRecord | None:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"""
+                SELECT * FROM {POSTGRES_TURN_TABLE}
+                WHERE session_id = %(session_id)s
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+                LIMIT 1
+                """,
+                {"session_id": session_id},
+            ).fetchone()
+        return _turn_record_from_row(row) if row else None
+
+    def upsert_turn(self, record: TurnRecord) -> None:
+        with _connect(self.database_url) as conn:
+            self._upsert_turn(conn, record)
+
+    def upsert_item(self, record: CodexItemProjectionRecord) -> None:
+        with _connect(self.database_url) as conn:
+            self._upsert_item(conn, record)
+
+    def list_items(
+        self,
+        session_id: str,
+        turn_id: str | None = None,
+    ) -> list[CodexItemProjectionRecord]:
+        clauses = ["genbi_session_id = %(session_id)s"]
+        params: dict[str, Any] = {"session_id": session_id}
+        if turn_id is not None:
+            clauses.append("genbi_turn_id = %(turn_id)s")
+            params["turn_id"] = turn_id
+        with _connect(self.database_url) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
+                WHERE {' AND '.join(clauses)}
+                ORDER BY sequence ASC, created_at ASC NULLS LAST, codex_item_id ASC
+                """,
+                params,
+            ).fetchall()
+        return [_codex_item_projection_from_row(row) for row in rows]
+
+    def _upsert_turn(self, conn: Any, turn: TurnRecord) -> None:
+        params = _turn_params(turn)
+        legacy_columns: list[str] = []
+        legacy_values: list[str] = []
+        legacy_updates: list[str] = []
+        if self._has_legacy_turn_thread_id:
+            legacy_columns.append("thread_id")
+            legacy_values.append("%(thread_id)s")
+            legacy_updates.append("thread_id = EXCLUDED.thread_id")
+            params["thread_id"] = params["session_id"]
+        if self._has_legacy_turn_codex_thread_id:
+            legacy_columns.append("codex_thread_id")
+            legacy_values.append("%(codex_thread_id)s")
+            legacy_updates.append("codex_thread_id = EXCLUDED.codex_thread_id")
+            params["codex_thread_id"] = params["codex_session_id"]
+        extra_columns = f", {', '.join(legacy_columns)}" if legacy_columns else ""
+        extra_values = f", {', '.join(legacy_values)}" if legacy_values else ""
+        extra_updates = (",\n                        " + ",\n                        ".join(legacy_updates)) if legacy_updates else ""
+        conn.execute(
+            f"""
+            INSERT INTO {POSTGRES_TURN_TABLE} (
+                id, session_id, input_kind, question, input_text, status,
+                created_at, updated_at, started_at, completed_at,
+                codex_session_id, codex_turn_id, metadata{extra_columns}
+            )
+            VALUES (
+                %(id)s, %(session_id)s, %(input_kind)s, %(question)s, %(input_text)s, %(status)s,
+                %(created_at)s, %(updated_at)s, %(started_at)s, %(completed_at)s,
+                %(codex_session_id)s, %(codex_turn_id)s, %(metadata)s{extra_values}
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                input_kind = EXCLUDED.input_kind,
+                question = EXCLUDED.question,
+                input_text = EXCLUDED.input_text,
+                status = EXCLUDED.status,
+                updated_at = EXCLUDED.updated_at,
+                started_at = EXCLUDED.started_at,
+                completed_at = EXCLUDED.completed_at,
+                codex_session_id = EXCLUDED.codex_session_id,
+                codex_turn_id = EXCLUDED.codex_turn_id,
+                metadata = EXCLUDED.metadata{extra_updates}
+            """,
+            params,
+        )
+
+    def _upsert_item(self, conn: Any, item: CodexItemProjectionRecord) -> None:
+        params = _codex_item_projection_params(item)
+        legacy_columns: list[str] = []
+        legacy_values: list[str] = []
+        legacy_updates: list[str] = []
+        if self._has_legacy_item_codex_thread_id:
+            legacy_columns.append("codex_thread_id")
+            legacy_values.append("%(codex_thread_id)s")
+            legacy_updates.append("codex_thread_id = EXCLUDED.codex_thread_id")
+            params["codex_thread_id"] = params["codex_session_id"]
+        if self._has_legacy_item_genbi_thread_id:
+            legacy_columns.append("genbi_thread_id")
+            legacy_values.append("%(genbi_thread_id)s")
+            legacy_updates.append("genbi_thread_id = EXCLUDED.genbi_thread_id")
+            params["genbi_thread_id"] = params["genbi_session_id"]
+        extra_columns = f", {', '.join(legacy_columns)}" if legacy_columns else ""
+        extra_values = f", {', '.join(legacy_values)}" if legacy_values else ""
+        extra_updates = (",\n                        " + ",\n                        ".join(legacy_updates)) if legacy_updates else ""
+        conn.execute(
+            f"""
+            INSERT INTO {POSTGRES_CODEX_ITEM_PROJECTION_TABLE} (
+                codex_item_id, codex_session_id, codex_turn_id, item_type, status, sequence, payload,
+                created_at, completed_at, genbi_session_id, genbi_turn_id{extra_columns}
+            )
+            VALUES (
+                %(codex_item_id)s, %(codex_session_id)s, %(codex_turn_id)s, %(item_type)s, %(status)s, %(sequence)s, %(payload)s,
+                %(created_at)s, %(completed_at)s, %(genbi_session_id)s, %(genbi_turn_id)s{extra_values}
+            )
+            ON CONFLICT (codex_item_id) DO UPDATE SET
+                codex_session_id = EXCLUDED.codex_session_id,
+                codex_turn_id = EXCLUDED.codex_turn_id,
+                item_type = EXCLUDED.item_type,
+                status = EXCLUDED.status,
+                sequence = EXCLUDED.sequence,
+                payload = EXCLUDED.payload,
+                completed_at = EXCLUDED.completed_at,
+                genbi_session_id = EXCLUDED.genbi_session_id,
+                genbi_turn_id = EXCLUDED.genbi_turn_id{extra_updates}
+            """,
+            params,
+        )
 
     def clear(self) -> int:
         with _connect(self.database_url) as conn:

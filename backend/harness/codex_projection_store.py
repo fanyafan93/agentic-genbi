@@ -165,8 +165,11 @@ class CodexProjectionStore:
                 "turn_id must equal codex_turn_id (new-session contract); "
                 f"got turn_id={turn_id!r}, codex_turn_id={effective_codex_turn_id!r}."
             )
-        state = self._read_state()
-        existing = state["turns"].get(turn_id)
+        if self._has_row_backend("get_turn", "upsert_turn"):
+            existing = self.backend.get_turn(session_id, turn_id)
+        else:
+            state = self._read_state()
+            existing = state["turns"].get(turn_id)
         # The turn_id is globally unique in this store (it IS the
         # Codex-issued turn id per the new contract). If a row
         # already exists it must belong to the same session the
@@ -203,16 +206,20 @@ class CodexProjectionStore:
             codexSessionId=codex_session_id or (existing.codexSessionId if existing else None),
             codexTurnId=effective_codex_turn_id or (existing.codexTurnId if existing else None),
         )
-        state["turns"][turn_id] = record
+        record_to_save = record
         # New title: only update if the Runtime provided one; the
         # catalog owns session titles, not us.
         if title is not None and title.strip():
-            state["turns"][turn_id] = TurnRecord(
+            record_to_save = TurnRecord(
                 **{**asdict(record), "metadata": {**record.metadata, "_title": title.strip()}}
             )
-        self._write_state(state)
+        if self._has_row_backend("upsert_turn"):
+            self.backend.upsert_turn(record_to_save)
+        else:
+            state["turns"][turn_id] = record_to_save
+            self._write_state(state)
         self._notify_session(session_id, now)
-        return state["turns"][turn_id]
+        return record_to_save
 
     def complete_turn(
         self,
@@ -232,8 +239,11 @@ class CodexProjectionStore:
             raise ValueError(
                 f"terminal status must be one of {TURN_TERMINAL_STATES!r}; got {status!r}."
             )
-        state = self._read_state()
-        existing = state["turns"].get(turn_id)
+        if self._has_row_backend("get_turn", "upsert_turn"):
+            existing = self.backend.get_turn(session_id, turn_id)
+        else:
+            state = self._read_state()
+            existing = state["turns"].get(turn_id)
         if existing is None or existing.sessionId != session_id:
             raise ValueError(f"turn not found: {turn_id}")
         now = _now()
@@ -252,8 +262,11 @@ class CodexProjectionStore:
             codexSessionId=existing.codexSessionId,
             codexTurnId=existing.codexTurnId,
         )
-        state["turns"][turn_id] = record
-        self._write_state(state)
+        if self._has_row_backend("upsert_turn"):
+            self.backend.upsert_turn(record)
+        else:
+            state["turns"][turn_id] = record
+            self._write_state(state)
         self._notify_session(session_id, now)
         return record
 
@@ -285,8 +298,11 @@ class CodexProjectionStore:
         """
         if not codex_item_id.strip():
             raise ValueError("codex_item_id is required.")
-        state = self._read_state()
-        turn = state["turns"].get(turn_id)
+        if self._has_row_backend("get_turn", "upsert_item", "list_items"):
+            turn = self.backend.get_turn(session_id, turn_id)
+        else:
+            state = self._read_state()
+            turn = state["turns"].get(turn_id)
         if turn is None:
             raise ValueError(f"turn not found: {turn_id}")
         if turn.sessionId != session_id:
@@ -295,10 +311,16 @@ class CodexProjectionStore:
                 f"cannot upsert projection on session {session_id!r}."
             )
         existing = None
-        for projection in state["projections"]:
-            if projection.codexItemId == codex_item_id:
-                existing = projection
-                break
+        if self._has_row_backend("list_items"):
+            for projection in self.backend.list_items(session_id, turn_id):
+                if projection.codexItemId == codex_item_id:
+                    existing = projection
+                    break
+        else:
+            for projection in state["projections"]:
+                if projection.codexItemId == codex_item_id:
+                    existing = projection
+                    break
         # ``sequence`` is the dense ordering of the projection in
         # the turn's timeline. The Runtime assigns it; the store
         # just stores the value. The replay path reuses the same
@@ -316,19 +338,24 @@ class CodexProjectionStore:
             genbiSessionId=session_id,
             genbiTurnId=turn_id,
         )
-        if existing is None:
+        if self._has_row_backend("upsert_item"):
+            self.backend.upsert_item(record)
+        elif existing is None:
             state["projections"].append(record)
+            self._write_state(state)
         else:
             state["projections"] = [
                 record if item.codexItemId == codex_item_id else item
                 for item in state["projections"]
             ]
-        self._write_state(state)
+            self._write_state(state)
         return record
 
     # -- reads -----------------------------------------------------------
 
     def get_turn(self, session_id: str, turn_id: str) -> TurnRecord | None:
+        if self._has_row_backend("get_turn"):
+            return self.backend.get_turn(session_id, turn_id)
         state = self._read_state()
         record = state["turns"].get(turn_id)
         if record is None or record.sessionId != session_id:
@@ -336,6 +363,8 @@ class CodexProjectionStore:
         return record
 
     def list_turns(self, session_id: str) -> list[TurnRecord]:
+        if self._has_row_backend("list_turns"):
+            return self.backend.list_turns(session_id)
         state = self._read_state()
         records = [t for t in state["turns"].values() if t.sessionId == session_id]
         records.sort(key=lambda t: t.createdAt)
@@ -347,6 +376,8 @@ class CodexProjectionStore:
         session_id: str,
         turn_id: str | None = None,
     ) -> list[CodexItemProjectionRecord]:
+        if self._has_row_backend("list_items"):
+            return self.backend.list_items(session_id, turn_id)
         state = self._read_state()
         rows = [p for p in state["projections"] if p.genbiSessionId == session_id]
         if turn_id is not None:
@@ -365,6 +396,9 @@ class CodexProjectionStore:
     # -- sidebar signal --------------------------------------------------
 
     def latest_turn_status(self, session_id: str) -> str | None:
+        if self._has_row_backend("latest_turn"):
+            turn = self.backend.latest_turn(session_id)
+            return turn.status if turn else None
         turns = self.list_turns(session_id)
         if not turns:
             return None
@@ -372,6 +406,9 @@ class CodexProjectionStore:
         return turns[-1].status
 
     def latest_turn_id(self, session_id: str) -> str | None:
+        if self._has_row_backend("latest_turn"):
+            turn = self.backend.latest_turn(session_id)
+            return turn.id if turn else None
         turns = self.list_turns(session_id)
         if not turns:
             return None
@@ -429,6 +466,11 @@ class CodexProjectionStore:
             for record in sorted(state["projections"], key=lambda value: value.createdAt):
                 file.write(json.dumps({"record_type": "projection", **asdict(record)}, ensure_ascii=False, default=str))
                 file.write("\n")
+
+    def _has_row_backend(self, *method_names: str) -> bool:
+        if self.backend is None:
+            return False
+        return all(callable(getattr(self.backend, name, None)) for name in method_names)
 
 
 def _normalize_projection_payload(payload: dict[str, Any]) -> dict[str, Any]:

@@ -126,6 +126,8 @@ class SessionCatalog:
     # -- lookups ---------------------------------------------------------
 
     def get_session(self, session_id: str) -> SessionRecord | None:
+        if self._has_row_backend("get_session"):
+            return self.backend.get_session(session_id)
         return self._read_state().get(session_id)
 
     def list_sessions(
@@ -134,6 +136,8 @@ class SessionCatalog:
         limit: int = 50,
         product_kind: SessionProductKind | None = None,
     ) -> list[SessionRecord]:
+        if self._has_row_backend("list_sessions"):
+            return self.backend.list_sessions(limit=limit, product_kind=product_kind)
         state = self._read_state()
         sessions = list(state.values())
         if product_kind:
@@ -156,6 +160,8 @@ class SessionCatalog:
         """
         if not raw_id or not raw_id.strip():
             return None
+        if self._has_row_backend("resolve_session_id"):
+            return self.backend.resolve_session_id(raw_id)
         state = self._read_state()
         if raw_id in state:
             return raw_id
@@ -219,8 +225,11 @@ class SessionCatalog:
                 "session_id must equal codex_session_id (new-session contract); "
                 f"got session_id={session_id!r}, codex_session_id={effective_codex_id!r}."
             )
-        state = self._read_state()
-        existing = state.get(session_id)
+        if self._has_row_backend("get_session", "insert_session", "update_session"):
+            existing = self.backend.get_session(session_id)
+        else:
+            state = self._read_state()
+            existing = state.get(session_id)
         now = _now()
         merged_metadata = {
             **(existing.metadata if existing else {}),
@@ -248,13 +257,22 @@ class SessionCatalog:
             or (existing.workspaceId if existing else None),
             codexSessionId=effective_codex_id or (existing.codexSessionId if existing else None),
         )
-        state[session_id] = record
-        self._write_state(state)
+        if self._has_row_backend("insert_session", "update_session"):
+            if existing is None:
+                self.backend.insert_session(record)
+            else:
+                self.backend.update_session(record)
+        else:
+            state[session_id] = record
+            self._write_state(state)
         return record
 
     def rename_session(self, session_id: str, title: str) -> SessionRecord:
-        state = self._read_state()
-        existing = state.get(session_id)
+        if self._has_row_backend("get_session", "update_session"):
+            existing = self.backend.get_session(session_id)
+        else:
+            state = self._read_state()
+            existing = state.get(session_id)
         if existing is None:
             raise ValueError(f"session not found: {session_id}")
         updated = SessionRecord(
@@ -270,8 +288,11 @@ class SessionCatalog:
             workspaceId=existing.workspaceId,
             codexSessionId=existing.codexSessionId,
         )
-        state[session_id] = updated
-        self._write_state(state)
+        if self._has_row_backend("update_session"):
+            self.backend.update_session(updated)
+        else:
+            state[session_id] = updated
+            self._write_state(state)
         return updated
 
     def archive_session(self, session_id: str) -> SessionRecord:
@@ -282,8 +303,11 @@ class SessionCatalog:
         otherwise always ``active`` regardless of what the most
         recent turn did.
         """
-        state = self._read_state()
-        existing = state.get(session_id)
+        if self._has_row_backend("get_session", "archive_session"):
+            existing = self.backend.get_session(session_id)
+        else:
+            state = self._read_state()
+            existing = state.get(session_id)
         if existing is None:
             raise ValueError(f"session not found: {session_id}")
         archived = SessionRecord(
@@ -299,13 +323,19 @@ class SessionCatalog:
             workspaceId=existing.workspaceId,
             codexSessionId=existing.codexSessionId,
         )
-        state[session_id] = archived
-        self._write_state(state)
+        if self._has_row_backend("archive_session"):
+            self.backend.archive_session(session_id, updated_at=archived.updatedAt)
+        else:
+            state[session_id] = archived
+            self._write_state(state)
         return archived
 
     def reactivate_session(self, session_id: str) -> SessionRecord:
-        state = self._read_state()
-        existing = state.get(session_id)
+        if self._has_row_backend("get_session", "update_session"):
+            existing = self.backend.get_session(session_id)
+        else:
+            state = self._read_state()
+            existing = state.get(session_id)
         if existing is None:
             raise ValueError(f"session not found: {session_id}")
         active = SessionRecord(
@@ -321,11 +351,16 @@ class SessionCatalog:
             workspaceId=existing.workspaceId,
             codexSessionId=existing.codexSessionId,
         )
-        state[session_id] = active
-        self._write_state(state)
+        if self._has_row_backend("update_session"):
+            self.backend.update_session(active)
+        else:
+            state[session_id] = active
+            self._write_state(state)
         return active
 
     def delete_session(self, session_id: str) -> bool:
+        if self._has_row_backend("delete_session"):
+            return bool(self.backend.delete_session(session_id))
         state = self._read_state()
         if session_id not in state:
             return False
@@ -340,6 +375,9 @@ class SessionCatalog:
         owns the row contents. This is the only cross-store call
         allowed.
         """
+        if self._has_row_backend("touch_session"):
+            self.backend.touch_session(session_id, when or _now())
+            return
         state = self._read_state()
         existing = state.get(session_id)
         if existing is None:
@@ -414,3 +452,8 @@ class SessionCatalog:
             for record in sorted(state.values(), key=lambda value: value.updatedAt):
                 file.write(json.dumps(asdict(record), ensure_ascii=False, default=str))
                 file.write("\n")
+
+    def _has_row_backend(self, *method_names: str) -> bool:
+        if self.backend is None:
+            return False
+        return all(callable(getattr(self.backend, name, None)) for name in method_names)
