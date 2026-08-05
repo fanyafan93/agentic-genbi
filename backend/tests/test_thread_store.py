@@ -16,18 +16,23 @@ class ThreadStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
 
+            # The ``waiting_for_question`` session state no longer
+            # exists; the canonical state machine is ``active`` or
+            # ``archived``. We still want to make sure create_thread
+            # round-trips a row that has no turns yet, so we use the
+            # new state name here.
             created = store.create_thread(
                 thread_id="codex_thread_report",
                 product_kind="analysis_task",
                 title="渠道日报 新分析",
                 user_id="user_1",
-                status="waiting_for_question",
+                status="active",
                 codex_thread_id="codex_thread_report",
                 metadata={"source_report_id": "report_1"},
             )
             detail = store.get_thread("codex_thread_report")
 
-            self.assertEqual(created["thread"]["status"], "waiting_for_question")
+            self.assertEqual(created["thread"]["status"], "active")
             self.assertEqual(created["turns"], [])
             self.assertIsNotNone(detail)
             assert detail is not None

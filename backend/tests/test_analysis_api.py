@@ -326,14 +326,14 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
                 product_kind="analysis_task",
                 title="legacy draft",
                 user_id=None,
-                status="completed",
+                status="archived",
             )
             thread_store.create_thread(
                 thread_id="codex_thread_real",
                 product_kind="analysis_task",
                 title="real thread",
                 user_id=None,
-                status="completed",
+                status="active",
             )
 
             listed = client.get("/api/analysis/threads")
@@ -366,7 +366,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(created.status_code, 200)
             self.assertEqual(created.json()["thread"]["id"], preflight_id)
-            self.assertEqual(created.json()["thread"]["status"], "waiting_for_question")
+            self.assertEqual(created.json()["thread"]["status"], "active")
             self.assertIsNone(created.json()["thread"]["latestQuestion"])
             self.assertEqual(detail.json()["turns"], [])
 
@@ -531,7 +531,11 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn("codex_stream_ended_without_turn_completed", response.text)
-            self.assertEqual(detail.json()["thread"]["status"], "failed")
+            # Session-level state stays ``active`` even when the latest
+            # turn failed; the sidebar reads ``latestTurnStatus`` for
+            # the turn-level signal.
+            self.assertEqual(detail.json()["thread"]["status"], "active")
+            self.assertEqual(detail.json()["thread"]["latestTurnStatus"], "failed")
             self.assertEqual(detail.json()["turns"][0]["status"], "failed")
 
     def test_interrupted_terminal_event_persists_interrupted_status(self) -> None:
@@ -574,8 +578,8 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             )
             detail = thread_store.get_thread("codex_thread_cancelled")
 
-            self.assertEqual(detail["thread"]["status"], "interrupted")
-            self.assertEqual(detail["turns"][0]["status"], "interrupted")
+            self.assertEqual(detail["thread"]["status"], "active")
+            self.assertEqual(detail["turns"][0]["status"], "cancelled")
 
     def test_disabled_runtime_fails_explicitly_without_fabricated_content(self) -> None:
         app = create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled())
@@ -813,7 +817,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             payload = created.json()
             self.assertEqual(payload["thread"]["id"], preflight_id)
             self.assertEqual(payload["thread"]["title"], "Channel Daily New Analysis")
-            self.assertEqual(payload["thread"]["status"], "waiting_for_question")
+            self.assertEqual(payload["thread"]["status"], "active")
             self.assertIsNone(payload["thread"]["latestQuestion"])
             self.assertEqual(payload["report"]["report"]["id"], "report_for_analysis")
 
@@ -1079,6 +1083,235 @@ class SessionScopedContinuationTest(unittest.IsolatedAsyncioTestCase):
             # codex_turn_created id inferred from the body.
             thread = thread_store.get_thread("codex_thread_explicit")
             self.assertIsNotNone(thread)
+
+
+class SessionTurnStateDecouplingTest(unittest.IsolatedAsyncioTestCase):
+    """Locks the user spec that session/turn state machines do not overlap.
+
+    Session (``analysis_threads.status``) is one of ``active`` or
+    ``archived``. Turn (``analysis_turns.status``) is one of ``running``
+    / ``completed`` / ``failed`` / ``cancelled`` / ``needs_input``. The
+    session state is NEVER copied from the latest turn.
+    """
+
+    def test_fresh_session_status_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            thread_store.create_thread(
+                thread_id="codex_thread_fresh",
+                product_kind="analysis_task",
+                title="fresh session",
+                user_id="user_1",
+                status="active",
+            )
+            # ``get_thread`` carries the latest-turn sidebar signal.
+            detail = thread_store.get_thread("codex_thread_fresh")
+            assert detail is not None
+            self.assertEqual(detail["thread"]["status"], "active")
+            # No turns yet, so the sidebar signal is absent.
+            self.assertIsNone(detail["thread"]["latest_turn_status"])
+            self.assertIsNone(detail["thread"]["latest_turn_id"])
+
+    def test_create_thread_rejects_legacy_session_states(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            for legacy_status in ("running", "completed", "waiting_for_question", "failed", "needs_input"):
+                with self.assertRaises(ValueError):
+                    thread_store.create_thread(
+                        thread_id=f"codex_thread_{legacy_status}",
+                        product_kind="analysis_task",
+                        title="legacy state",
+                        user_id=None,
+                        status=legacy_status,
+                    )
+
+    def test_turn_status_produces_terminal_states_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            thread_store.create_thread(
+                thread_id="codex_thread_terms",
+                product_kind="analysis_task",
+                title="turn states",
+                user_id=None,
+                status="active",
+            )
+            # Each event payload status maps to a single canonical
+            # turn state. ``turn/completed.status == "failed"`` is the
+            # only signal that flips the turn into ``failed``.
+            for raw_status, expected_turn_status in [
+                ("complete", "completed"),
+                ("completed", "completed"),
+                ("succeeded", "completed"),
+                ("failed", "failed"),
+                ("cancelled", "cancelled"),
+                ("interrupted", "cancelled"),
+            ]:
+                thread_store.save_turn(
+                    thread_id="codex_thread_terms",
+                    turn_id=f"turn_{raw_status}",
+                    question=f"q {raw_status}",
+                    input_kind="message",
+                    product_kind="analysis_task",
+                    user_id=None,
+                    events=[
+                        AgentEvent(type="turn/started", turn_id=f"turn_{raw_status}", payload={}),
+                        AgentEvent(
+                            type="turn/completed",
+                            turn_id=f"turn_{raw_status}",
+                            payload={"status": raw_status},
+                        ),
+                    ],
+                )
+                turn = thread_store.get_turn("codex_thread_terms", f"turn_{raw_status}")
+                assert turn is not None
+                self.assertEqual(turn["turn"]["status"], expected_turn_status)
+                # The session never mirrors the turn state.
+                self.assertEqual(turn["thread"]["status"], "active")
+
+    def test_turn_failure_keeps_session_active_and_allows_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+
+            # 1. Open the session.
+            first = client.post(
+                "/api/analysis/sessions/turns/stream",
+                json={"message": "first question"},
+            )
+            self.assertEqual(first.status_code, 200)
+            session_id = "codex_thread_1"
+            first_turn_id = "codex_turn_1"
+
+            # 2. Force the first turn into ``failed`` by overriding the
+            #    turn's status directly. This is the canonical failure
+            #    shape: the turn went to failed while the session is
+            #    still active.
+            thread_store.save_turn(
+                thread_id=session_id,
+                turn_id=first_turn_id,
+                question="first question",
+                input_kind="start",
+                product_kind="analysis_task",
+                user_id=None,
+                events=[
+                    AgentEvent(type="turn/started", turn_id=first_turn_id, payload={}),
+                    AgentEvent(
+                        type="turn/completed",
+                        turn_id=first_turn_id,
+                        payload={"status": "failed", "error": "codex_runtime_failed"},
+                    ),
+                ],
+            )
+
+            # 3. The session state stays ``active``; the sidebar reads
+            #    ``latestTurnStatus`` to surface the failure.
+            session = thread_store.get_thread(session_id)
+            assert session is not None
+            self.assertEqual(session["thread"]["status"], "active")
+            self.assertEqual(session["thread"]["latest_turn_status"], "failed")
+            self.assertEqual(session["turns"][0]["status"], "failed")
+
+            # 4. The user can still send a continuation turn on the
+            #    same session; the session-scoped endpoint accepts the
+            #    request and writes a fresh turn row.
+            second = client.post(
+                f"/api/analysis/sessions/{session_id}/turns/stream",
+                json={"message": "follow-up question", "turn_kind": "message"},
+            )
+            self.assertEqual(second.status_code, 200)
+            refreshed = thread_store.get_thread(session_id)
+            assert refreshed is not None
+            self.assertEqual(refreshed["thread"]["status"], "active")
+            self.assertEqual(len(refreshed["turns"]), 2)
+            self.assertEqual(refreshed["turns"][0]["status"], "failed")
+            self.assertEqual(refreshed["turns"][1]["status"], "completed")
+            self.assertEqual(refreshed["thread"]["latest_turn_status"], "completed")
+
+    def test_list_threads_returns_latest_turn_status_per_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            thread_store.create_thread(
+                thread_id="codex_thread_a",
+                product_kind="analysis_task",
+                title="a",
+                user_id=None,
+                status="active",
+            )
+            thread_store.create_thread(
+                thread_id="codex_thread_b",
+                product_kind="analysis_task",
+                title="b",
+                user_id=None,
+                status="active",
+            )
+            thread_store.save_turn(
+                thread_id="codex_thread_a",
+                turn_id="turn_a",
+                question="qa",
+                input_kind="start",
+                product_kind="analysis_task",
+                user_id=None,
+                events=[
+                    AgentEvent(type="turn/started", turn_id="turn_a", payload={}),
+                    AgentEvent(
+                        type="turn/completed",
+                        turn_id="turn_a",
+                        payload={"status": "failed"},
+                    ),
+                ],
+            )
+            thread_store.save_turn(
+                thread_id="codex_thread_b",
+                turn_id="turn_b",
+                question="qb",
+                input_kind="start",
+                product_kind="analysis_task",
+                user_id=None,
+                events=[
+                    AgentEvent(type="turn/started", turn_id="turn_b", payload={}),
+                    AgentEvent(
+                        type="turn/completed",
+                        turn_id="turn_b",
+                        payload={"status": "complete"},
+                    ),
+                ],
+            )
+            app = create_app(
+                analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
+                thread_store=thread_store,
+            )
+            client = TestClient(app)
+            response = client.get("/api/analysis/threads")
+            self.assertEqual(response.status_code, 200)
+            by_id = {row["id"]: row for row in response.json()["threads"]}
+            self.assertEqual(by_id["codex_thread_a"]["status"], "active")
+            self.assertEqual(by_id["codex_thread_a"]["latestTurnStatus"], "failed")
+            self.assertEqual(by_id["codex_thread_b"]["status"], "active")
+            self.assertEqual(by_id["codex_thread_b"]["latestTurnStatus"], "completed")
+
+    def test_archive_moves_session_out_of_the_active_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_store = ThreadStore(Path(temp_dir) / "thread-store.jsonl")
+            thread_store.create_thread(
+                thread_id="codex_thread_archived",
+                product_kind="analysis_task",
+                title="archive me",
+                user_id=None,
+                status="active",
+            )
+            thread_store.archive_thread("codex_thread_archived")
+            refreshed = thread_store.get_thread("codex_thread_archived")
+            assert refreshed is not None
+            self.assertEqual(refreshed["thread"]["status"], "archived")
+
+            thread_store.reactivate_thread("codex_thread_archived")
+            refreshed = thread_store.get_thread("codex_thread_archived")
+            assert refreshed is not None
+            self.assertEqual(refreshed["thread"]["status"], "active")
 
 
 if __name__ == "__main__":

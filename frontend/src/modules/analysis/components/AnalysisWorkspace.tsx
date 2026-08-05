@@ -110,13 +110,30 @@ function analysisThreadTime(thread: BackendAnalysisThreadSummary): string {
   return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
 }
 
+// The session-level ``status`` is always ``active`` or ``archived``;
+// we read the latest turn's state for the sidebar signal so a turn
+// failure never flips the session into a frozen "completed" state.
+function analysisLatestTurnStatus(thread: BackendAnalysisThreadSummary): string | null {
+  const value = thread.latestTurnStatus ?? thread.latest_turn_status;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function analysisThreadStatus(thread: BackendAnalysisThreadSummary): "running" | "saved" | "readonly" {
-  return thread.status === "running" ? "running" : thread.status === "completed" ? "saved" : "readonly";
+  const latest = analysisLatestTurnStatus(thread);
+  if (latest === "running" || latest === "needs_input") return "running";
+  if (latest === "completed" || latest === "failed" || latest === "cancelled") return "saved";
+  return "readonly";
 }
 
 function analysisThreadStatusLabel(thread: BackendAnalysisThreadSummary): string {
-  if (thread.status === "waiting_for_question") return "待提问";
-  return thread.status === "running" ? "运行中" : thread.status === "completed" ? "已完成" : "已保存";
+  const latest = analysisLatestTurnStatus(thread);
+  if (latest === "running") return "运行中";
+  if (latest === "needs_input") return "待提问";
+  if (latest === "failed") return "本轮失败";
+  if (latest === "cancelled") return "本轮已取消";
+  if (latest === "completed") return "已完成";
+  if (thread.status === "archived") return "已归档";
+  return "已保存";
 }
 
 function threadDate(thread: BackendAnalysisThreadSummary): Date {
@@ -234,12 +251,19 @@ export function AnalysisWorkspace() {
       const existing = threads.find((thread) => thread.id === sessionId);
       const shouldSyncThread = flow.running || hadLocalRunningFlow;
       if (!shouldSyncThread) return threads;
+      // ``status`` is always ``active`` (or ``archived`` if the user
+      // explicitly archived it). The sidebar signal we move is the
+      // latest turn's state, which is what the backend reports via
+      // ``latestTurnStatus``.
+      const latestTurnStatus = flow.running ? "running" : "completed";
       const nextThread: BackendAnalysisThreadSummary = {
         ...(existing ?? { id: sessionId, createdAt: now }),
         title: selectedAnalysisTask,
         latestQuestion: selectedAnalysisTask,
         updatedAt: now,
-        status: flow.running ? "running" : "completed",
+        status: existing?.status ?? "active",
+        latestTurnStatus,
+        latest_turn_status: latestTurnStatus,
       };
       return [nextThread, ...threads.filter((thread) => thread.id !== sessionId)];
     });
@@ -268,8 +292,15 @@ export function AnalysisWorkspace() {
     && (
       isNewAnalysisTask
       || (
-        currentAnalysisThread?.status === "waiting_for_question"
-        && !usefulThreadTitle(currentAnalysisThread.latestQuestion)
+        // ``status`` is always ``active`` now; the only signal we
+        // still need is the *absence* of a latest turn (i.e. the
+        // session was just provisioned and the user hasn't asked
+        // anything yet). The backend emits ``latestTurnStatus`` only
+        // after the first turn row is written.
+        (currentAnalysisThread?.status === "active"
+          || currentAnalysisThread?.status == null)
+        && !analysisLatestTurnStatus(currentAnalysisThread!)
+        && !usefulThreadTitle(currentAnalysisThread?.latestQuestion)
       )
     ),
   );
@@ -284,7 +315,16 @@ export function AnalysisWorkspace() {
     setSelectedAnalysisTask(title);
     setAnalysisThreads((threads) => threads.map((thread) => (
       thread.id === currentAnalysisTaskId
-        ? { ...thread, title, latestQuestion: content, updatedAt: now, status: "running" }
+        ? {
+            ...thread,
+            title,
+            latestQuestion: content,
+            updatedAt: now,
+            // Session-level ``status`` is always ``active``; the
+            // sidebar signal we move is the latest turn's state.
+            latestTurnStatus: "running",
+            latest_turn_status: "running",
+          }
         : thread
     )));
   }

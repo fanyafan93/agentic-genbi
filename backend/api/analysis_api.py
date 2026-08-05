@@ -308,7 +308,10 @@ def create_app(
             product_kind="analysis_task",
             title=title,
             user_id=body.user_id,
-            status="waiting_for_question",
+            # ``waiting_for_question`` is no longer a valid session
+            # state — the legacy endpoint is kept only for back-compat
+            # and the row is written as ``active``.
+            status="active",
             codex_thread_id=thread_id,
             metadata={**body.metadata, "domain": "analysis_task", "thread_id": thread_id, "codex_thread_id": thread_id},
         )
@@ -451,7 +454,12 @@ def create_app(
         thread = configured_thread_store.get_thread(thread_id)
         if not thread:
             raise HTTPException(status_code=404, detail="analysis_thread_not_found")
-        return _repair_thread_detail_text(thread)
+        enriched = _repair_thread_detail_text(thread)
+        # Frontend aliases for the latest-turn sidebar signal.
+        thread_row = enriched.get("thread", {})
+        thread_row["latestTurnStatus"] = thread_row.get("latest_turn_status")
+        thread_row["latestTurnId"] = thread_row.get("latest_turn_id")
+        return enriched
 
     @app.delete("/api/analysis/threads/{thread_id}")
     def delete_analysis_thread(thread_id: str) -> dict[str, Any]:
@@ -630,7 +638,7 @@ def create_app(
             product_kind="analysis_task",
             title=title,
             user_id=body.userId,
-            status="waiting_for_question",
+            status="active",
             codex_thread_id=thread_id,
             metadata={
                 "domain": "analysis_task",
@@ -1068,7 +1076,12 @@ def _stream_analysis_turn_response(
                             product_kind="analysis_task",
                             title=request.question.strip()[:32] or None,
                             user_id=request.user_id,
-                            status="running",
+                            # Session-level state is intentionally tiny
+                            # (``active`` / ``archived``); the latest turn
+                            # already carries the in-flight state on its
+                            # own row. We never copy a turn state into
+                            # the session.
+                            status="active",
                             codex_thread_id=resolved_thread_id,
                             metadata={**(request.metadata or {}), "domain": "analysis_task", "thread_id": resolved_thread_id, "codex_thread_id": resolved_thread_id},
                         )
@@ -1416,7 +1429,19 @@ def _with_latest_thread_question(thread_store: ThreadStore, thread: dict[str, An
     turns = list((detail or {}).get("turns") or [])
     latest_turn = turns[-1] if turns else None
     latest_question = str(latest_turn.get("question", "")).strip() if isinstance(latest_turn, dict) else ""
-    return {**thread, "title": _repair_text_encoding(thread.get("title")), "latestQuestion": _repair_text_encoding(latest_question) or None}
+    # Frontend aliases for the latest-turn sidebar signal. The
+    # snake_case keys are kept for back-compat with internal callers.
+    latest_turn_status = (detail or {}).get("thread", {}).get("latest_turn_status") if detail else None
+    latest_turn_id = (detail or {}).get("thread", {}).get("latest_turn_id") if detail else None
+    return {
+        **thread,
+        "title": _repair_text_encoding(thread.get("title")),
+        "latestQuestion": _repair_text_encoding(latest_question) or None,
+        "latestTurnStatus": latest_turn_status,
+        "latestTurnId": latest_turn_id,
+        "latest_turn_status": latest_turn_status,
+        "latest_turn_id": latest_turn_id,
+    }
 
 
 def _find_waiting_analysis_thread(
@@ -1426,6 +1451,11 @@ def _find_waiting_analysis_thread(
     user_id: str | None,
     metadata_match: dict[str, str | None],
 ) -> dict[str, Any] | None:
+    # The ``waiting_for_question`` session state no longer exists. The
+    # legacy compatibility endpoint (``POST /api/analysis/threads``)
+    # now always provisions a fresh ``active`` session, so the lookup
+    # never returns anything. We still keep the function around in case
+    # an older frontend bundle reaches for it; it just yields ``None``.
     for thread in thread_store.list_threads(limit=200, product_kind="analysis_task"):
         if thread.get("status") != "waiting_for_question":
             continue

@@ -68,8 +68,21 @@
   - 路由层接 `onSessionCreated` 回调，从 sessionless 流拿到 `sessionId` 后 `setCurrentAnalysisTaskId` + `pushState('/analysis/{sessionId}')`。
   - 后端新增 `POST /api/analysis/sessions/{sessionId}/turns/stream` 端点：URL 的 `session_id` 是唯一可信 id，body 的 `sessionId` 与 URL 不一致返回 `400 session_id_mismatch`。
   - 测试：
-    - `frontend/tests/analysis-backend-client.test.ts` 新增 `never leaks the previous session id into the next request (A → B → send)`：开 A → 开 B → 给 B 续传时 URL 与 body 都不出现 A 的 id。
-    - `backend/tests/test_analysis_api.py` 新增 `SessionScopedContinuationTest`（3 个用例）：续传 turn 落入 `codex_thread_created` 行、`session_id_mismatch` 返回 400、URL 单独作为可信 id。
+    - `frontend/tests/analysis-backend-client.test.ts` 新增 `never leaks the previous session id into the next request (A → B → send)`：开 A → 开 B → 给 B 续传时 URL 与 body 都不出现 A 的 id；session/created 事件不携带 A 的 threadId。
+    - `backend/tests/test_analysis_api.py` 新增 `SessionScopedContinuationTest`（3 个用例）：续传 turn 落到 `codex_thread_created` 行、`session_id_mismatch` 返回 400、URL 单独作为可信 id。
+- **把状态拆开**（用户规范）：会话与 turn 拥有独立状态机。
+  - Session 状态机：仅 `active` / `archived`；`create_thread` 拒绝 `running` / `completed` / `waiting_for_question` / `failed` / `needs_input` 等历史值。
+  - Turn 状态机：`running` / `completed` / `failed` / `cancelled` / `needs_input`。`_turn_status` 把 `turn/completed.status` 严格映射（`complete`/`succeeded` → `completed`；`failed` / 未知 → `failed`；`cancelled` / `interrupted` → `cancelled`），`needs_input` 留给 ask 事件。
+  - ThreadStore 取消 `save_turn` 时复制 turn 状态到 session 的旧逻辑；session.status 始终保持 `active`，除非用户显式 `archive_thread` / `reactivate_thread`。
+  - API 表面把 `latestTurnStatus` 与 `latestTurnId` 暴露给前端（snake + camelCase 双键），不再让前端从 session 推断 turn 结果。
+  - 前端：`analysisThreadStatus` / `analysisThreadStatusLabel` 改用 `latestTurnStatus`；`isWaitingForFirstQuestion` 在 session 还没 turn 时为真；`markCurrentThreadAsStarted` 不再写 session.status = "running"，只写 `latestTurnStatus = "running"`。
+  - 验收：
+    - `test_turn_failure_keeps_session_active_and_allows_continuation`：开 A → 强制把 turn 1 标为 `failed` → GET 看到 `session.status=active`、`latestTurnStatus=failed`；再发 turn 2 走 `/api/analysis/sessions/{id}/turns/stream`，写入新 turn；`session.status` 仍为 `active`，`latestTurnStatus` 切到 `completed`。
+    - `test_list_threads_returns_latest_turn_status_per_session`：列表里每个 session 都带 `latestTurnStatus`，session.status 永远 `active`。
+  - 测试：
+    - 后端 `SessionTurnStateDecouplingTest` 5 个用例（fresh session active、拒绝 legacy session 状态、turn status 终态化、turn failed 后 session 仍 active 可续传、列表带 latestTurnStatus、archive/reactivate）。
+    - 前端 `analysis-backend-client.test.ts` 新增 `forwards the latestTurnStatus signal from the backend sidebar` 与 `keeps sending new questions after a failed turn on the same session`。
+  - 后端 115/115、前端 94/94、tsc 全过。
 - 恢复主开发分支到 `29c0e0f merge: feature/report-artifact-design → Agentic-GenBI`。
 - 确认 `119e4c5 fix(frontend): align flow.start/send/reply signature with AgentInput threadId` 内容已包含在恢复点中，cherry-pick 为空补丁。
 - 修复 FineReport 报表画像加载：

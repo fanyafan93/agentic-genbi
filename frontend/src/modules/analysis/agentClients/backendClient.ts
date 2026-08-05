@@ -17,6 +17,14 @@ export type BackendAnalysisThreadSummary = {
   createdAt?: string | null;
   updatedAt?: string | null;
   latestQuestion?: string | null;
+  // The user spec splits session and turn state machines: the
+  // session-level ``status`` is always ``active`` or ``archived`` and
+  // the sidebar reads the latest turn's state here. The backend
+  // returns both the snake_case and camelCase shapes for back-compat.
+  latestTurnStatus?: string | null;
+  latestTurnId?: string | null;
+  latest_turn_status?: string | null;
+  latest_turn_id?: string | null;
   metadata?: Record<string, unknown> | null;
 };
 

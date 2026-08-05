@@ -15,6 +15,20 @@ DEFAULT_THREAD_STORE_PATH = Path(".resource-index/thread-store.jsonl")
 ThreadProductKind = Literal["analysis_task", "asset_continuation"]
 TurnInputKind = Literal["start", "message", "reply"]
 
+# State machine (per user spec 2026-08-05):
+# - Session (analysis_threads.status) is ONLY ``active`` or ``archived``.
+#   We never copy a turn's state into the session; instead the API
+#   surface (``list_threads``, ``get_thread``) returns the latest
+#   turn's state as ``latestTurnStatus`` for sidebar display.
+# - Turn (analysis_turns.status) is one of:
+#   ``running`` / ``completed`` / ``failed`` / ``cancelled`` / ``needs_input``.
+#   ``needs_input`` is the turn asking the user a clarifying question
+#   (it is NOT a session-level state).
+
+SESSION_STATES = ("active", "archived")
+TURN_STATES = ("running", "completed", "failed", "cancelled", "needs_input")
+_TURN_TERMINAL_STATES = ("completed", "failed", "cancelled")
+
 
 @dataclass(frozen=True)
 class ThreadRecord:
@@ -81,12 +95,20 @@ class ThreadStore:
         product_kind: ThreadProductKind,
         title: str | None,
         user_id: str | None,
-        status: str = "waiting_for_question",
+        status: str = "active",
         metadata: dict[str, Any] | None = None,
         codex_thread_id: str | None = None,
     ) -> dict[str, Any]:
         if not thread_id.strip():
             raise ValueError("thread_id is required.")
+        # The session-level state machine is intentionally tiny: only
+        # ``active`` or ``archived``. We reject legacy values
+        # (``waiting_for_question``, ``running``, ``completed`` ...) that
+        # used to mirror the latest turn.
+        if status not in SESSION_STATES:
+            raise ValueError(
+                f"thread.status must be one of {SESSION_STATES!r}; got {status!r}."
+            )
         # New-session contract: ``analysis_threads.id == analysis_threads.codex_thread_id``.
         # ``thread_id`` is the Codex-issued id; the legacy ``codex_thread_id`` column is
         # kept for compatibility and must mirror ``id`` exactly.
@@ -103,12 +125,19 @@ class ThreadStore:
         codex_thread_id = effective_codex_thread_id or _thread_codex_thread_id(merged_metadata, existing_thread=existing_thread)
         if codex_thread_id:
             merged_metadata["codex_thread_id"] = codex_thread_id
+        # Existing rows may have been written under the legacy state
+        # names; we keep the union for backwards compatibility but force
+        # the public ``status`` to the small set the user spec allows.
+        if existing_thread and existing_thread.status in SESSION_STATES:
+            thread_status = existing_thread.status
+        else:
+            thread_status = status
         thread = ThreadRecord(
             id=thread_id,
             productKind=product_kind,
             title=str(title).strip() if title else (existing_thread.title if existing_thread else None),
             userId=user_id,
-            status=status,
+            status=thread_status,
             createdAt=existing_thread.createdAt if existing_thread else now,
             updatedAt=now,
             metadata=merged_metadata,
@@ -124,6 +153,53 @@ class ThreadStore:
             "items": [],
             "codexItemProjections": [],
         }
+
+    def archive_thread(self, thread_id: str) -> None:
+        """Mark a session as ``archived``.
+
+        Archiving is the only way to remove a session from the active
+        list. The user explicitly asks: the session is otherwise always
+        ``active`` regardless of what the most recent turn did.
+        """
+        state = self._read_state()
+        thread = state["threads"].get(thread_id)
+        if thread is None:
+            raise ValueError(f"thread not found: {thread_id}")
+        state["threads"][thread_id] = ThreadRecord(
+            id=thread.id,
+            productKind=thread.productKind,
+            title=thread.title,
+            userId=thread.userId,
+            status="archived",
+            createdAt=thread.createdAt,
+            updatedAt=_now(),
+            metadata=dict(thread.metadata or {}),
+            tenantId=thread.tenantId,
+            workspaceId=thread.workspaceId,
+            codexThreadId=thread.codexThreadId,
+        )
+        self._write_state(state)
+
+    def reactivate_thread(self, thread_id: str) -> None:
+        """Restore an archived session back to ``active``."""
+        state = self._read_state()
+        thread = state["threads"].get(thread_id)
+        if thread is None:
+            raise ValueError(f"thread not found: {thread_id}")
+        state["threads"][thread_id] = ThreadRecord(
+            id=thread.id,
+            productKind=thread.productKind,
+            title=thread.title,
+            userId=thread.userId,
+            status="active",
+            createdAt=thread.createdAt,
+            updatedAt=_now(),
+            metadata=dict(thread.metadata or {}),
+            tenantId=thread.tenantId,
+            workspaceId=thread.workspaceId,
+            codexThreadId=thread.codexThreadId,
+        )
+        self._write_state(state)
 
     def create_turn_only(
         self,
@@ -157,12 +233,21 @@ class ThreadStore:
         merged_metadata = {**(existing_turn.metadata if existing_turn else {}), "codex_turn_id": effective_codex_turn_id}
         if thread.codexThreadId:
             merged_metadata.setdefault("codex_thread_id", thread.codexThreadId)
+        # A freshly provisioned turn is in flight — its state is
+        # ``running`` until ``save_turn`` finalises it. We preserve any
+        # existing turn status so we don't accidentally regress a
+        # completed turn to ``running`` if the pipeline re-enters
+        # ``create_turn_only``.
+        if existing_turn and existing_turn.status in TURN_STATES:
+            turn_status = existing_turn.status
+        else:
+            turn_status = "running"
         turn = TurnRecord(
             id=turn_id,
             threadId=thread_id,
             inputKind="start",
             question="",
-            status="provisioned",
+            status=turn_status,
             createdAt=existing_turn.createdAt if existing_turn else now,
             updatedAt=now,
             metadata=merged_metadata,
@@ -217,8 +302,12 @@ class ThreadStore:
             )
         started_at = events[0].created_at if events else None
         completed_at = events[-1].created_at if events else started_at
-        status = _turn_status(events)
-        thread_status = "needs_input" if any(_is_agent_question_event(event) for event in events) else status
+        # The turn state is one of ``TURN_STATES``. It is NEVER copied
+        # into the session row — a turn may fail, get cancelled, or
+        # answer a clarifying question while the session itself stays
+        # ``active``. The sidebar reads the latest turn's state via
+        # ``latest_turn_status`` on the API surface.
+        turn_status = _turn_status(events)
         merged_metadata = {**(existing_thread.metadata if existing_thread else {}), **(metadata or {})}
         codex_thread_id = _thread_codex_thread_id(
             merged_metadata,
@@ -243,12 +332,16 @@ class ThreadStore:
         )
         now = completed_at or started_at or ""
 
+        # Preserve the existing session-level state. If there is no
+        # existing row yet, fall back to ``active`` — the session is
+        # always ``active`` unless the user explicitly archives it.
+        session_status = existing_thread.status if existing_thread and existing_thread.status in SESSION_STATES else "active"
         thread = ThreadRecord(
             id=thread_id,
             productKind=product_kind,
             title=str(title) if title else None,
             userId=user_id,
-            status=thread_status,
+            status=session_status,
             createdAt=existing_thread.createdAt if existing_thread else (started_at or now),
             updatedAt=now,
             metadata=merged_metadata,
@@ -261,7 +354,7 @@ class ThreadStore:
             threadId=thread_id,
             inputKind=input_kind,
             question=question,
-            status=thread_status,
+            status=turn_status,
             createdAt=existing_turn.createdAt if existing_turn else (started_at or now),
             updatedAt=now,
             metadata={**(existing_turn.metadata if existing_turn else {}), **merged_metadata},
@@ -295,8 +388,11 @@ class ThreadStore:
         items.sort(key=lambda item: item.createdAt)
         codex_item_projections = [item for item in state["codex_item_projections"] if item.genbiThreadId == thread_id]
         codex_item_projections.sort(key=lambda item: item.createdAt)
+        thread_row = asdict(thread)
+        thread_row["latest_turn_status"] = self.latest_turn_status(thread_id, state=state)
+        thread_row["latest_turn_id"] = self.latest_turn_id(thread_id, state=state)
         return {
-            "thread": asdict(thread),
+            "thread": thread_row,
             "turns": [asdict(item) for item in turns],
             "items": [asdict(item) for item in items],
             "codexItemProjections": [asdict(item) for item in codex_item_projections],
@@ -363,6 +459,8 @@ class ThreadStore:
             "codexThreadId": thread.codexThreadId,
             "title": thread.title,
             "status": thread.status,
+            "latest_turn_status": self.latest_turn_status(thread_id, state=state),
+            "latest_turn_id": self.latest_turn_id(thread_id, state=state),
             "createdAt": thread.createdAt,
             "updatedAt": thread.updatedAt,
         }
@@ -382,11 +480,43 @@ class ThreadStore:
         ]
 
     def list_threads(self, *, limit: int = 50, product_kind: ThreadProductKind | None = None) -> list[dict[str, Any]]:
-        threads = list(self._read_state()["threads"].values())
+        """Return the most-recently-updated threads.
+
+        The session-level ``status`` is always ``active`` or
+        ``archived``; callers who need to know what the latest turn did
+        should call :meth:`latest_turn_status` or rely on the API
+        surface to attach ``latest_turn_status`` to each row.
+        """
+        state = self._read_state()
+        threads = list(state["threads"].values())
         if product_kind:
             threads = [item for item in threads if item.productKind == product_kind]
         threads.sort(key=lambda item: item.updatedAt, reverse=True)
-        return [asdict(item) for item in threads[:limit]]
+        rows: list[dict[str, Any]] = []
+        for thread in threads[:limit]:
+            row = asdict(thread)
+            row["latest_turn_status"] = self.latest_turn_status(thread.id, state=state)
+            row["latest_turn_id"] = self.latest_turn_id(thread.id, state=state)
+            rows.append(row)
+        return rows
+
+    def latest_turn_status(self, thread_id: str, *, state: dict[str, Any] | None = None) -> str | None:
+        state = state or self._read_state()
+        thread_turns = [turn for turn in state["turns"].values() if turn.threadId == thread_id]
+        if not thread_turns:
+            return None
+        # ``updatedAt`` advances on every ``save_turn``/``create_turn_only``
+        # call, so the most recently touched turn is the latest.
+        thread_turns.sort(key=lambda turn: turn.updatedAt)
+        return thread_turns[-1].status
+
+    def latest_turn_id(self, thread_id: str, *, state: dict[str, Any] | None = None) -> str | None:
+        state = state or self._read_state()
+        thread_turns = [turn for turn in state["turns"].values() if turn.threadId == thread_id]
+        if not thread_turns:
+            return None
+        thread_turns.sort(key=lambda turn: turn.updatedAt)
+        return thread_turns[-1].id
 
     def delete_thread(self, thread_id: str, *, product_kind: ThreadProductKind | None = None) -> bool:
         state = self._read_state()
@@ -515,11 +645,35 @@ def _codex_item_projections_from_events(
 
 
 def _turn_status(events: list["AgentEvent"]) -> str:
+    """Derive the canonical turn state from the event stream.
+
+    The turn state machine is exactly:
+        running | completed | failed | cancelled | needs_input
+    We map the ``turn/completed`` payload ``status`` to one of
+    ``completed`` / ``failed`` / ``cancelled``; the ``ask``/``user``
+    question events raise ``needs_input`` while the turn is still
+    running. Anything still in flight is ``running``.
+    """
     if any(_is_agent_question_event(event) for event in events):
+        # A clarifying question never stops the turn — the user can
+        # answer it; the turn only finalises once Codex emits
+        # ``turn/completed``. The ``needs_input`` state is therefore
+        # already covered when the turn is in flight, but we still
+        # surface it for turns that ended with an unresolved question.
         return "needs_input"
     completed = next((event for event in reversed(events) if event.type == "turn/completed"), None)
-    if completed:
-        return str(completed.payload.get("status") or "complete")
+    if completed is not None:
+        raw_status = str(completed.payload.get("status") or "complete").lower()
+        if raw_status in {"failed", "cancelled", "completed", "complete", "succeeded", "success", "ok", "interrupted"}:
+            if raw_status in {"complete", "succeeded", "success", "ok"}:
+                return "completed"
+            if raw_status == "interrupted":
+                return "cancelled"
+            return raw_status
+        return "failed"
+    interrupted = next((event for event in reversed(events) if event.type == "turn/interrupted"), None)
+    if interrupted is not None:
+        return "cancelled"
     return "running"
 
 

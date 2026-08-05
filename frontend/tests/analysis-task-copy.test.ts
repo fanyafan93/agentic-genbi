@@ -227,7 +227,12 @@ describe("analysis task product language", () => {
     expect(workspaceSource).not.toContain("createBackendAnalysisThread");
     expect(workspaceSource).not.toContain("private threadId");
     expect(workspaceSource).toContain("const isWaitingForFirstQuestion = Boolean(");
-    expect(workspaceSource).toContain('currentAnalysisThread?.status === "waiting_for_question"');
+    // Session-level state is now always ``active``/``archived``;
+    // the workspace reads ``latestTurnStatus`` to decide whether the
+    // user has already asked the first question.
+    expect(workspaceSource).toContain("analysisLatestTurnStatus");
+    expect(workspaceSource).toContain("currentAnalysisThread?.status === \"active\"");
+    expect(workspaceSource).not.toContain("waiting_for_question");
     expect(workspaceSource).toContain("markCurrentThreadAsStarted");
     expect(workspaceSource).toContain("isNewTask={isWaitingForFirstQuestion}");
     expect(workspaceSource).not.toContain("draft_");

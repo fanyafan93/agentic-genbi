@@ -485,6 +485,96 @@ describe("analysis backend client event mapping", () => {
     expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions/thread_waiting/turns/stream");
   });
 
+  test("forwards the latestTurnStatus signal from the backend sidebar", async () => {
+    // The session-level ``status`` is always ``active`` or
+    // ``archived``; the sidebar reads ``latestTurnStatus`` to
+    // surface what the most recent turn did. The frontend types
+    // expose the field and the workspace branches on it.
+    process.env.NEXT_PUBLIC_GENBI_API_BASE_URL = "http://backend.test";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      threads: [
+        {
+          id: "codex_thread_failed",
+          title: "failed turn",
+          status: "active",
+          latestTurnStatus: "failed",
+          latestQuestion: "first attempt",
+          updatedAt: "2026-08-05T00:00:00Z",
+        },
+        {
+          id: "codex_thread_completed",
+          title: "completed turn",
+          status: "active",
+          latestTurnStatus: "completed",
+          latestQuestion: "second attempt",
+          updatedAt: "2026-08-05T00:00:01Z",
+        },
+      ],
+    }), { status: 200 })));
+
+    const listed = await listBackendAnalysisThreads();
+    expect(listed).toHaveLength(2);
+    const failedThread = listed.find((t) => t.id === "codex_thread_failed");
+    const completedThread = listed.find((t) => t.id === "codex_thread_completed");
+    expect(failedThread?.status).toBe("active");
+    expect(failedThread?.latestTurnStatus).toBe("failed");
+    expect(completedThread?.status).toBe("active");
+    expect(completedThread?.latestTurnStatus).toBe("completed");
+  });
+
+  test("keeps sending new questions after a failed turn on the same session", async () => {
+    // The session stays ``active`` after a turn failure; the user can
+    // keep sending follow-up turns on the same session id. The
+    // agent client must echo the session id explicitly (no memory)
+    // and the backend route is the session-scoped endpoint.
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(
+        sseEvent({
+          type: "session/created",
+          turn_id: "turn_first",
+          payload: {
+            sessionId: "codex_thread_session",
+            codexThreadId: "codex_thread_session",
+            codexTurnId: "turn_first",
+          },
+        }) + sseEvent({
+          type: "turn/started",
+          turn_id: "turn_first",
+          payload: { conversation_id: "codex_thread_session", question: "first" },
+        }) + sseEvent({
+          type: "turn/completed",
+          turn_id: "turn_first",
+          payload: { status: "failed", error: "codex_runtime_failed" },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ))
+      .mockResolvedValueOnce(new Response(
+        sseEvent({
+          type: "turn/started",
+          turn_id: "turn_second",
+          payload: { conversation_id: "codex_thread_session", question: "second" },
+        }) + sseEvent({
+          type: "turn/completed",
+          turn_id: "turn_second",
+          payload: { status: "complete" },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new BackendAnalysisAgentClient("http://backend.test");
+    const firstEvents = await collect(client.send({ kind: "start", question: "first", sessionId: null }));
+    const sessionId = (firstEvents.find((e) => e.type === "session/created") as { sessionId: string } | undefined)?.sessionId;
+    expect(sessionId).toBe("codex_thread_session");
+    // The second turn passes the explicit session id — there is no
+    // implicit memory of the previous turn.
+    await collect(client.send({ kind: "message", content: "second", sessionId: sessionId! }));
+
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      "http://backend.test/api/analysis/sessions/codex_thread_session/turns/stream",
+    );
+  });
+
   test("never leaks the previous session id into the next request (A → B → send)", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(
