@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useMemo, useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
 import { useSession } from "next-auth/react";
@@ -14,12 +14,12 @@ import { InteractiveReportPanel } from "./InteractiveReportPanel";
 import { MyAnalysisPage } from "./MyAnalysisPage";
 import { SystemMcpPage } from "./SystemMcpPage";
 import {
-  deleteBackendAnalysisThread,
-  flowNodesFromBackendThread,
-  getBackendAnalysisThread,
-  listBackendAnalysisThreads,
+  deleteBackendAnalysisSession,
+  flowNodesFromBackendSession,
+  getBackendAnalysisSession,
+  listBackendAnalysisSessions,
   shouldUseBackendAnalysisClient,
-  type BackendAnalysisThreadSummary,
+  type BackendAnalysisSessionSummary,
 } from "../agentClients/backendClient";
 import {
   createAnalysisThreadFromReportBackend,
@@ -66,10 +66,10 @@ function NavIcon({ name }: { name: NavIconName }) {
 
 type AnalysisThreadGroup = {
   label: string;
-  items: BackendAnalysisThreadSummary[];
+  items: BackendAnalysisSessionSummary[];
 };
 
-function groupAnalysisThreads(threads: BackendAnalysisThreadSummary[]): AnalysisThreadGroup[] {
+function groupAnalysisThreads(threads: BackendAnalysisSessionSummary[]): AnalysisThreadGroup[] {
   const today = new Date().toDateString();
   const todayItems = threads.filter((thread) => threadDate(thread).toDateString() === today);
   const earlierItems = threads.filter((thread) => threadDate(thread).toDateString() !== today);
@@ -79,11 +79,11 @@ function groupAnalysisThreads(threads: BackendAnalysisThreadSummary[]): Analysis
   ];
 }
 
-function orderAnalysisThreads(threads: BackendAnalysisThreadSummary[]): BackendAnalysisThreadSummary[] {
+function orderAnalysisThreads(threads: BackendAnalysisSessionSummary[]): BackendAnalysisSessionSummary[] {
   return [...threads].sort((left, right) => threadDate(right).getTime() - threadDate(left).getTime());
 }
 
-function analysisThreadTitle(thread: BackendAnalysisThreadSummary): string {
+function analysisThreadTitle(thread: BackendAnalysisSessionSummary): string {
   return usefulThreadTitle(thread.title) || usefulThreadTitle(thread.latestQuestion) || "历史任务";
 }
 
@@ -97,7 +97,7 @@ function taskTitleFromQuestion(question: string): string {
   return text.slice(0, 32) || "未命名分析任务";
 }
 
-function analysisThreadTime(thread: BackendAnalysisThreadSummary): string {
+function analysisThreadTime(thread: BackendAnalysisSessionSummary): string {
   const date = threadDate(thread);
   if (Number.isNaN(date.getTime())) return "";
   const today = new Date();
@@ -113,19 +113,19 @@ function analysisThreadTime(thread: BackendAnalysisThreadSummary): string {
 // The session-level ``status`` is always ``active`` or ``archived``;
 // we read the latest turn's state for the sidebar signal so a turn
 // failure never flips the session into a frozen "completed" state.
-function analysisLatestTurnStatus(thread: BackendAnalysisThreadSummary): string | null {
+function analysisLatestTurnStatus(thread: BackendAnalysisSessionSummary): string | null {
   const value = thread.latestTurnStatus ?? thread.latest_turn_status;
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function analysisThreadStatus(thread: BackendAnalysisThreadSummary): "running" | "saved" | "readonly" {
+function analysisThreadStatus(thread: BackendAnalysisSessionSummary): "running" | "saved" | "readonly" {
   const latest = analysisLatestTurnStatus(thread);
   if (latest === "running" || latest === "needs_input") return "running";
   if (latest === "completed" || latest === "failed" || latest === "cancelled") return "saved";
   return "readonly";
 }
 
-function analysisThreadStatusLabel(thread: BackendAnalysisThreadSummary): string {
+function analysisThreadStatusLabel(thread: BackendAnalysisSessionSummary): string {
   const latest = analysisLatestTurnStatus(thread);
   if (latest === "running") return "运行中";
   if (latest === "needs_input") return "待提问";
@@ -136,7 +136,7 @@ function analysisThreadStatusLabel(thread: BackendAnalysisThreadSummary): string
   return "已保存";
 }
 
-function threadDate(thread: BackendAnalysisThreadSummary): Date {
+function threadDate(thread: BackendAnalysisSessionSummary): Date {
   return new Date(thread.updatedAt || thread.createdAt || 0);
 }
 
@@ -163,11 +163,11 @@ export function AnalysisWorkspace() {
   const [structuredKnowledgeSource, setStructuredKnowledgeSource] = useState<StructuredKnowledgeSource>("finereport");
   const [savedReports, setSavedReports] = useState<SavedInteractiveReport[]>([]);
   const [sharedReports, setSharedReports] = useState<SharedInteractiveReport[]>([]);
-  const [analysisThreads, setAnalysisThreads] = useState<BackendAnalysisThreadSummary[]>([]);
+  const [analysisThreads, setAnalysisThreads] = useState<BackendAnalysisSessionSummary[]>([]);
   const [analysisThreadsLoading, setAnalysisThreadsLoading] = useState(false);
   const [selectingAnalysisThreads, setSelectingAnalysisThreads] = useState(false);
   const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
-  const [initialFlowMessages, setInitialFlowMessages] = useState<ReturnType<typeof flowNodesFromBackendThread>>([]);
+  const [initialFlowMessages, setInitialFlowMessages] = useState<ReturnType<typeof flowNodesFromBackendSession>>([]);
   const [openedReportId, setOpenedReportId] = useState<string | null>(null);
   const [openedReportThreadId, setOpenedReportThreadId] = useState<string | null>(null);
   const [openedReportLoadingThreadId, setOpenedReportLoadingThreadId] = useState<string | null>(null);
@@ -235,7 +235,7 @@ export function AnalysisWorkspace() {
       return () => { cancelled = true; };
     }
     setAnalysisThreadsLoading(true);
-    void listBackendAnalysisThreads()
+    void listBackendAnalysisSessions()
       .then((threads) => { if (!cancelled) setAnalysisThreads(threads); })
       .catch(() => { if (!cancelled) setAnalysisThreads([]); })
       .finally(() => { if (!cancelled) setAnalysisThreadsLoading(false); });
@@ -256,7 +256,7 @@ export function AnalysisWorkspace() {
       // latest turn's state, which is what the backend reports via
       // ``latestTurnStatus``.
       const latestTurnStatus = flow.running ? "running" : "completed";
-      const nextThread: BackendAnalysisThreadSummary = {
+      const nextThread: BackendAnalysisSessionSummary = {
         ...(existing ?? { id: sessionId, createdAt: now }),
         title: selectedAnalysisTask,
         latestQuestion: selectedAnalysisTask,
@@ -329,7 +329,7 @@ export function AnalysisWorkspace() {
     )));
   }
 
-  async function selectExistingAnalysisTask(thread: BackendAnalysisThreadSummary) {
+  async function selectExistingAnalysisTask(thread: BackendAnalysisSessionSummary) {
     if (selectingAnalysisThreads) {
       toggleSelectedThread(thread.id);
       return;
@@ -348,10 +348,14 @@ export function AnalysisWorkspace() {
     let restoredInitialReport = false;
     if (shouldUseBackendInteractiveReports()) setOpenedReportLoadingThreadId(thread.id);
     try {
-      const detail = await getBackendAnalysisThread(thread.id);
+      const detail = await getBackendAnalysisSession(thread.id);
       if (reportLoadRequestId !== reportLoadRequestRef.current) return;
-      setInitialFlowMessages(flowNodesFromBackendThread(detail));
-      const initialReport = savedReportFromThreadMetadata(detail.thread.metadata);
+      setInitialFlowMessages(flowNodesFromBackendSession(detail));
+      // The backend returns ``session`` (canonical) plus ``thread``
+      // (back-compat alias); both fields carry the same payload.
+      const sessionRow = detail.session ?? detail.thread;
+      if (!sessionRow) return;
+      const initialReport = savedReportFromThreadMetadata(sessionRow.metadata);
       if (initialReport) {
         restoredInitialReport = true;
         setOpenedReportId(initialReport.report.id);
@@ -404,7 +408,7 @@ export function AnalysisWorkspace() {
     const confirmed = window.confirm(`确认删除选中的 ${selectedThreadIds.length} 个任务？删除后不可恢复。`);
     if (!confirmed) return;
     const idsToDelete = [...selectedThreadIds];
-    await Promise.all(idsToDelete.map((threadId) => deleteBackendAnalysisThread(threadId)));
+    await Promise.all(idsToDelete.map((threadId) => deleteBackendAnalysisSession(threadId)));
     setAnalysisThreads((threads) => threads.filter((thread) => !idsToDelete.includes(thread.id)));
     if (currentAnalysisTaskId && idsToDelete.includes(currentAnalysisTaskId)) {
       setSelectedAnalysisTask(null);
@@ -509,15 +513,18 @@ export function AnalysisWorkspace() {
     const reportLoadRequestId = ++reportLoadRequestRef.current;
     if (shouldUseBackendInteractiveReports()) setOpenedReportLoadingThreadId(sourceThreadId);
     try {
-      const detail = await getBackendAnalysisThread(sourceThreadId);
+      const detail = await getBackendAnalysisSession(sourceThreadId);
       if (reportLoadRequestId !== reportLoadRequestRef.current) return;
-      setSelectedAnalysisTask(analysisThreadTitle(detail.thread) || saved.report.title);
-      setInitialFlowMessages(flowNodesFromBackendThread(detail));
-      setAnalysisThreads((threads) => (
-        threads.some((thread) => thread.id === detail.thread.id)
-          ? threads.map((thread) => (thread.id === detail.thread.id ? detail.thread : thread))
-          : orderAnalysisThreads([detail.thread, ...threads])
-      ));
+      const sessionRow = detail.session ?? detail.thread;
+      if (!sessionRow) return;
+      setSelectedAnalysisTask(analysisThreadTitle(sessionRow) || saved.report.title);
+      setInitialFlowMessages(flowNodesFromBackendSession(detail));
+      setAnalysisThreads((threads) => {
+        if (threads.some((thread) => thread.id === sessionRow.id)) {
+          return threads.map((thread) => (thread.id === sessionRow.id ? sessionRow : thread));
+        }
+        return orderAnalysisThreads([sessionRow, ...threads]);
+      });
     } catch {
       if (reportLoadRequestId !== reportLoadRequestRef.current) return;
       setInitialFlowMessages([]);

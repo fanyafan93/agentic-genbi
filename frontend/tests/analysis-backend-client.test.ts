@@ -1,10 +1,10 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+﻿import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   BackendAnalysisAgentClient,
-  deleteBackendAnalysisThread,
-  flowNodesFromBackendThread,
+  deleteBackendAnalysisSession,
+  flowNodesFromBackendSession,
   getBackendAnalysisRequestTimeoutMs,
-  listBackendAnalysisThreads,
+  listBackendAnalysisSessions,
   mapBackendEvents,
   parseAnalysisSse,
   smoothTokenEvent,
@@ -319,41 +319,52 @@ describe("analysis backend client event mapping", () => {
 
   test("requires an explicit sessionId on continuation messages", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(
-        sseEvent({
-          type: "session/created",
-          turn_id: "turn_analysis_123",
-          payload: {
-            sessionId: "thread_analysis_456",
-            codexThreadId: "thread_analysis_456",
-            codexTurnId: "turn_analysis_123",
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        session_id: "thread_analysis_456",
+        turn_id: "turn_analysis_123",
+        events: [
+          {
+            type: "session/created",
+            turn_id: "turn_analysis_123",
+            payload: {
+              sessionId: "thread_analysis_456",
+              codexThreadId: "thread_analysis_456",
+              codexTurnId: "turn_analysis_123",
+            },
+            created_at: "2026-07-30T00:00:00Z",
           },
-        }) + sseEvent({
-          type: "turn/started",
-          turn_id: "turn_analysis_123",
-          payload: { conversation_id: "thread_analysis_456", question: "start question" },
-        }) + sseEvent({
-          type: "turn/completed",
-          turn_id: "turn_analysis_123",
-          created_at: "2026-07-30T00:00:01Z",
-          payload: {},
-        }),
-        { status: 200, headers: { "Content-Type": "text/event-stream" } },
-      ))
-      .mockResolvedValueOnce(new Response(
-        sseEvent({
-          type: "turn/started",
-          turn_id: "turn_analysis_789",
-          created_at: "2026-07-30T00:01:00Z",
-          payload: { conversation_id: "thread_analysis_456", question: "continue question" },
-        }) + sseEvent({
-          type: "turn/completed",
-          turn_id: "turn_analysis_789",
-          created_at: "2026-07-30T00:01:01Z",
-          payload: {},
-        }),
-        { status: 200, headers: { "Content-Type": "text/event-stream" } },
-      ));
+          {
+            type: "turn/started",
+            turn_id: "turn_analysis_123",
+            payload: { session_id: "thread_analysis_456", question: "start question" },
+            created_at: "2026-07-30T00:00:00Z",
+          },
+          {
+            type: "turn/completed",
+            turn_id: "turn_analysis_123",
+            payload: { status: "completed" },
+            created_at: "2026-07-30T00:00:01Z",
+          },
+        ],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        session_id: "thread_analysis_456",
+        turn_id: "turn_analysis_789",
+        events: [
+          {
+            type: "turn/started",
+            turn_id: "turn_analysis_789",
+            payload: { session_id: "thread_analysis_456", thread_id: "thread_analysis_456", question: "continue question" },
+            created_at: "2026-07-30T00:01:00Z",
+          },
+          {
+            type: "turn/completed",
+            turn_id: "turn_analysis_789",
+            payload: { status: "completed" },
+            created_at: "2026-07-30T00:01:01Z",
+          },
+        ],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
@@ -370,14 +381,15 @@ describe("analysis backend client event mapping", () => {
     const startBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     const messageBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
     // First turn: sessionless entry point with ``message``.
-    expect(fetchMock.mock.calls[0][0]).toBe("http://backend.test/api/analysis/sessions/turns/stream");
-    // Every continuation must carry the Codex session id in the URL and
-    // in the body — no client-side memory, no agent-side memory.
-    expect(fetchMock.mock.calls[1][0]).toBe("http://backend.test/api/analysis/sessions/thread_analysis_456/turns/stream");
+    expect(fetchMock.mock.calls[0][0]).toBe("http://backend.test/api/analysis/sessions/turns");
+    // Every continuation must carry the Codex session id in the URL;
+    // the body never re-asserts the id.
+    expect(fetchMock.mock.calls[1][0]).toBe("http://backend.test/api/analysis/sessions/thread_analysis_456/turns");
     expect(startBody.message).toBe("start question");
     expect(startBody.question).toBeUndefined();
     expect(startBody.metadata).toMatchObject({ frontend_client: "analysis_task" });
-    expect(messageBody.sessionId).toBe("thread_analysis_456");
+    expect(startBody.sessionId).toBeUndefined();
+    expect(messageBody.sessionId).toBeUndefined();
     expect(messageBody.turn_kind).toBe("message");
     expect(messageBody.question).toBeUndefined();
     expect(messageBody.message).toBe("continue question");
@@ -446,43 +458,55 @@ describe("analysis backend client event mapping", () => {
   });
 
   test("routes a continuation turn to the session-scoped endpoint", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
-      sseEvent({
-        type: "turn/started",
-        turn_id: "turn_existing",
-        payload: { conversation_id: "thread_existing", question: "follow up" },
-      }) + sseEvent({
-        type: "turn/completed",
-        turn_id: "turn_existing",
-        payload: {},
-      }),
-      { status: 200, headers: { "Content-Type": "text/event-stream" } },
-    )));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      session_id: "thread_existing",
+      turn_id: "turn_existing",
+      events: [
+        {
+          type: "turn/started",
+          turn_id: "turn_existing",
+          payload: { session_id: "thread_existing", question: "follow up" },
+          created_at: "2026-08-01T00:00:00Z",
+        },
+        {
+          type: "turn/completed",
+          turn_id: "turn_existing",
+          payload: { status: "completed" },
+          created_at: "2026-08-01T00:00:01Z",
+        },
+      ],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
     await collect(client.send({ kind: "message", content: "follow up", sessionId: "thread_existing" }));
 
-    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions/thread_existing/turns/stream");
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions/thread_existing/turns");
   });
 
   test("starts the first turn inside an existing session", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
-      sseEvent({
-        type: "turn/started",
-        turn_id: "turn_waiting_first",
-        payload: { conversation_id: "thread_waiting", question: "first question" },
-      }) + sseEvent({
-        type: "turn/completed",
-        turn_id: "turn_waiting_first",
-        payload: {},
-      }),
-      { status: 200, headers: { "Content-Type": "text/event-stream" } },
-    )));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      session_id: "thread_waiting",
+      turn_id: "turn_waiting_first",
+      events: [
+        {
+          type: "turn/started",
+          turn_id: "turn_waiting_first",
+          payload: { session_id: "thread_waiting", question: "first question" },
+          created_at: "2026-08-01T00:00:00Z",
+        },
+        {
+          type: "turn/completed",
+          turn_id: "turn_waiting_first",
+          payload: { status: "completed" },
+          created_at: "2026-08-01T00:00:01Z",
+        },
+      ],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
     await collect(client.send({ kind: "start", question: "first question", sessionId: "thread_waiting" }));
 
-    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions/thread_waiting/turns/stream");
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions/thread_waiting/turns");
   });
 
   test("forwards the latestTurnStatus signal from the backend sidebar", async () => {
@@ -492,7 +516,7 @@ describe("analysis backend client event mapping", () => {
     // expose the field and the workspace branches on it.
     process.env.NEXT_PUBLIC_GENBI_API_BASE_URL = "http://backend.test";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      threads: [
+      sessions: [
         {
           id: "codex_thread_failed",
           title: "failed turn",
@@ -512,7 +536,7 @@ describe("analysis backend client event mapping", () => {
       ],
     }), { status: 200 })));
 
-    const listed = await listBackendAnalysisThreads();
+    const listed = await listBackendAnalysisSessions();
     expect(listed).toHaveLength(2);
     const failedThread = listed.find((t) => t.id === "codex_thread_failed");
     const completedThread = listed.find((t) => t.id === "codex_thread_completed");
@@ -568,7 +592,7 @@ describe("analysis backend client event mapping", () => {
         },
       ],
     };
-    const nodes = flowNodesFromBackendThread(detail as Parameters<typeof flowNodesFromBackendThread>[0]);
+    const nodes = flowNodesFromBackendSession(detail as Parameters<typeof flowNodesFromBackendSession>[0]);
     const userNode = nodes.find((node) => node.role === "user");
     const agentNode = nodes.find((node) => node.role === "agent");
     expect(userNode?.content).toBe("what was last week's GMV?");
@@ -584,38 +608,48 @@ describe("analysis backend client event mapping", () => {
     // agent client must echo the session id explicitly (no memory)
     // and the backend route is the session-scoped endpoint.
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(
-        sseEvent({
-          type: "session/created",
-          turn_id: "turn_first",
-          payload: {
-            sessionId: "codex_thread_session",
-            codexThreadId: "codex_thread_session",
-            codexTurnId: "turn_first",
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        session_id: "codex_thread_session",
+        turn_id: "turn_first",
+        events: [
+          {
+            type: "session/created",
+            turn_id: "turn_first",
+            payload: { sessionId: "codex_thread_session", codexThreadId: "codex_thread_session", codexTurnId: "turn_first" },
+            created_at: "2026-08-01T00:00:00Z",
           },
-        }) + sseEvent({
-          type: "turn/started",
-          turn_id: "turn_first",
-          payload: { conversation_id: "codex_thread_session", question: "first" },
-        }) + sseEvent({
-          type: "turn/completed",
-          turn_id: "turn_first",
-          payload: { status: "failed", error: "codex_runtime_failed" },
-        }),
-        { status: 200, headers: { "Content-Type": "text/event-stream" } },
-      ))
-      .mockResolvedValueOnce(new Response(
-        sseEvent({
-          type: "turn/started",
-          turn_id: "turn_second",
-          payload: { conversation_id: "codex_thread_session", question: "second" },
-        }) + sseEvent({
-          type: "turn/completed",
-          turn_id: "turn_second",
-          payload: { status: "complete" },
-        }),
-        { status: 200, headers: { "Content-Type": "text/event-stream" } },
-      ));
+          {
+            type: "turn/started",
+            turn_id: "turn_first",
+            payload: { session_id: "codex_thread_session", question: "first" },
+            created_at: "2026-08-01T00:00:00Z",
+          },
+          {
+            type: "turn/completed",
+            turn_id: "turn_first",
+            payload: { status: "failed", error: "codex_runtime_failed" },
+            created_at: "2026-08-01T00:00:01Z",
+          },
+        ],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        session_id: "codex_thread_session",
+        turn_id: "turn_second",
+        events: [
+          {
+            type: "turn/started",
+            turn_id: "turn_second",
+            payload: { session_id: "codex_thread_session", question: "second" },
+            created_at: "2026-08-01T00:00:02Z",
+          },
+          {
+            type: "turn/completed",
+            turn_id: "turn_second",
+            payload: { status: "completed" },
+            created_at: "2026-08-01T00:00:03Z",
+          },
+        ],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
@@ -627,70 +661,78 @@ describe("analysis backend client event mapping", () => {
     await collect(client.send({ kind: "message", content: "second", sessionId: sessionId! }));
 
     expect(fetchMock.mock.calls[1][0]).toBe(
-      "http://backend.test/api/analysis/sessions/codex_thread_session/turns/stream",
+      "http://backend.test/api/analysis/sessions/codex_thread_session/turns",
     );
   });
 
   test("never leaks the previous session id into the next request (A → B → send)", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(
-        // Open session A via the sessionless entry point.
-        sseEvent({
-          type: "session/created",
-          turn_id: "turn_a",
-          payload: {
-            sessionId: "codex_thread_a",
-            codexThreadId: "codex_thread_a",
-            codexTurnId: "turn_a",
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        session_id: "codex_thread_a",
+        turn_id: "turn_a",
+        events: [
+          {
+            type: "session/created",
+            turn_id: "turn_a",
+            payload: { sessionId: "codex_thread_a", codexThreadId: "codex_thread_a", codexTurnId: "turn_a" },
+            created_at: "2026-08-01T00:00:00Z",
           },
-        }) + sseEvent({
-          type: "turn/started",
-          turn_id: "turn_a",
-          payload: { conversation_id: "codex_thread_a", question: "open A" },
-        }) + sseEvent({
-          type: "turn/completed",
-          turn_id: "turn_a",
-          payload: {},
-        }),
-        { status: 200, headers: { "Content-Type": "text/event-stream" } },
-      ))
-      .mockResolvedValueOnce(new Response(
-        // Open session B via the sessionless entry point. The page
-        // router swapped to B; we pass ``sessionId: null``.
-        sseEvent({
-          type: "session/created",
-          turn_id: "turn_b",
-          payload: {
-            sessionId: "codex_thread_b",
-            codexThreadId: "codex_thread_b",
-            codexTurnId: "turn_b",
+          {
+            type: "turn/started",
+            turn_id: "turn_a",
+            payload: { session_id: "codex_thread_a", question: "open A" },
+            created_at: "2026-08-01T00:00:00Z",
           },
-        }) + sseEvent({
-          type: "turn/started",
-          turn_id: "turn_b",
-          payload: { conversation_id: "codex_thread_b", question: "open B" },
-        }) + sseEvent({
-          type: "turn/completed",
-          turn_id: "turn_b",
-          payload: {},
-        }),
-        { status: 200, headers: { "Content-Type": "text/event-stream" } },
-      ))
-      .mockResolvedValueOnce(new Response(
-        // Continuation turn on B. The caller is responsible for
-        // passing B's id explicitly. A's id must NOT appear in the
-        // request body or the URL.
-        sseEvent({
-          type: "turn/started",
-          turn_id: "turn_b_2",
-          payload: { conversation_id: "codex_thread_b", question: "continue on B" },
-        }) + sseEvent({
-          type: "turn/completed",
-          turn_id: "turn_b_2",
-          payload: {},
-        }),
-        { status: 200, headers: { "Content-Type": "text/event-stream" } },
-      ));
+          {
+            type: "turn/completed",
+            turn_id: "turn_a",
+            payload: { status: "completed" },
+            created_at: "2026-08-01T00:00:01Z",
+          },
+        ],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        session_id: "codex_thread_b",
+        turn_id: "turn_b",
+        events: [
+          {
+            type: "session/created",
+            turn_id: "turn_b",
+            payload: { sessionId: "codex_thread_b", codexThreadId: "codex_thread_b", codexTurnId: "turn_b" },
+            created_at: "2026-08-01T00:00:02Z",
+          },
+          {
+            type: "turn/started",
+            turn_id: "turn_b",
+            payload: { session_id: "codex_thread_b", question: "open B" },
+            created_at: "2026-08-01T00:00:02Z",
+          },
+          {
+            type: "turn/completed",
+            turn_id: "turn_b",
+            payload: { status: "completed" },
+            created_at: "2026-08-01T00:00:03Z",
+          },
+        ],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        session_id: "codex_thread_b",
+        turn_id: "turn_b_2",
+        events: [
+          {
+            type: "turn/started",
+            turn_id: "turn_b_2",
+            payload: { session_id: "codex_thread_b", question: "continue on B" },
+            created_at: "2026-08-01T00:00:04Z",
+          },
+          {
+            type: "turn/completed",
+            turn_id: "turn_b_2",
+            payload: { status: "completed" },
+            created_at: "2026-08-01T00:00:05Z",
+          },
+        ],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new BackendAnalysisAgentClient("http://backend.test");
@@ -713,42 +755,45 @@ describe("analysis backend client event mapping", () => {
     const bodyBCont = JSON.stringify(fetchMock.mock.calls[2][1].body);
 
     // The first two requests are sessionless entry points.
-    expect(urlA).toBe("http://backend.test/api/analysis/sessions/turns/stream");
-    expect(urlB).toBe("http://backend.test/api/analysis/sessions/turns/stream");
+    expect(urlA).toBe("http://backend.test/api/analysis/sessions/turns");
+    expect(urlB).toBe("http://backend.test/api/analysis/sessions/turns");
     // The third request must hit B's session-scoped endpoint and never
     // mention A anywhere on the wire.
-    expect(urlBCont).toBe("http://backend.test/api/analysis/sessions/codex_thread_b/turns/stream");
+    expect(urlBCont).toBe("http://backend.test/api/analysis/sessions/codex_thread_b/turns");
     expect(urlBCont).not.toContain("codex_thread_a");
     expect(bodyA).not.toContain("codex_thread_b");
     expect(bodyB).not.toContain("codex_thread_a");
     expect(bodyBCont).not.toContain("codex_thread_a");
-    expect(bodyBCont).toContain("codex_thread_b");
+    // The new contract forbids the body from carrying a session
+    // id at all; B's id only lives in the URL.
+    expect(bodyBCont).not.toContain("codex_thread_b");
+    expect(urlBCont).toContain("codex_thread_b");
   });
 
-  test("loads backend analysis threads for the real sidebar", async () => {
+  test("loads backend analysis sessions for the real sidebar", async () => {
     process.env.NEXT_PUBLIC_GENBI_API_BASE_URL = "http://backend.test";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      threads: [{ id: "thread_real", latestQuestion: "real question", updatedAt: "2026-08-03T10:00:00Z" }],
+      sessions: [{ id: "session_real", latestQuestion: "real question", updatedAt: "2026-08-03T10:00:00Z" }],
     }), { status: 200 })));
 
-    await expect(listBackendAnalysisThreads()).resolves.toEqual([
-      { id: "thread_real", latestQuestion: "real question", updatedAt: "2026-08-03T10:00:00Z" },
+    await expect(listBackendAnalysisSessions()).resolves.toEqual([
+      { id: "session_real", latestQuestion: "real question", updatedAt: "2026-08-03T10:00:00Z" },
     ]);
-    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads");
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions");
   });
 
-  test("deletes backend analysis threads for sidebar bulk delete", async () => {
+  test("deletes backend analysis sessions for sidebar bulk delete", async () => {
     process.env.NEXT_PUBLIC_GENBI_API_BASE_URL = "http://backend.test";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ deleted: true }), { status: 200 })));
 
-    await expect(deleteBackendAnalysisThread("thread_delete")).resolves.toBeUndefined();
+    await expect(deleteBackendAnalysisSession("session_delete")).resolves.toBeUndefined();
 
-    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/threads/thread_delete");
+    expect(fetchMockUrl()).toBe("http://backend.test/api/analysis/sessions/session_delete");
     expect(vi.mocked(fetch).mock.calls[0][1]).toMatchObject({ method: "DELETE" });
   });
 
   test("hydrates a backend thread into user, assistant, and grouped tool nodes", () => {
-    const nodes = flowNodesFromBackendThread({
+    const nodes = flowNodesFromBackendSession({
       thread: { id: "thread_real" },
       turns: [{ id: "turn_1", question: "查 dm 表", createdAt: "2026-08-03T10:00:00Z" }],
       codexItemProjections: [
@@ -794,34 +839,6 @@ describe("analysis backend client event mapping", () => {
         ],
       },
     ]);
-  });
-
-  test("refreshes the backend request timeout when SSE events arrive", async () => {
-    vi.useFakeTimers();
-    process.env.NEXT_PUBLIC_ANALYSIS_AGENT_TIMEOUT_MS = "50";
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(
-          'event: item/agentMessage/delta\ndata: {"type":"item/agentMessage/delta","turn_id":"turn_1","payload":{"turn_id":"turn_1","delta":"hello"}}\n\n',
-        ));
-        globalThis.setTimeout(() => {
-          controller.enqueue(new TextEncoder().encode(
-            'event: turn/completed\ndata: {"type":"turn/completed","turn_id":"turn_1","payload":{"turn_id":"turn_1","status":"completed"}}\n\n',
-          ));
-          controller.close();
-        }, 40);
-      },
-    });
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(stream, { status: 200 }))));
-
-    const client = new BackendAnalysisAgentClient("http://backend.test");
-    const eventsPromise = collect(client.send({ kind: "start", question: "slow but active", sessionId: null }));
-    await vi.advanceTimersByTimeAsync(40);
-    const events = await eventsPromise;
-
-    expect(events.filter((event) => event.type === "tokens").map((event) => event.text).join("")).toBe("hello");
-    expect(events.at(-1)).toEqual(expect.objectContaining({ type: "done" }));
-    expect(events.some((event) => event.type === "error")).toBe(false);
   });
 
   test("maps mcp tool calls to visible tool steps", () => {

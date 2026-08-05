@@ -10,7 +10,7 @@ export type BackendTurnEvent = {
   created_at: string;
 };
 
-export type BackendAnalysisThreadSummary = {
+export type BackendAnalysisSessionSummary = {
   id: string;
   title?: string | null;
   status?: string | null;
@@ -28,8 +28,11 @@ export type BackendAnalysisThreadSummary = {
   metadata?: Record<string, unknown> | null;
 };
 
-export type BackendAnalysisThreadDetail = {
-  thread: BackendAnalysisThreadSummary;
+export type BackendAnalysisSessionDetail = {
+  // The new contract returns ``session`` (canonical) plus
+  // ``thread`` (back-compat alias).
+  session?: BackendAnalysisSessionSummary;
+  thread?: BackendAnalysisSessionSummary;
   turns: Array<{
     id: string;
     question: string;
@@ -116,20 +119,19 @@ export class BackendAnalysisAgentClient implements AgentClient {
     };
     try {
       const sessionId = input.sessionId;
-      // The sessionless flow is reserved for the very first turn of a
-      // brand-new session. Any later turn must carry an explicit
-      // Codex-issued session id; we never carry state across calls.
+      // The sessionless flow is reserved for the very first turn of
+      // a brand-new session. Any later turn carries the session id
+      // through the URL path; the body never re-asserts it.
       const isSessionlessStart = sessionId == null;
       const sessionTurnUrl = isSessionlessStart
-        ? `${this.apiBaseUrl}/api/analysis/sessions/turns/stream`
-        : `${this.apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}/turns/stream`;
+        ? `${this.apiBaseUrl}/api/analysis/sessions/turns`
+        : `${this.apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}/turns`;
       const requestBody: Record<string, unknown> = isSessionlessStart
         ? {
             message: question,
             metadata: { frontend_client: "analysis_task" },
           }
         : {
-            sessionId,
             message: question,
             turn_kind: input.kind,
             metadata: { frontend_client: "analysis_task" },
@@ -141,28 +143,43 @@ export class BackendAnalysisAgentClient implements AgentClient {
         signal: this.abortController.signal,
       });
       if (!response.ok) {
-        throw new Error(`Analysis SSE API returned ${response.status}`);
+        throw new Error(`Analysis API returned ${response.status}`);
       }
-      const streamContext: BackendEventMappingContext = {};
-      for await (const backendEvent of readAnalysisSse(response)) {
+      const payload = (await response.json()) as {
+        session_id?: string;
+        turn_id?: string;
+        events?: BackendTurnEvent[];
+      };
+      const events = Array.isArray(payload.events) ? payload.events : [];
+      const resolvedSessionId =
+        asString(payload.session_id) ||
+        asString(input.sessionId) ||
+        "";
+      for (const backendEvent of events) {
         refreshTimeout();
         // The first business event on the sessionless flow is
         // ``session/created`` with the Codex-issued session id; we
         // forward it as an AgentEvent so the page can navigate from
-        // ``/analysis/new`` to ``/analysis/{codex_thread_id}``.
+        // ``/analysis/new`` to ``/analysis/{session_id}``.
         if (backendEvent.type === "session/created") {
-          const newSessionId = asString(backendEvent.payload.sessionId) || asString(backendEvent.payload.codexThreadId) || "";
+          const newSessionId =
+            asString(backendEvent.payload.sessionId) ||
+            asString(backendEvent.payload.codexThreadId) ||
+            resolvedSessionId;
           if (newSessionId) {
             yield {
               type: "session/created",
               sessionId: newSessionId,
               codexThreadId: newSessionId,
-              codexTurnId: asString(backendEvent.payload.codexTurnId) || undefined,
+              codexTurnId:
+                asString(backendEvent.payload.codexTurnId) ||
+                asString(payload.turn_id) ||
+                undefined,
             };
             continue;
           }
         }
-        for (const event of mapBackendEvents([backendEvent], input.kind, streamContext)) {
+        for (const event of mapBackendEvents([backendEvent], input.kind)) {
           for await (const displayEvent of smoothTokenEvent(event)) {
             yield displayEvent;
           }
@@ -208,44 +225,31 @@ export function getBackendAnalysisApiBaseUrl(): string | null {
   return process.env.NEXT_PUBLIC_GENBI_API_BASE_URL ?? null;
 }
 
-export async function listBackendAnalysisThreads(): Promise<BackendAnalysisThreadSummary[]> {
+export async function listBackendAnalysisSessions(): Promise<BackendAnalysisSessionSummary[]> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) return [];
-  const response = await fetch(`${apiBaseUrl}/api/analysis/threads`);
-  if (!response.ok) throw new Error(`Analysis threads API returned ${response.status}`);
-  const payload = await response.json() as { threads?: BackendAnalysisThreadSummary[] };
-  return Array.isArray(payload.threads) ? payload.threads : [];
+  const response = await fetch(`${apiBaseUrl}/api/analysis/sessions`);
+  if (!response.ok) throw new Error(`Analysis sessions API returned ${response.status}`);
+  const payload = await response.json() as { sessions?: BackendAnalysisSessionSummary[] };
+  return Array.isArray(payload.sessions) ? payload.sessions : [];
 }
 
-export async function createBackendAnalysisThread(title: string, userId?: string): Promise<BackendAnalysisThreadSummary> {
+export async function getBackendAnalysisSession(sessionId: string): Promise<BackendAnalysisSessionDetail> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
-  const response = await fetch(`${apiBaseUrl}/api/analysis/threads`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, user_id: userId }),
-  });
-  if (!response.ok) throw new Error(`Analysis thread create API returned ${response.status}`);
-  const payload = await response.json() as { thread: BackendAnalysisThreadSummary };
-  return payload.thread;
+  const response = await fetch(`${apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}`);
+  if (!response.ok) throw new Error(`Analysis session API returned ${response.status}`);
+  return await response.json() as BackendAnalysisSessionDetail;
 }
 
-export async function getBackendAnalysisThread(threadId: string): Promise<BackendAnalysisThreadDetail> {
+export async function deleteBackendAnalysisSession(sessionId: string): Promise<void> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
-  const response = await fetch(`${apiBaseUrl}/api/analysis/threads/${encodeURIComponent(threadId)}`);
-  if (!response.ok) throw new Error(`Analysis thread API returned ${response.status}`);
-  return await response.json() as BackendAnalysisThreadDetail;
-}
-
-export async function deleteBackendAnalysisThread(threadId: string): Promise<void> {
-  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
-  if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
-  const response = await fetch(`${apiBaseUrl}/api/analysis/threads/${encodeURIComponent(threadId)}`, {
+  const response = await fetch(`${apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}`, {
     method: "DELETE",
   });
   if (!response.ok && response.status !== 404) {
-    throw new Error(`Analysis thread delete API returned ${response.status}`);
+    throw new Error(`Analysis session delete API returned ${response.status}`);
   }
 }
 
@@ -268,7 +272,7 @@ export async function testBackendMcpServer(serverName: string): Promise<{ ok: bo
   return await response.json() as { ok: boolean; status: string; message: string };
 }
 
-export function flowNodesFromBackendThread(detail: BackendAnalysisThreadDetail): FlowNode[] {
+export function flowNodesFromBackendSession(detail: BackendAnalysisSessionDetail): FlowNode[] {
   const projections = [...(detail.codexItemProjections ?? [])].sort((left, right) => compareIsoText(left.createdAt, right.createdAt));
   return [...(detail.turns ?? [])]
     .sort((left, right) => compareIsoText(left.createdAt, right.createdAt))
@@ -330,7 +334,7 @@ function compareIsoText(left?: string, right?: string): number {
 
 function agentNodeFromTurnProjections(
   turnId: string,
-  projections: NonNullable<BackendAnalysisThreadDetail["codexItemProjections"]>,
+  projections: NonNullable<BackendAnalysisSessionDetail["codexItemProjections"]>,
 ): FlowNode | null {
   let content = "";
   let activeItemId: string | undefined;
@@ -611,8 +615,16 @@ function getAgentNodeId(event: BackendTurnEvent): string {
 
 function getSystemContext(event: BackendTurnEvent) {
   const turnId = asString(event.payload.turn_id) || event.turn_id;
-  const threadId = asString(event.payload.thread_id) || asString(event.payload.conversation_id);
-  const codexThreadId = asString(event.payload.codex_thread_id);
+  // The new contract uses ``session_id`` everywhere; the legacy
+  // ``thread_id`` / ``conversation_id`` aliases are kept so older
+  // fixtures still parse.
+  const threadId =
+    asString(event.payload.session_id) ||
+    asString(event.payload.thread_id) ||
+    asString(event.payload.conversation_id);
+  const codexThreadId =
+    asString(event.payload.codex_session_id) ||
+    asString(event.payload.codex_thread_id);
   const codexTurnId = asString(event.payload.codex_turn_id);
   const codexItemId = asString(event.payload.codex_item_id);
   return {

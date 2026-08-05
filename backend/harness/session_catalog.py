@@ -170,8 +170,8 @@ class SessionCatalog:
 
     def register_session(
         self,
-        *,
         session_id: str,
+        *,
         product_kind: SessionProductKind,
         title: str | None,
         user_id: str | None,

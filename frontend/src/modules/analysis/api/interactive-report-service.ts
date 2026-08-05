@@ -174,14 +174,17 @@ export async function createAnalysisThreadFromReportBackend(
   title?: string,
   userId = DEFAULT_REPORT_OWNER_ID,
 ): Promise<ReportAnalysisThread> {
-  const response = await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}/analysis-thread`, {
+  // The new contract provisions a session anchored to a saved
+  // report. The session id comes from the Codex runtime; the
+  // body never carries it.
+  const response = await fetchInteractiveReport(`/api/analysis/reports/${encodeURIComponent(reportId)}/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ userId, title }),
   });
-  const payload = await readJson<{ thread: ReportAnalysisThread["thread"]; report: BackendReportDetailResponse }>(response);
+  const payload = await readJson<{ session: ReportAnalysisThread["thread"]; report: BackendReportDetailResponse }>(response);
   return {
-    thread: payload.thread,
+    thread: payload.session,
     saved: toSavedInteractiveReport(payload.report),
   };
 }

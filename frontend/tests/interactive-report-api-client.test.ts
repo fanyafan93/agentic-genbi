@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createBackendAnalysisThread } from "../src/modules/analysis/agentClients/backendClient";
 import {
   createAnalysisThreadFromReportBackend,
   deleteInteractiveReportFromBackend,
@@ -48,28 +47,6 @@ function backendReportPayload(version = 1) {
 }
 
 describe("interactive report backend API client", () => {
-  test("creates a waiting analysis thread before the first turn", async () => {
-    vi.stubEnv("NEXT_PUBLIC_GENBI_API_BASE_URL", "http://192.168.101.12:8000");
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      thread: {
-        id: "analysis_thread_wait123",
-        title: "新分析",
-        status: "waiting_for_question",
-        createdAt: "2026-08-04T10:00:00.000Z",
-        updatedAt: "2026-08-04T10:00:00.000Z",
-        latestQuestion: null,
-      },
-    }), { status: 200, headers: { "Content-Type": "application/json" } }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const thread = await createBackendAnalysisThread("新分析", "owner_1");
-
-    expect(fetchMock.mock.calls[0][0]).toBe("http://192.168.101.12:8000/api/analysis/threads");
-    expect(fetchMock.mock.calls[0][1].method).toBe("POST");
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({ title: "新分析", user_id: "owner_1" });
-    expect(thread.status).toBe("waiting_for_question");
-  });
-
   test("saves Puck report JSON and returns the server-assigned version", async () => {
     vi.stubEnv("NEXT_PUBLIC_GENBI_API_BASE_URL", "http://192.168.101.12:8000");
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(backendReportPayload(1)), { status: 200, headers: { "Content-Type": "application/json" } }));
@@ -151,13 +128,13 @@ describe("interactive report backend API client", () => {
     expect(fetchMock.mock.calls[2][1].method).toBe("DELETE");
   });
 
-  test("creates a backend analysis thread from a saved report", async () => {
+  test("creates a backend analysis session from a saved report", async () => {
     vi.stubEnv("NEXT_PUBLIC_GENBI_API_BASE_URL", "http://192.168.101.12:8000");
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      thread: {
-        id: "analysis_thread_report123",
+      session: {
+        id: "analysis_session_report123",
         title: "渠道销售概览 新分析",
-        status: "waiting_for_question",
+        status: "active",
         createdAt: "2026-08-04T10:00:00.000Z",
         updatedAt: "2026-08-04T10:00:00.000Z",
         latestQuestion: null,
@@ -168,14 +145,14 @@ describe("interactive report backend API client", () => {
 
     const created = await createAnalysisThreadFromReportBackend(interactiveReportFixture.id, "渠道销售概览 新分析", "owner_1");
 
-    expect(fetchMock.mock.calls[0][0]).toBe(`http://192.168.101.12:8000/api/analysis/reports/${interactiveReportFixture.id}/analysis-thread`);
+    expect(fetchMock.mock.calls[0][0]).toBe(`http://192.168.101.12:8000/api/analysis/reports/${interactiveReportFixture.id}/sessions`);
     expect(fetchMock.mock.calls[0][1].method).toBe("POST");
     expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
       userId: "owner_1",
       title: "渠道销售概览 新分析",
     });
-    expect(created.thread.id).toBe("analysis_thread_report123");
-    expect(created.thread.status).toBe("waiting_for_question");
+    expect(created.thread.id).toBe("analysis_session_report123");
+    expect(created.thread.status).toBe("active");
     expect(created.saved.version).toBe(3);
     expect(created.saved.report.document).toEqual(interactiveReportFixture.document);
   });

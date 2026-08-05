@@ -97,7 +97,62 @@
     - `test_projection_sequence_renumbers_after_save`：replay 时 sequence 重新按 createdAt 顺序编号为 0/1。
   - 测试：后端 `NoGenBIItemTest` 4 个用例；前端 `analysis-backend-client.test.ts` 新增 `replay is projection-only (no GenBI Item rows required)`。
   - 后端 119/119、前端 95/95、tsc 全过。
-- **拆掉万能 ThreadStore**（用户规范）：会话/turn/codex projection 各归其位。
+- **统一 API**（用户规范）：保留 7 个 `/api/analysis/sessions/*`
+  路由，body 永不携带 session id。
+  - `GET    /api/analysis/sessions`
+  - `POST   /api/analysis/sessions/turns` （首 turn，body 含
+    `message` / `user_id` / `metadata`，`metadata.codex_session_id`
+    作为 preflight id）
+  - `GET    /api/analysis/sessions/{session_id}`
+  - `PATCH  /api/analysis/sessions/{session_id}` （`title` /
+    `status: active|archived`）
+  - `DELETE /api/analysis/sessions/{session_id}`
+  - `POST   /api/analysis/sessions/{session_id}/turns` （续 turn，
+    非流；body 含 `message` / `turn_kind` / `user_id` / `metadata`）
+  - `POST   /api/analysis/sessions/{session_id}/cancel`
+  - 删除：`/api/analysis/tasks`、`/api/analysis/threads` 及全部
+    `/threads/{id}/*` 端点。
+  - 取消请求体别名：`thread_id` / `conversation_id` / `task_id` 不再被
+    服务端读取（URL 是 session id 的唯一来源）。
+  - 同时把 `/api/analysis/reports/{id}/analysis-thread` 重命名为
+    `/api/analysis/reports/{id}/sessions`，response `thread` envelope
+    改为 `session`。
+  - 实现要点：
+    * `create_app` 接受 `session_catalog=` / `codex_projection_store=`，
+      保留 `thread_store=` shim 兼容老测试。
+    * `start_session_first_turn` 支持 `metadata.codex_session_id`
+      preflight id；runtime 关闭时短路到 `InMemoryCodexAnalysisRuntime`
+      写 1 row。
+    * `_astream_runtime_events` 中 runtime-yield 的 `codex_thread_id`
+      永远覆盖 preflight（runtime 是 session id 的唯一权威）。
+    * `_build_thread_detail` 返回
+      `{ "session": ..., "thread": ..., ... }` 兼容老客户端。
+    * helper kwarg 重命名：`_create_analysis_turn_payload(session_id=)`、
+      `_astream_runtime_events(session_id=)`、`_save_analysis_turn(session_id=)`。
+    * `_analysis_request_from_body` 从 `message` 字段读 question；
+      `body.thread_id` / `body.conversation_id` / `body.task_id`
+      不再被读取。
+    * 删除 `_with_latest_thread_question` /
+      `_find_waiting_analysis_thread` / `_build_default_thread_store` 旧名字。
+  - 前端：
+    * `BackendAnalysisAgentClient.send` 改为 JSON 请求（不再 SSE）；
+      body 只含 `message` / `turn_kind` / `user_id` / `metadata`。
+    * `listBackendAnalysisSessions` / `getBackendAnalysisSession` /
+      `deleteBackendAnalysisSession` 取代旧 `*Threads`。
+    * `flowNodesFromBackendSession` 取代 `flowNodesFromBackendThread`。
+    * `createAnalysisThreadFromReportBackend` 调
+      `/reports/{id}/sessions`。
+  - 验收：
+    * 后端 126/126、前端 93/93、tsc 全过。
+    * `analysis-task-copy.test.ts` 字符串契约测试从
+      `/api/analysis/threads` / `getBackendAnalysisThread` /
+      `flowNodesFromBackendThread` 改为 `/api/analysis/sessions` /
+      `getBackendAnalysisSession` / `flowNodesFromBackendSession`。
+    * `SessionCatalogPurityTest` / `CodexProjectionStorePurityTest`
+      锁住"两薄组件不偷对方职责"的边界。
+    * `SessionlessStartTest` 验证 `metadata.codex_session_id` preflight id
+      是 runtime offline 时唯一能让 endpoint 落 session row 的入口。
+- **拆掉万能ThreadStore**（用户规范）：会话/turn/codex projection 各归其位。
   - `SessionCatalog`（`backend/harness/session_catalog.py`）只管 session 行 + 状态机（`active`/`archived`），API 严格按规范：
     - `list_sessions` / `get_session` / `register_session` / `rename_session` / `archive_session`（外加 `reactivate_session` / `delete_session` / `mark_updated` / `bind_latest_turn_provider` / `get_view` / `list_views`）。
     - 通过 `LatestTurnProvider` 协议从 `CodexProjectionStore` 读 `latest_turn_status` / `latest_turn_id`，**不直接**访问 projection 表。
