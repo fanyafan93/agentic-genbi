@@ -41,12 +41,13 @@ class _FakeThread:
         self.id = thread_id
 
     async def turn(self, question: str, **kwargs):
-        return _FakeTurn(question, kwargs)
+        return _FakeTurn("codex_turn_1", kwargs)
 
 
 class _FakeTurn:
-    def __init__(self, question: str, kwargs: dict) -> None:
-        self.question = question
+    def __init__(self, turn_id: str, kwargs: dict) -> None:
+        self.id = turn_id
+        self.question = kwargs.get("question", "")
         self.kwargs = kwargs
 
     async def stream(self):
@@ -97,8 +98,14 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         item_events = [event for event in events if event.type == "item/completed"]
         delta_events = [event for event in events if event.type == "item/agentMessage/delta"]
 
-        self.assertEqual(event_types, ["turn/started", "item/agentMessage/delta", "item/completed", "turn/completed"])
-        self.assertTrue(all(event.payload.get("eventSource") == "codex" for event in events))
+        self.assertEqual(event_types, ["genbi/thread/provisioned", "genbi/turn/provisioned", "turn/started", "item/agentMessage/delta", "item/completed", "turn/completed"])
+        # ``genbi/thread/provisioned`` and ``genbi/turn/provisioned`` are emitted
+        # by GenBI runtime (eventSource=genbi) to surface the Codex-issued
+        # ids before any Codex-originated event. The remaining events are
+        # Codex-originated.
+        event_sources = {event.payload.get("eventSource") for event in events}
+        self.assertIn("codex", event_sources)
+        self.assertIn("genbi", event_sources)
         self.assertEqual(delta_events[0].payload["delta"], "part 1")
         self.assertEqual(item_events[0].payload["content"], "complete text")
         self.assertEqual(item_events[0].payload["codex_item_id"], "codex_item_msg")
@@ -135,6 +142,38 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
 
         self.assertEqual(fake_codex.resumed[0], "codex_existing")
         self.assertEqual(events[-1].type, "turn/completed")
+
+    def test_interrupt_turn_awaits_async_sdk_interrupt(self) -> None:
+        class _AsyncInterruptTurn:
+            def __init__(self) -> None:
+                self.awaited = False
+
+            async def interrupt(self) -> None:
+                self.awaited = True
+
+        turn = _AsyncInterruptTurn()
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+        runtime._active_turns[("codex_thread_1", "codex_turn_1")] = turn
+
+        interrupted = asyncio.run(runtime.interrupt_turn("codex_thread_1", "codex_turn_1"))
+
+        self.assertTrue(interrupted)
+        self.assertTrue(turn.awaited)
+        self.assertEqual(runtime._active_turns, {})
+
+    def test_interrupt_turn_keeps_handle_when_interrupt_fails(self) -> None:
+        class _FailingInterruptTurn:
+            def interrupt(self) -> None:
+                raise RuntimeError("sdk interrupt failed")
+
+        turn = _FailingInterruptTurn()
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+        runtime._active_turns[("codex_thread_1", "codex_turn_1")] = turn
+
+        interrupted = asyncio.run(runtime.interrupt_turn("codex_thread_1", "codex_turn_1"))
+
+        self.assertFalse(interrupted)
+        self.assertIs(runtime._active_turns[("codex_thread_1", "codex_turn_1")], turn)
 
     def test_thread_start_receives_default_tools_disabled_config(self) -> None:
         fake_codex = _FakeAsyncCodex()

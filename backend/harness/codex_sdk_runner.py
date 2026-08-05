@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import tempfile
@@ -15,6 +16,9 @@ from backend.harness.codex_mcp_config import (
 )
 from backend.harness.events import AgentEvent
 from backend.harness.minimax_codex_adapter import adapter_base_url, adapter_enabled
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 CODEX_ANALYSIS_INSTRUCTIONS = """
@@ -88,6 +92,12 @@ class CodexSdkAnalysisRuntime:
         self._codex_factory = codex_factory
         self._async_codex_factory = async_codex_factory
         self.enabled = True
+        # Registry of in-flight Codex turn objects keyed by
+        # ``(codex_thread_id, codex_turn_id)`` so the API layer
+        # can interrupt a live turn mid-stream. The runtime is
+        # the only thing that owns the actual ``turn`` handle;
+        # everything else goes through this map.
+        self._active_turns: dict[tuple[str, str], Any] = {}
 
     @classmethod
     def from_env(cls) -> "CodexSdkAnalysisRuntime":
@@ -116,6 +126,54 @@ class CodexSdkAnalysisRuntime:
     ) -> AsyncIterator[AgentEvent]:
         async for item in self._iter_streamed(question, context=context):
             yield item
+
+    async def interrupt_turn(self, thread_id: str, turn_id: str) -> bool:
+        """Interrupt an in-flight Codex turn.
+
+        Returns ``True`` when the live Codex turn object was
+        located and ``turn.interrupt()`` was called. Returns
+        ``False`` when no live turn matches the id (already
+        terminal, never registered, or the runtime is disabled);
+        the caller should still mark the projection store row as
+        ``cancelled`` regardless so the UI sees the terminal
+        transition without waiting for the stream to finish.
+        """
+        if not self.enabled:
+            return False
+        key = (str(thread_id or ""), str(turn_id or ""))
+        turn_obj = self._active_turns.get(key)
+        if turn_obj is None:
+            return False
+        interrupt = getattr(turn_obj, "interrupt", None)
+        if not callable(interrupt):
+            return False
+        try:
+            result = interrupt()
+        except Exception:
+            LOGGER.exception(
+                "codex_interrupt_failed",
+                extra={"thread_id": thread_id, "turn_id": turn_id},
+            )
+            return False
+        if asyncio.iscoroutine(result):
+            # ``turn.interrupt`` is *usually* synchronous on the
+            # official SDK, but accept an async variant just in
+            # case. We intentionally do not await it here — the
+            # runtime helper is sync to keep the API surface
+            # simple, and the SDK is documented to interrupt
+            # synchronously. The wait is short enough that the
+            # projection store write that follows picks up the
+            # terminal state on the next event tick.
+            try:
+                await result
+            except Exception:
+                LOGGER.exception(
+                    "codex_interrupt_failed",
+                    extra={"thread_id": thread_id, "turn_id": turn_id},
+                )
+                return False
+        self._active_turns.pop(key, None)
+        return True
 
     async def _collect_stream(
         self,
@@ -147,18 +205,64 @@ class CodexSdkAnalysisRuntime:
             return
         runner_context = _normalize_context(context, default_cwd=self.cwd)
         codex_thread_id: str | None = runner_context.codex_thread_id
+        provisioned_turn_id = _context_turn_id(context)
 
         try:
             async with self._make_async_codex() as codex:
                 await self._login_if_configured(codex)
                 thread = await self._open_thread(codex, runner_context)
                 codex_thread_id = str(getattr(thread, "id", codex_thread_id or ""))
+                # Emit the provisioned-thread marker BEFORE any other event so
+                # GenBI Runtime can persist the analysis thread with the
+                # Codex-issued id as its primary key. ``id == codex_thread_id``
+                # is the new-session contract.
+                yield AgentEvent(
+                    type="genbi/thread/provisioned",
+                    turn_id=provisioned_turn_id,
+                    payload={
+                        "eventSource": "genbi",
+                        "runtime": "openai-codex",
+                        "codex_thread_id": codex_thread_id,
+                        "thread_id": codex_thread_id,
+                    },
+                )
 
                 turn = await thread.turn(question, **self._turn_kwargs(runner_context))
-                async for notification in turn.stream():
-                    event = self._notification_to_event(notification, codex_thread_id=codex_thread_id)
-                    if event:
-                        yield event
+                provisioned_codex_turn_id = _string_or_none(getattr(turn, "id", None))
+                # Register the live turn handle so the API
+                # layer can interrupt it mid-stream. The
+                # handle is removed from the registry once the
+                # stream finishes (success path) or when
+                # ``interrupt_turn`` runs (cancel path).
+                if provisioned_codex_turn_id and codex_thread_id:
+                    self._active_turns[(codex_thread_id, provisioned_codex_turn_id)] = turn
+                if provisioned_codex_turn_id:
+                    # Surface the Codex-issued turn id BEFORE the first turn
+                    # notification so downstream code can use it as the turn
+                    # primary key (``analysis_turns.id == codex_turn_id``).
+                    yield AgentEvent(
+                        type="genbi/turn/provisioned",
+                        turn_id=provisioned_codex_turn_id,
+                        payload={
+                            "eventSource": "genbi",
+                            "runtime": "openai-codex",
+                            "codex_thread_id": codex_thread_id,
+                            "codex_turn_id": provisioned_codex_turn_id,
+                            "thread_id": codex_thread_id,
+                            "turn_id": provisioned_codex_turn_id,
+                        },
+                    )
+                try:
+                    async for notification in turn.stream():
+                        event = self._notification_to_event(notification, codex_thread_id=codex_thread_id)
+                        if event:
+                            yield event
+                finally:
+                    # The stream ended or was cancelled; clean
+                    # the registry so a re-issue of the same id
+                    # does not reuse a stale handle.
+                    if provisioned_codex_turn_id and codex_thread_id:
+                        self._active_turns.pop((codex_thread_id, provisioned_codex_turn_id), None)
         except ImportError as exc:
             raise RuntimeError("Install the `openai-codex` Python package to use GENBI_ANALYSIS_RUNTIME=codex.") from exc
 

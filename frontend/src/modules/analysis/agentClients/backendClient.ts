@@ -10,18 +10,29 @@ export type BackendTurnEvent = {
   created_at: string;
 };
 
-export type BackendAnalysisThreadSummary = {
+export type BackendAnalysisSessionSummary = {
   id: string;
   title?: string | null;
   status?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
   latestQuestion?: string | null;
+  // The user spec splits session and turn state machines: the
+  // session-level ``status`` is always ``active`` or ``archived`` and
+  // the sidebar reads the latest turn's state here. The backend
+  // returns both the snake_case and camelCase shapes for back-compat.
+  latestTurnStatus?: string | null;
+  latestTurnId?: string | null;
+  latest_turn_status?: string | null;
+  latest_turn_id?: string | null;
   metadata?: Record<string, unknown> | null;
 };
 
-export type BackendAnalysisThreadDetail = {
-  thread: BackendAnalysisThreadSummary;
+export type BackendAnalysisSessionDetail = {
+  // The new contract returns ``session`` (canonical) plus
+  // ``thread`` (back-compat alias).
+  session?: BackendAnalysisSessionSummary;
+  thread?: BackendAnalysisSessionSummary;
   turns: Array<{
     id: string;
     question: string;
@@ -67,7 +78,13 @@ const DEFAULT_TOKEN_FLUSH_INTERVAL_MS = 14;
 const DEFAULT_TOKEN_FLUSH_CHARS = 2;
 
 export class BackendAnalysisAgentClient implements AgentClient {
-  private threadId: string | null = null;
+  // The client is session-agnostic: it never remembers a session id
+  // across calls. Every ``send`` is scoped to the ``sessionId`` the
+  // caller passed in (``null`` for the first turn of a brand-new
+  // session, the Codex-issued id for any continuation). The route is
+  // always one of two:
+  //   * ``POST /api/analysis/sessions/turns/stream`` — first turn
+  //   * ``POST /api/analysis/sessions/{sessionId}/turns/stream`` — every turn after
   private abortController: AbortController | null = null;
 
   constructor(private readonly apiBaseUrl: string) {}
@@ -75,7 +92,6 @@ export class BackendAnalysisAgentClient implements AgentClient {
   async *send(input: AgentInput): AsyncIterable<AgentEvent> {
     if (input.kind === "reset") {
       this.cancel();
-      this.threadId = null;
       yield { type: "done" };
       return;
     }
@@ -102,31 +118,67 @@ export class BackendAnalysisAgentClient implements AgentClient {
       timeoutId = null;
     };
     try {
-      const targetThreadId = input.threadId || this.threadId;
-      const threadTurnUrl = targetThreadId
-        ? `${this.apiBaseUrl}/api/analysis/threads/${encodeURIComponent(targetThreadId)}/turns/stream`
-        : `${this.apiBaseUrl}/api/analysis/threads/turns/stream`;
-      const response = await fetch(threadTurnUrl, {
+      const sessionId = input.sessionId;
+      // The sessionless flow is reserved for the very first turn of
+      // a brand-new session. Any later turn carries the session id
+      // through the URL path; the body never re-asserts it.
+      const isSessionlessStart = sessionId == null;
+      const sessionTurnUrl = isSessionlessStart
+        ? `${this.apiBaseUrl}/api/analysis/sessions/turns/stream`
+        : `${this.apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}/turns/stream`;
+      const requestBody: Record<string, unknown> = isSessionlessStart
+        ? {
+            message: question,
+            metadata: { frontend_client: "analysis_task" },
+          }
+        : {
+            message: question,
+            turn_kind: input.kind,
+            metadata: { frontend_client: "analysis_task" },
+          };
+      const response = await fetch(sessionTurnUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question,
-          turn_kind: input.kind,
-          metadata: {
-            frontend_client: "analysis_task",
-          },
-        }),
+        body: JSON.stringify(requestBody),
         signal: this.abortController.signal,
       });
       if (!response.ok) {
-        throw new Error(`Analysis SSE API returned ${response.status}`);
+        throw new Error(`Analysis API returned ${response.status}`);
       }
-      const streamContext: BackendEventMappingContext = {};
+      if (!response.body) {
+        throw new Error("Analysis API returned no stream body");
+      }
+      // The backend writes ``text/event-stream``: each non-empty
+      // ``data:`` line carries a JSON-encoded AgentEvent. The
+      // shared ``readAnalysisSse`` helper parses the stream into
+      // backend events the moment they arrive, so token deltas,
+      // tool calls, and the resolved turn id surface in real time
+      // — not after the whole turn completes.
+      let resolvedSessionId = asString(input.sessionId) || "";
       for await (const backendEvent of readAnalysisSse(response)) {
         refreshTimeout();
-        const threadId = asString(backendEvent.payload.thread_id) || asString(backendEvent.payload.conversation_id);
-        if (threadId) this.threadId = threadId;
-        for (const event of mapBackendEvents([backendEvent], input.kind, streamContext)) {
+        // The first business event on the sessionless flow is
+        // ``session/created`` with the Codex-issued session id;
+        // we forward it as an AgentEvent so the page can navigate
+        // from ``/analysis/new`` to ``/analysis/{session_id}``.
+        if (backendEvent.type === "session/created") {
+          const newSessionId =
+            asString(backendEvent.payload.sessionId) ||
+            asString(backendEvent.payload.codexThreadId) ||
+            resolvedSessionId;
+          if (newSessionId) {
+            resolvedSessionId = newSessionId;
+            yield {
+              type: "session/created",
+              sessionId: newSessionId,
+              codexThreadId: newSessionId,
+              codexTurnId:
+                asString(backendEvent.payload.codexTurnId) || undefined,
+            };
+            continue;
+          }
+        }
+        for (const event of mapBackendEvents([backendEvent], input.kind)) {
           for await (const displayEvent of smoothTokenEvent(event)) {
             yield displayEvent;
           }
@@ -159,6 +211,39 @@ export class BackendAnalysisAgentClient implements AgentClient {
     this.abortController?.abort();
     this.abortController = null;
   }
+
+  async cancelTurn(sessionId: string, turnId: string): Promise<void> {
+    // Stop button handler: ask the backend to interrupt the live
+    // Codex turn (separate from ``session/archived``). The
+    // backend endpoint POSTs to
+    // ``/api/analysis/sessions/{id}/turns/{turn_id}/cancel``,
+    // which calls ``CodexSdkAnalysisRuntime.interrupt_turn``
+    // and stamps the projection row ``cancelled`` so the UI sees
+    // the terminal transition without waiting for the SSE
+    // stream to close.
+    if (!sessionId || !turnId) return;
+    const url = `${this.apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/cancel`;
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!response.ok) {
+        // The cancel request itself failed; the SSE stream is
+        // still being aborted by ``cancel()``, but the runtime
+        // is not asked to stop. Surface the failure so the
+        // caller's ``catch`` block can decide what to do.
+        throw new Error(`Cancel turn returned ${response.status}`);
+      }
+    } catch (error) {
+      // Don't propagate — the SSE abort in ``cancel()`` still
+      // cleans up the local stream. We log so the operator can
+      // see the failed cancel against the live Codex turn.
+      if (typeof console !== "undefined") {
+        console.warn("backend_cancel_turn_failed", error);
+      }
+    }
+  }
 }
 
 export function shouldUseBackendAnalysisClient(): boolean {
@@ -172,44 +257,31 @@ export function getBackendAnalysisApiBaseUrl(): string | null {
   return process.env.NEXT_PUBLIC_GENBI_API_BASE_URL ?? null;
 }
 
-export async function listBackendAnalysisThreads(): Promise<BackendAnalysisThreadSummary[]> {
+export async function listBackendAnalysisSessions(): Promise<BackendAnalysisSessionSummary[]> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) return [];
-  const response = await fetch(`${apiBaseUrl}/api/analysis/threads`);
-  if (!response.ok) throw new Error(`Analysis threads API returned ${response.status}`);
-  const payload = await response.json() as { threads?: BackendAnalysisThreadSummary[] };
-  return Array.isArray(payload.threads) ? payload.threads : [];
+  const response = await fetch(`${apiBaseUrl}/api/analysis/sessions`);
+  if (!response.ok) throw new Error(`Analysis sessions API returned ${response.status}`);
+  const payload = await response.json() as { sessions?: BackendAnalysisSessionSummary[] };
+  return Array.isArray(payload.sessions) ? payload.sessions : [];
 }
 
-export async function createBackendAnalysisThread(title: string, userId?: string): Promise<BackendAnalysisThreadSummary> {
+export async function getBackendAnalysisSession(sessionId: string): Promise<BackendAnalysisSessionDetail> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
-  const response = await fetch(`${apiBaseUrl}/api/analysis/threads`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, user_id: userId }),
-  });
-  if (!response.ok) throw new Error(`Analysis thread create API returned ${response.status}`);
-  const payload = await response.json() as { thread: BackendAnalysisThreadSummary };
-  return payload.thread;
+  const response = await fetch(`${apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}`);
+  if (!response.ok) throw new Error(`Analysis session API returned ${response.status}`);
+  return await response.json() as BackendAnalysisSessionDetail;
 }
 
-export async function getBackendAnalysisThread(threadId: string): Promise<BackendAnalysisThreadDetail> {
+export async function deleteBackendAnalysisSession(sessionId: string): Promise<void> {
   const apiBaseUrl = getBackendAnalysisApiBaseUrl();
   if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
-  const response = await fetch(`${apiBaseUrl}/api/analysis/threads/${encodeURIComponent(threadId)}`);
-  if (!response.ok) throw new Error(`Analysis thread API returned ${response.status}`);
-  return await response.json() as BackendAnalysisThreadDetail;
-}
-
-export async function deleteBackendAnalysisThread(threadId: string): Promise<void> {
-  const apiBaseUrl = getBackendAnalysisApiBaseUrl();
-  if (!apiBaseUrl) throw new Error("Analysis API base URL is not configured.");
-  const response = await fetch(`${apiBaseUrl}/api/analysis/threads/${encodeURIComponent(threadId)}`, {
+  const response = await fetch(`${apiBaseUrl}/api/analysis/sessions/${encodeURIComponent(sessionId)}`, {
     method: "DELETE",
   });
   if (!response.ok && response.status !== 404) {
-    throw new Error(`Analysis thread delete API returned ${response.status}`);
+    throw new Error(`Analysis session delete API returned ${response.status}`);
   }
 }
 
@@ -232,7 +304,7 @@ export async function testBackendMcpServer(serverName: string): Promise<{ ok: bo
   return await response.json() as { ok: boolean; status: string; message: string };
 }
 
-export function flowNodesFromBackendThread(detail: BackendAnalysisThreadDetail): FlowNode[] {
+export function flowNodesFromBackendSession(detail: BackendAnalysisSessionDetail): FlowNode[] {
   const projections = [...(detail.codexItemProjections ?? [])].sort((left, right) => compareIsoText(left.createdAt, right.createdAt));
   return [...(detail.turns ?? [])]
     .sort((left, right) => compareIsoText(left.createdAt, right.createdAt))
@@ -294,7 +366,7 @@ function compareIsoText(left?: string, right?: string): number {
 
 function agentNodeFromTurnProjections(
   turnId: string,
-  projections: NonNullable<BackendAnalysisThreadDetail["codexItemProjections"]>,
+  projections: NonNullable<BackendAnalysisSessionDetail["codexItemProjections"]>,
 ): FlowNode | null {
   let content = "";
   let activeItemId: string | undefined;
@@ -384,7 +456,7 @@ export function parseAnalysisSse(text: string): BackendTurnEvent[] {
 }
 
 function getInputQuestion(input: AgentInput): string {
-  if (input.kind === "start") return input.question || "分析一下渠道销售占比";
+  if (input.kind === "start") return input.question;
   if (input.kind === "message") return input.content;
   if (input.kind === "reply") return input.optionId;
   return "";
@@ -510,6 +582,15 @@ export function* mapBackendEvents(
       continue;
     }
 
+    if (event.type === "genbi/artifact/failed") {
+      yield {
+        type: "error",
+        message: asString(event.payload.error) || "Artifact save failed",
+        ...context,
+      };
+      continue;
+    }
+
     if (event.type === "genbi/artifact/created" || event.type === "genbi/artifact/updated") {
       const kind = asString(event.payload.kind);
       const path = asString(event.payload.path);
@@ -575,8 +656,16 @@ function getAgentNodeId(event: BackendTurnEvent): string {
 
 function getSystemContext(event: BackendTurnEvent) {
   const turnId = asString(event.payload.turn_id) || event.turn_id;
-  const threadId = asString(event.payload.thread_id) || asString(event.payload.conversation_id);
-  const codexThreadId = asString(event.payload.codex_thread_id);
+  // The new contract uses ``session_id`` everywhere; the legacy
+  // ``thread_id`` / ``conversation_id`` aliases are kept so older
+  // fixtures still parse.
+  const threadId =
+    asString(event.payload.session_id) ||
+    asString(event.payload.thread_id) ||
+    asString(event.payload.conversation_id);
+  const codexThreadId =
+    asString(event.payload.codex_session_id) ||
+    asString(event.payload.codex_thread_id);
   const codexTurnId = asString(event.payload.codex_turn_id);
   const codexItemId = asString(event.payload.codex_item_id);
   return {

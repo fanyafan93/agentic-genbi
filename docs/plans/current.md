@@ -1,48 +1,105 @@
-# 当前任务
+# 当前分支状态
 
-更新时间：2026-08-04 Asia/Shanghai
+更新时间：2026-08-05 Asia/Shanghai
 
-本页只记录当前可验证状态。历史过程交给 Git。
+## 分支
 
-## 当前分支
+- 当前分支：`feature/session-management`
+- 基线：`Agentic-GenBI`
+- 本轮目标：在 PostgreSQL 行级 CRUD 之后，收掉小 P1 和单 worker 强制限制；Principal 多用户隔离仍单独处理。
 
-- 分支：`Agentic-GenBI`
-- 工作区：本轮修复待提交。
-- 分支状态：本地从回滚中恢复到 `29c0e0f`，远端仍停在回滚后的 `82db24b`，提交后需要用一次非强推合并把远端历史纳入。
+## 本轮已处理
 
-## 本轮完成
+1. PostgreSQL SessionCatalogBackend 改为行级 CRUD
+   - 新增 `get_session`、`resolve_session_id`、`list_sessions`、`insert_session`、`update_session`、`archive_session`、`touch_session`、`delete_session`。
+   - `SessionCatalog` 在 backend 具备 row-level 方法时不再走 `_read_state()` / `_write_state()`。
+   - `touch_session` 是单行 `UPDATE analysis_threads ... WHERE id = ...`。
 
-- 恢复主开发分支到 `29c0e0f merge: feature/report-artifact-design → Agentic-GenBI`。
-- 确认 `119e4c5 fix(frontend): align flow.start/send/reply signature with AgentInput threadId` 内容已包含在恢复点中，cherry-pick 为空补丁。
-- 修复 FineReport 报表画像加载：
-  - 默认目录从 `资源库/finereport/解析` 改为 `资源库/finereport/报表画像`。
-  - Docker 后端环境变量同步改为 `/app/资源库/finereport/报表画像`。
-  - 后端 repository 支持递归读取报表画像目录下普通单文件 `*.json`，不再只依赖旧的 `*.原始解析.json` 或 `01/02/03` 分片命名。
-  - 后端读取并返回 `report_usage`，统一为 `reportUsage`。
-  - 前端“报表解析”恢复为“报表画像”，并新增“使用情况”页签。
-- 修复新建分析任务 404：
-  - 当前运行前端仍可能调用旧入口 `POST /api/analysis/tasks`。
-  - 后端新增兼容入口 `POST /api/analysis/tasks`，内部复用 canonical `POST /api/analysis/threads` 创建逻辑，并返回 `{ task }` envelope。
+2. PostgreSQL CodexProjectionBackend 改为行级 CRUD
+   - 新增 `get_turn`、`list_turns`、`latest_turn`、`upsert_turn`、`upsert_item`、`list_items`。
+   - `CodexProjectionStore` 在 backend 具备 row-level 方法时不再走 `_read_state()` / `_write_state()`。
+   - Postgres projection backend 不再暴露通用 `read_state()` / `write_state()`。
+   - Item 写入只对当前 item 执行 `INSERT ... ON CONFLICT DO UPDATE`。
 
-## 已运行验证
+3. PostgreSQL migration / index
+   - 新增索引：
+     - `analysis_threads (tenant_id, user_id, updated_at DESC)`
+     - `analysis_turns (session_id, updated_at DESC)`
+     - `analysis_codex_item_projections (genbi_session_id, genbi_turn_id, sequence)`
+   - 历史 item replay 按 `sequence` 排序。
+   - legacy projection 迁移补齐 `genbi_turn_id = codex_turn_id`，避免旧 item 无法按 turn 恢复。
 
-- `python -m pytest backend/tests/test_finereport_reports.py -q`：2 passed。
-- `npm.cmd test -- tests/finereport-report-browser.test.tsx`：2 passed。
-- `python -m pytest backend/tests/test_analysis_api.py backend/tests/test_finereport_reports.py -q`：26 passed。
-- 后端本地 repository 验证：`资源库/finereport/报表画像` 可读出 692 个报表画像。
-- 真实接口验证：`GET http://127.0.0.1:8000/api/business-semantics/finereport/reports` 返回 692 条。
-- 真实接口验证：`POST http://127.0.0.1:8000/api/analysis/tasks` 从 404 修复为 200。
-- 服务重启验证：backend health ready，frontend ready。
+4. 并发不覆盖测试
+   - 覆盖不同 Session 写 item 不互相覆盖。
+   - 覆盖一个 Session 的 Turn 从 `running` 到 `completed`，同时另一个 Session 写新 Turn，不会把 completed 覆盖回 running。
+   - 覆盖两个 Session 分别 touch `updatedAt`，两个时间都保留。
 
-## 风险或未完成
+5. 小 P1 收尾
+   - 前端 `mapBackendEvents()` 已将 `genbi/artifact/failed` 映射为可见 `error` 事件。
+   - 前端 start 请求不再把空问题替换为“渠道销售占比”默认示例；空输入直接 `done`，不发请求。
+   - `_active_turns` 在 Codex SDK interrupt 成功后才 `pop`；interrupt 抛错时保留 handle，允许重试。
+   - 报表创建 Session 调用 `_provision_codex_thread_id(..., allow_client_preflight=False)`，不再接受客户端 metadata 中伪造的 `codex_session_id` / `codex_thread_id`。
 
-- 当前分支与远端存在历史分叉；推送时需要保留本地恢复后的代码状态，同时合并远端历史，避免强推。
-- PowerShell 控制台直接显示 API 表格时中文可能乱码；Python 读取同一接口验证中文正常。
-- `.pytest_cache` 目录权限警告仍存在，不影响本轮测试结果。
-- PowerShell profile 中 `starship` 未安装的提示仍存在，不影响服务。
+6. 单 worker 强制限制
+   - `create_app()` 启动时检查 `GENBI_BACKEND_WORKERS`、`WEB_CONCURRENCY`、`UVICORN_WORKERS`。
+   - 任一配置大于 1 时抛出 `backend_single_worker_required`，避免 V1 多 worker 下 cancel 请求进入没有 live Turn handle 的进程。
+
+7. Turn / Item 全局 ID 完整性
+   - `CodexProjectionStore.save_turn()` 写入前按全局 `turn_id` 查 owner，拒绝同一 Turn ID 写入不同 Session。
+   - `CodexProjectionStore.upsert_item()` 写入前按全局 `codex_item_id` 查 owner，拒绝同一 Item ID 移动到另一个 Session/Turn。
+   - Postgres backend 新增 `get_turn_by_id()` / `get_item()`。
+   - Postgres `ON CONFLICT` 增加 owner 条件保护，避免绕过 Store 层时污染其他 Session。
+   - Item 写入不再通过 `list_items(session_id, turn_id)` 扫描整个 Turn items 来查 existing item。
+
+## 已验证
+
+- `python -m pytest backend\tests\test_postgres_p0_compat.py -q`
+  - 9 passed
+- `python -m pytest backend\tests\test_session_catalog_purity.py backend\tests\test_codex_projection_store_purity.py -q`
+  - 19 passed
+- `python -m pytest backend\tests\test_analysis_api.py -q`
+  - 65 passed
+- `python -m pytest backend\tests\test_postgres_p0_compat.py backend\tests\test_session_catalog_purity.py backend\tests\test_codex_projection_store_purity.py backend\tests\test_analysis_api.py -q`
+  - 93 passed
+- `python -m pytest backend\tests\test_codex_sdk_runner.py backend\tests\test_analysis_api.py -q`
+  - 79 passed
+- `npm.cmd test -- analysis-backend-client.test.ts`
+  - 29 passed
+- `python -m pytest backend\tests\test_codex_projection_store_purity.py backend\tests\test_postgres_p0_compat.py -q`
+  - 23 passed
+- `git diff --check`
+  - passed
+- 真实 Docker PostgreSQL integrity smoke
+  - 使用 backend 容器和临时真实 PostgreSQL 数据库验证：
+    - Store 层拒绝跨 Session Turn ID 冲突。
+    - Store 层拒绝跨 Session/Turn Item ID 冲突。
+    - 直接绕过 Store 调用 Postgres backend upsert 时，`ON CONFLICT ... WHERE owner matches` 不覆盖原 owner 行。
+  - 输出：`REAL_POSTGRES_INTEGRITY_OK`
+- 真实 Docker PostgreSQL smoke
+  - 使用 backend 容器和两个临时真实 PostgreSQL 数据库验证：
+    - 全新数据库启动
+    - 重复 `ensure_schema()` 幂等
+    - Session/Turn/Item 行级写入
+    - 两个 Session 写 item 不丢数据
+    - Turn completed 不被另一个 Session 写入覆盖
+    - 两个 Session touch `updatedAt` 不互相覆盖
+    - 旧 schema + 旧数据迁移
+  - 输出：`REAL_POSTGRES_SMOKE_OK`
+
+测试警告：本机 pytest cache 目录无写权限；不影响测试结果。
+
+## 尚未处理
+
+1. Principal 多用户隔离
+   - `GET/PATCH/DELETE/continue/cancel` 仍需接入 `tenant_id/user_id/workspace_id/roles` 校验。
+   - 本轮按范围约束未处理权限，不可信任请求体里的 `user_id` / `userId`。
+
+2. 跨进程 turn registry
+   - V1 已通过单 worker guard 阻断多 worker。
+   - 后续如果要支持多 worker，需要 Redis/数据库级 live turn registry 或 reconciliation。
 
 ## 下一步
 
-1. 提交本轮恢复修复。
-2. 用非强推方式合并远端分叉历史并推送 `Agentic-GenBI`。
-3. 推送后在浏览器复测：新建分析任务、报表画像列表、报表画像使用情况页签。
+1. Principal 多用户隔离。
+2. 合入前全量前端、后端和 `docker compose config`。
+3. 后续评估跨进程 turn registry。

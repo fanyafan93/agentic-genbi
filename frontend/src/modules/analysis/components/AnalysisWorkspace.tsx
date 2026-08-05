@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useMemo, useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
 import { useSession } from "next-auth/react";
@@ -14,13 +14,12 @@ import { InteractiveReportPanel } from "./InteractiveReportPanel";
 import { MyAnalysisPage } from "./MyAnalysisPage";
 import { SystemMcpPage } from "./SystemMcpPage";
 import {
-  createBackendAnalysisThread,
-  deleteBackendAnalysisThread,
-  flowNodesFromBackendThread,
-  getBackendAnalysisThread,
-  listBackendAnalysisThreads,
+  deleteBackendAnalysisSession,
+  flowNodesFromBackendSession,
+  getBackendAnalysisSession,
+  listBackendAnalysisSessions,
   shouldUseBackendAnalysisClient,
-  type BackendAnalysisThreadSummary,
+  type BackendAnalysisSessionSummary,
 } from "../agentClients/backendClient";
 import {
   createAnalysisThreadFromReportBackend,
@@ -67,10 +66,10 @@ function NavIcon({ name }: { name: NavIconName }) {
 
 type AnalysisThreadGroup = {
   label: string;
-  items: BackendAnalysisThreadSummary[];
+  items: BackendAnalysisSessionSummary[];
 };
 
-function groupAnalysisThreads(threads: BackendAnalysisThreadSummary[]): AnalysisThreadGroup[] {
+function groupAnalysisThreads(threads: BackendAnalysisSessionSummary[]): AnalysisThreadGroup[] {
   const today = new Date().toDateString();
   const todayItems = threads.filter((thread) => threadDate(thread).toDateString() === today);
   const earlierItems = threads.filter((thread) => threadDate(thread).toDateString() !== today);
@@ -80,11 +79,11 @@ function groupAnalysisThreads(threads: BackendAnalysisThreadSummary[]): Analysis
   ];
 }
 
-function orderAnalysisThreads(threads: BackendAnalysisThreadSummary[]): BackendAnalysisThreadSummary[] {
+function orderAnalysisThreads(threads: BackendAnalysisSessionSummary[]): BackendAnalysisSessionSummary[] {
   return [...threads].sort((left, right) => threadDate(right).getTime() - threadDate(left).getTime());
 }
 
-function analysisThreadTitle(thread: BackendAnalysisThreadSummary): string {
+function analysisThreadTitle(thread: BackendAnalysisSessionSummary): string {
   return usefulThreadTitle(thread.title) || usefulThreadTitle(thread.latestQuestion) || "历史任务";
 }
 
@@ -98,7 +97,7 @@ function taskTitleFromQuestion(question: string): string {
   return text.slice(0, 32) || "未命名分析任务";
 }
 
-function analysisThreadTime(thread: BackendAnalysisThreadSummary): string {
+function analysisThreadTime(thread: BackendAnalysisSessionSummary): string {
   const date = threadDate(thread);
   if (Number.isNaN(date.getTime())) return "";
   const today = new Date();
@@ -111,16 +110,33 @@ function analysisThreadTime(thread: BackendAnalysisThreadSummary): string {
   return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
 }
 
-function analysisThreadStatus(thread: BackendAnalysisThreadSummary): "running" | "saved" | "readonly" {
-  return thread.status === "running" ? "running" : thread.status === "completed" ? "saved" : "readonly";
+// The session-level ``status`` is always ``active`` or ``archived``;
+// we read the latest turn's state for the sidebar signal so a turn
+// failure never flips the session into a frozen "completed" state.
+function analysisLatestTurnStatus(thread: BackendAnalysisSessionSummary): string | null {
+  const value = thread.latestTurnStatus ?? thread.latest_turn_status;
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function analysisThreadStatusLabel(thread: BackendAnalysisThreadSummary): string {
-  if (thread.status === "waiting_for_question") return "待提问";
-  return thread.status === "running" ? "运行中" : thread.status === "completed" ? "已完成" : "已保存";
+function analysisThreadStatus(thread: BackendAnalysisSessionSummary): "running" | "saved" | "readonly" {
+  const latest = analysisLatestTurnStatus(thread);
+  if (latest === "running" || latest === "needs_input") return "running";
+  if (latest === "completed" || latest === "failed" || latest === "cancelled") return "saved";
+  return "readonly";
 }
 
-function threadDate(thread: BackendAnalysisThreadSummary): Date {
+function analysisThreadStatusLabel(thread: BackendAnalysisSessionSummary): string {
+  const latest = analysisLatestTurnStatus(thread);
+  if (latest === "running") return "运行中";
+  if (latest === "needs_input") return "待提问";
+  if (latest === "failed") return "本轮失败";
+  if (latest === "cancelled") return "本轮已取消";
+  if (latest === "completed") return "已完成";
+  if (thread.status === "archived") return "已归档";
+  return "已保存";
+}
+
+function threadDate(thread: BackendAnalysisSessionSummary): Date {
   return new Date(thread.updatedAt || thread.createdAt || 0);
 }
 
@@ -147,11 +163,11 @@ export function AnalysisWorkspace() {
   const [structuredKnowledgeSource, setStructuredKnowledgeSource] = useState<StructuredKnowledgeSource>("finereport");
   const [savedReports, setSavedReports] = useState<SavedInteractiveReport[]>([]);
   const [sharedReports, setSharedReports] = useState<SharedInteractiveReport[]>([]);
-  const [analysisThreads, setAnalysisThreads] = useState<BackendAnalysisThreadSummary[]>([]);
+  const [analysisThreads, setAnalysisThreads] = useState<BackendAnalysisSessionSummary[]>([]);
   const [analysisThreadsLoading, setAnalysisThreadsLoading] = useState(false);
   const [selectingAnalysisThreads, setSelectingAnalysisThreads] = useState(false);
   const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
-  const [initialFlowMessages, setInitialFlowMessages] = useState<ReturnType<typeof flowNodesFromBackendThread>>([]);
+  const [initialFlowMessages, setInitialFlowMessages] = useState<ReturnType<typeof flowNodesFromBackendSession>>([]);
   const [openedReportId, setOpenedReportId] = useState<string | null>(null);
   const [openedReportThreadId, setOpenedReportThreadId] = useState<string | null>(null);
   const [openedReportLoadingThreadId, setOpenedReportLoadingThreadId] = useState<string | null>(null);
@@ -159,7 +175,37 @@ export function AnalysisWorkspace() {
   const hadLocalRunningFlowRef = useRef(false);
   const reportLoadRequestRef = useRef(0);
   const reportOwnerId = session?.user?.id ?? "local-user";
-  const flow = useFlow(currentAnalysisTaskId, initialFlowMessages);
+  // The page router owns the only durable id we recognise. When the user
+  // is in "new" mode ``currentAnalysisTaskId`` is null; after the
+  // sessionless first turn is provisioned by the backend the
+  // ``onSessionCreated`` callback below adopts the Codex-issued id.
+  const [localNewSession, setLocalNewSession] = useState(false);
+  const localNewSessionRef = useRef<string | null>(null);
+  const flow = useFlow(currentAnalysisTaskId, initialFlowMessages, {
+    onSessionCreated: (sessionId) => {
+      if (sessionId && sessionId !== currentAnalysisTaskId) {
+        setCurrentAnalysisTaskId(sessionId);
+        if (typeof window !== "undefined" && window.location.pathname !== `/analysis/${sessionId}`) {
+          window.history.pushState({ analysisSessionId: sessionId }, "", `/analysis/${sessionId}`);
+        }
+        setLocalNewSession(false);
+        localNewSessionRef.current = null;
+      }
+    },
+  });
+  useEffect(() => {
+    if (!localNewSession) return;
+    if (!currentAnalysisTaskId) return;
+    // The sessionless flow has been provisioned: navigate the URL so
+    // the page reflects ``/analysis/{codex_thread_id}`` and the user
+    // can refresh the page or share the link.
+    const sessionId = currentAnalysisTaskId;
+    if (typeof window !== "undefined" && window.location.pathname !== `/analysis/${sessionId}`) {
+      window.history.pushState({ analysisSessionId: sessionId }, "", `/analysis/${sessionId}`);
+    }
+    setLocalNewSession(false);
+    localNewSessionRef.current = null;
+  }, [currentAnalysisTaskId, localNewSession]);
   useEffect(() => {
     let cancelled = false;
     if (!shouldUseBackendInteractiveReports()) {
@@ -189,34 +235,40 @@ export function AnalysisWorkspace() {
       return () => { cancelled = true; };
     }
     setAnalysisThreadsLoading(true);
-    void listBackendAnalysisThreads()
+    void listBackendAnalysisSessions()
       .then((threads) => { if (!cancelled) setAnalysisThreads(threads); })
       .catch(() => { if (!cancelled) setAnalysisThreads([]); })
       .finally(() => { if (!cancelled) setAnalysisThreadsLoading(false); });
     return () => { cancelled = true; };
   }, []);
   useEffect(() => {
-    if (!flow.threadId || !selectedAnalysisTask) return;
-    const threadId = flow.threadId;
-    if (currentAnalysisTaskId && threadId !== currentAnalysisTaskId) return;
+    if (!currentAnalysisTaskId || !selectedAnalysisTask) return;
+    const sessionId = currentAnalysisTaskId;
     const hadLocalRunningFlow = hadLocalRunningFlowRef.current;
     if (flow.running) hadLocalRunningFlowRef.current = true;
     setAnalysisThreads((threads) => {
       const now = new Date().toISOString();
-      const existing = threads.find((thread) => thread.id === threadId);
+      const existing = threads.find((thread) => thread.id === sessionId);
       const shouldSyncThread = flow.running || hadLocalRunningFlow;
       if (!shouldSyncThread) return threads;
-      const nextThread: BackendAnalysisThreadSummary = {
-        ...(existing ?? { id: threadId, createdAt: now }),
+      // ``status`` is always ``active`` (or ``archived`` if the user
+      // explicitly archived it). The sidebar signal we move is the
+      // latest turn's state, which is what the backend reports via
+      // ``latestTurnStatus``.
+      const latestTurnStatus = flow.running ? "running" : "completed";
+      const nextThread: BackendAnalysisSessionSummary = {
+        ...(existing ?? { id: sessionId, createdAt: now }),
         title: selectedAnalysisTask,
         latestQuestion: selectedAnalysisTask,
         updatedAt: now,
-        status: flow.running ? "running" : "completed",
+        status: existing?.status ?? "active",
+        latestTurnStatus,
+        latest_turn_status: latestTurnStatus,
       };
-      return [nextThread, ...threads.filter((thread) => thread.id !== threadId)];
+      return [nextThread, ...threads.filter((thread) => thread.id !== sessionId)];
     });
     if (!flow.running && hadLocalRunningFlow) hadLocalRunningFlowRef.current = false;
-  }, [currentAnalysisTaskId, flow.threadId, flow.running, selectedAnalysisTask]);
+  }, [currentAnalysisTaskId, flow.running, selectedAnalysisTask]);
   const isAdmin = true;
   const isNewAnalysisTask = selectedAnalysisTask === null;
   const openedReport = savedReports.find((saved) => saved.report.id === openedReportId);
@@ -224,7 +276,7 @@ export function AnalysisWorkspace() {
     || (currentAnalysisTaskId ? openedReportThreadId === currentAnalysisTaskId : false);
   const flowReportBelongsToCurrentTask = Boolean(
     flow.reportArtifact
-    && (flow.reportArtifact.source.threadId === currentAnalysisTaskId || flow.reportArtifact.source.threadId === flow.threadId),
+    && (flow.reportArtifact.source.threadId === currentAnalysisTaskId),
   );
   const currentPanelReport = flowReportBelongsToCurrentTask ? flow.reportArtifact : openedReportBelongsToCurrentTask && openedReport ? openedReport.report : undefined;
   const currentPanelVersion = openedReportBelongsToCurrentTask && openedReport ? openedReport.version : undefined;
@@ -240,8 +292,15 @@ export function AnalysisWorkspace() {
     && (
       isNewAnalysisTask
       || (
-        currentAnalysisThread?.status === "waiting_for_question"
-        && !usefulThreadTitle(currentAnalysisThread.latestQuestion)
+        // ``status`` is always ``active`` now; the only signal we
+        // still need is the *absence* of a latest turn (i.e. the
+        // session was just provisioned and the user hasn't asked
+        // anything yet). The backend emits ``latestTurnStatus`` only
+        // after the first turn row is written.
+        (currentAnalysisThread?.status === "active"
+          || currentAnalysisThread?.status == null)
+        && !analysisLatestTurnStatus(currentAnalysisThread!)
+        && !usefulThreadTitle(currentAnalysisThread?.latestQuestion)
       )
     ),
   );
@@ -256,12 +315,21 @@ export function AnalysisWorkspace() {
     setSelectedAnalysisTask(title);
     setAnalysisThreads((threads) => threads.map((thread) => (
       thread.id === currentAnalysisTaskId
-        ? { ...thread, title, latestQuestion: content, updatedAt: now, status: "running" }
+        ? {
+            ...thread,
+            title,
+            latestQuestion: content,
+            updatedAt: now,
+            // Session-level ``status`` is always ``active``; the
+            // sidebar signal we move is the latest turn's state.
+            latestTurnStatus: "running",
+            latest_turn_status: "running",
+          }
         : thread
     )));
   }
 
-  async function selectExistingAnalysisTask(thread: BackendAnalysisThreadSummary) {
+  async function selectExistingAnalysisTask(thread: BackendAnalysisSessionSummary) {
     if (selectingAnalysisThreads) {
       toggleSelectedThread(thread.id);
       return;
@@ -280,10 +348,14 @@ export function AnalysisWorkspace() {
     let restoredInitialReport = false;
     if (shouldUseBackendInteractiveReports()) setOpenedReportLoadingThreadId(thread.id);
     try {
-      const detail = await getBackendAnalysisThread(thread.id);
+      const detail = await getBackendAnalysisSession(thread.id);
       if (reportLoadRequestId !== reportLoadRequestRef.current) return;
-      setInitialFlowMessages(flowNodesFromBackendThread(detail));
-      const initialReport = savedReportFromThreadMetadata(detail.thread.metadata);
+      setInitialFlowMessages(flowNodesFromBackendSession(detail));
+      // The backend returns ``session`` (canonical) plus ``thread``
+      // (back-compat alias); both fields carry the same payload.
+      const sessionRow = detail.session ?? detail.thread;
+      if (!sessionRow) return;
+      const initialReport = savedReportFromThreadMetadata(sessionRow.metadata);
       if (initialReport) {
         restoredInitialReport = true;
         setOpenedReportId(initialReport.report.id);
@@ -336,7 +408,7 @@ export function AnalysisWorkspace() {
     const confirmed = window.confirm(`确认删除选中的 ${selectedThreadIds.length} 个任务？删除后不可恢复。`);
     if (!confirmed) return;
     const idsToDelete = [...selectedThreadIds];
-    await Promise.all(idsToDelete.map((threadId) => deleteBackendAnalysisThread(threadId)));
+    await Promise.all(idsToDelete.map((threadId) => deleteBackendAnalysisSession(threadId)));
     setAnalysisThreads((threads) => threads.filter((thread) => !idsToDelete.includes(thread.id)));
     if (currentAnalysisTaskId && idsToDelete.includes(currentAnalysisTaskId)) {
       setSelectedAnalysisTask(null);
@@ -349,50 +421,48 @@ export function AnalysisWorkspace() {
     setSelectedThreadIds([]);
   }
 
-  async function createWaitingThread(title: string): Promise<BackendAnalysisThreadSummary> {
-    const thread = await createBackendAnalysisThread(title, reportOwnerId);
-    setAnalysisThreads((threads) => [thread, ...threads.filter((item) => item.id !== thread.id)]);
-    return thread;
-  }
-
   async function handleCreateBlankAnalysis() {
     if (flow.running) {
       setAnalysisTaskNotice("当前任务正在分析，停止回答后再新建分析。");
       return;
     }
     setAnalysisTaskNotice("");
-    if (!shouldUseBackendAnalysisClient()) {
-      setSelectedAnalysisTask(null);
-      setCurrentAnalysisTaskId(null);
-      setInitialFlowMessages([]);
-      setOpenedReportId(null);
-      setOpenedReportThreadId(null);
-      return;
-    }
-    const thread = await createWaitingThread("新分析");
-    setSelectedAnalysisTask(analysisThreadTitle(thread));
-    setCurrentAnalysisTaskId(thread.id);
+    // New-session contract: "click new" only opens a blank page locally.
+    // The first user message is what calls the backend (and only then a
+    // Codex thread is provisioned). This guarantees that clicking "new"
+    // never inserts a row into the analysis_threads table.
+    setSelectedAnalysisTask(null);
+    setCurrentAnalysisTaskId(null);
     setInitialFlowMessages([]);
     setOpenedReportId(null);
     setOpenedReportThreadId(null);
+    setLocalNewSession(true);
+    localNewSessionRef.current = `local_new_${Date.now().toString(36)}`;
     setActiveTool("analysis-workspace");
     setMobilePane("analysisTask");
+    if (typeof window !== "undefined") {
+      window.history.pushState({ analysisSessionId: "new" }, "", "/analysis/new");
+    }
   }
 
   async function handleSendMessage(content: string) {
-    if (isNewAnalysisTask) {
-      const thread = await createWaitingThread(taskTitleFromQuestion(content));
-      setSelectedAnalysisTask(analysisThreadTitle(thread));
-      setCurrentAnalysisTaskId(thread.id);
+    // The session id is now owned *only* by the useFlow hook instance
+    // itself — it was constructed as ``useFlow(currentAnalysisTaskId, …)``
+    // and start/send/reply no longer take a second ``sessionId``
+    // parameter. This eliminates the "two session id entry points"
+    // bug (P2-1) where ``useFlow(A)`` + ``flow.send(msg, B)`` could
+    // route a message to the wrong session.
+    if (isNewAnalysisTask || localNewSession) {
+      setSelectedAnalysisTask(taskTitleFromQuestion(content));
       setInitialFlowMessages([]);
       setOpenedReportId(null);
       setOpenedReportThreadId(null);
       setMobilePane("analysisTask");
-      void flow.start(content, thread.id);
+      void flow.start(content);
     } else {
       if (isWaitingForFirstQuestion) {
         markCurrentThreadAsStarted(content);
-        void flow.start(content, currentAnalysisTaskId);
+        void flow.start(content);
       } else {
         flow.send(content);
       }
@@ -401,22 +471,22 @@ export function AnalysisWorkspace() {
 
   async function handleStartFromSuggestion(_id: string, title: string) {
     const question = `${title}。请基于当前数据展开分析。`;
-    if (!isNewAnalysisTask && isWaitingForFirstQuestion) {
+    if (!isNewAnalysisTask && !localNewSession && isWaitingForFirstQuestion) {
       markCurrentThreadAsStarted(question);
       setOpenedReportId(null);
       setOpenedReportThreadId(null);
       setMobilePane("analysisTask");
-      void flow.start(question, currentAnalysisTaskId);
+      void flow.start(question);
       return;
     }
-    const thread = await createWaitingThread(taskTitleFromQuestion(title));
-    setSelectedAnalysisTask(analysisThreadTitle(thread));
-    setCurrentAnalysisTaskId(thread.id);
+    // Sessionless first-turn for a suggestion as well.
+    setSelectedAnalysisTask(taskTitleFromQuestion(title));
     setInitialFlowMessages([]);
     setOpenedReportId(null);
     setOpenedReportThreadId(null);
     setMobilePane("analysisTask");
-    void flow.start(question, thread.id);
+    setLocalNewSession(true);
+    void flow.start(question);
   }
 
   async function handleSaveReport(saved: SavedInteractiveReport): Promise<SavedInteractiveReport> {
@@ -444,15 +514,18 @@ export function AnalysisWorkspace() {
     const reportLoadRequestId = ++reportLoadRequestRef.current;
     if (shouldUseBackendInteractiveReports()) setOpenedReportLoadingThreadId(sourceThreadId);
     try {
-      const detail = await getBackendAnalysisThread(sourceThreadId);
+      const detail = await getBackendAnalysisSession(sourceThreadId);
       if (reportLoadRequestId !== reportLoadRequestRef.current) return;
-      setSelectedAnalysisTask(analysisThreadTitle(detail.thread) || saved.report.title);
-      setInitialFlowMessages(flowNodesFromBackendThread(detail));
-      setAnalysisThreads((threads) => (
-        threads.some((thread) => thread.id === detail.thread.id)
-          ? threads.map((thread) => (thread.id === detail.thread.id ? detail.thread : thread))
-          : orderAnalysisThreads([detail.thread, ...threads])
-      ));
+      const sessionRow = detail.session ?? detail.thread;
+      if (!sessionRow) return;
+      setSelectedAnalysisTask(analysisThreadTitle(sessionRow) || saved.report.title);
+      setInitialFlowMessages(flowNodesFromBackendSession(detail));
+      setAnalysisThreads((threads) => {
+        if (threads.some((thread) => thread.id === sessionRow.id)) {
+          return threads.map((thread) => (thread.id === sessionRow.id ? sessionRow : thread));
+        }
+        return orderAnalysisThreads([sessionRow, ...threads]);
+      });
     } catch {
       if (reportLoadRequestId !== reportLoadRequestRef.current) return;
       setInitialFlowMessages([]);

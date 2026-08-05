@@ -169,9 +169,11 @@ describe("analysis task product language", () => {
 
   test("keeps the lower-level interaction event generic for shared threads", () => {
     expect(agentTypesSource).not.toContain('"conversation-init"');
-    expect(agentTypesSource).toContain("threadId?: string | null");
-    expect(agentTypesSource).not.toContain("conversationId?: string | null");
+    expect(agentTypesSource).toContain("sessionId?: string");
+    expect(agentTypesSource).toContain("threadId?: string");
     expect(agentTypesSource).toContain("turnId?: string");
+    expect(agentTypesSource).toContain("sessionId: string | null");
+    expect(agentTypesSource).not.toContain("conversationId?: string | null");
     expect(agentTypesSource).not.toContain('"analysis-task-init"');
   });
 
@@ -200,23 +202,41 @@ describe("analysis task product language", () => {
     expect(agentClientIndexSource).toContain("shouldUseBackendAnalysisClient");
     expect(backendClientSource).toContain("NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME");
     expect(backendClientSource).toContain("NEXT_PUBLIC_GENBI_API_BASE_URL");
-    expect(backendClientSource).toContain("createBackendAnalysisThread");
-    expect(backendClientSource).toContain("/api/analysis/threads");
-    expect(backendClientSource).toContain("/api/analysis/threads/turns/stream");
-    expect(backendClientSource).toContain("/turns/stream");
+    expect(backendClientSource).toContain("/api/analysis/sessions");
+    expect(backendClientSource).toContain("/api/analysis/sessions/turns");
+    expect(backendClientSource).toContain("/api/analysis/sessions/");
+    expect(backendClientSource).toContain("/turns");
     expect(backendClientSource).toContain("item/completed");
     expect(backendClientSource).toContain("item/agentMessage/delta");
     expect(backendClientSource).toContain("genbi/artifact/created");
     expect(backendClientSource).toContain("genbi/artifact/updated");
     expect(backendClientSource).toContain("mapBackendEvents");
-    expect(backendClientSource).toContain("event.payload.thread_id");
-    expect(backendClientSource).toContain("listBackendAnalysisThreads");
-    expect(backendClientSource).toContain("deleteBackendAnalysisThread");
-    expect(workspaceSource).toContain("flow.start(content, thread.id)");
-    expect(workspaceSource).toContain("flow.start(question, thread.id)");
-    expect(workspaceSource).toContain("createWaitingThread");
+    expect(backendClientSource).toContain("event.payload.session_id");
+    expect(backendClientSource).toContain("listBackendAnalysisSessions");
+    expect(backendClientSource).toContain("deleteBackendAnalysisSession");
+    expect(backendClientSource).toContain("session/created");
+    // New-session contract: "click new" never pre-allocates a backend
+    // thread; the first message drives the sessionless flow.
+    // P2-1 fix: start/send/reply no longer take a redundant sessionId
+    // argument; the id is captured once inside useFlow(sessionId, ...)
+    // so callers cannot accidentally route to a different session.
+    expect(workspaceSource).toContain("flow.start(content)");
+    expect(workspaceSource).not.toContain("flow.start(content, currentAnalysisTaskId)");
+    expect(workspaceSource).toContain("setLocalNewSession(true)");
+    expect(workspaceSource).toContain("window.history.pushState");
+    expect(workspaceSource).toContain("/analysis/new");
+    expect(workspaceSource).toContain("useFlow(currentAnalysisTaskId");
+    expect(workspaceSource).toContain("onSessionCreated");
+    expect(workspaceSource).not.toContain("createWaitingThread");
+    expect(workspaceSource).not.toContain("createBackendAnalysisThread");
+    expect(workspaceSource).not.toContain("private threadId");
     expect(workspaceSource).toContain("const isWaitingForFirstQuestion = Boolean(");
-    expect(workspaceSource).toContain('currentAnalysisThread?.status === "waiting_for_question"');
+    // Session-level state is now always ``active``/``archived``;
+    // the workspace reads ``latestTurnStatus`` to decide whether the
+    // user has already asked the first question.
+    expect(workspaceSource).toContain("analysisLatestTurnStatus");
+    expect(workspaceSource).toContain("currentAnalysisThread?.status === \"active\"");
+    expect(workspaceSource).not.toContain("waiting_for_question");
     expect(workspaceSource).toContain("markCurrentThreadAsStarted");
     expect(workspaceSource).toContain("isNewTask={isWaitingForFirstQuestion}");
     expect(workspaceSource).not.toContain("draft_");
@@ -272,17 +292,17 @@ describe("analysis task product language", () => {
     expect(workspaceSource).toContain("openedReportId");
     expect(workspaceSource).toContain("openedReportBelongsToCurrentTask");
     expect(workspaceSource).toContain("currentPanelReport");
-    expect(workspaceSource).toContain("const detail = await getBackendAnalysisThread(sourceThreadId)");
-    expect(workspaceSource).toContain("setInitialFlowMessages(flowNodesFromBackendThread(detail))");
-    expect(workspaceSource).toContain("threads.map((thread) => (thread.id === detail.thread.id ? detail.thread : thread))");
-    expect(workspaceSource).toContain("orderAnalysisThreads([detail.thread, ...threads])");
-    expect(workspaceSource).toContain("loading={currentPanelReportLoading}");
-    expect(workspaceSource).not.toContain("onListVersions=");
-    expect(workspaceSource).not.toContain("onLoadVersion=");
-    expect(interactiveReportSource).toContain("onSaveReport");
-    expect(interactiveReportSource).not.toContain("历史版本");
-    expect(interactiveReportSource).not.toContain("新的报告版本");
-    expect(interactiveReportSource).not.toContain("INTERACTIVE RESULT · v");
+      expect(workspaceSource).toContain("const detail = await getBackendAnalysisSession(sourceThreadId)");
+      expect(workspaceSource).toContain("setInitialFlowMessages(flowNodesFromBackendSession(detail))");
+      expect(workspaceSource).toContain("threads.map((thread) => (thread.id === sessionRow.id ? sessionRow : thread))");
+      expect(workspaceSource).toContain("orderAnalysisThreads([sessionRow, ...threads])");
+      expect(workspaceSource).toContain("loading={currentPanelReportLoading}");
+      expect(workspaceSource).not.toContain("onListVersions=");
+      expect(workspaceSource).not.toContain("onLoadVersion=");
+      expect(interactiveReportSource).toContain("onSaveReport");
+      expect(interactiveReportSource).not.toContain("历史版本");
+      expect(interactiveReportSource).not.toContain("新的报告版本");
+      expect(interactiveReportSource).not.toContain("INTERACTIVE RESULT · v");
   });
 
   test("creates a real backend analysis thread from a saved report and carries its report snapshot", () => {
@@ -374,12 +394,13 @@ describe("analysis task product language", () => {
 
   test("keeps the history list stable when opening an existing task", () => {
     expect(workspaceSource).toContain("}, []);");
-    expect(workspaceSource).toContain("if (!flow.threadId || !selectedAnalysisTask) return;");
-    expect(workspaceSource).toContain("threadId !== currentAnalysisTaskId");
+    expect(workspaceSource).toContain("if (!currentAnalysisTaskId || !selectedAnalysisTask) return;");
+    expect(workspaceSource).toContain("const sessionId = currentAnalysisTaskId;");
     expect(workspaceSource).toContain("当前任务正在分析，停止回答后再切换任务。");
     expect(workspaceSource).toContain("const shouldSyncThread = flow.running || hadLocalRunningFlow;");
     expect(workspaceSource).toContain("if (!shouldSyncThread) return threads;");
     expect(workspaceSource).not.toContain("setCurrentAnalysisTaskId(threadId);");
     expect(workspaceSource).not.toContain("}, [flow.threadId]);");
+    expect(workspaceSource).not.toContain("flow.threadId");
   });
 });
