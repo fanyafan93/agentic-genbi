@@ -207,13 +207,16 @@ async def _provision_codex_thread_id(
     *,
     analysis_runtime: CodexSdkAnalysisRuntime,
     body: Any,
+    allow_client_preflight: bool = True,
 ) -> str:
     metadata = dict(getattr(body, "metadata", None) or {})
-    preflight = (
-        _string_or_none(metadata.get("codex_session_id"))
-        or _string_or_none(metadata.get("codex_thread_id"))
-        or _string_or_none(getattr(body, "session_id", None))
-    )
+    preflight = ""
+    if allow_client_preflight:
+        preflight = (
+            _string_or_none(metadata.get("codex_session_id"))
+            or _string_or_none(metadata.get("codex_thread_id"))
+            or _string_or_none(getattr(body, "session_id", None))
+        )
     if preflight:
         return preflight
     if not getattr(analysis_runtime, "enabled", False):

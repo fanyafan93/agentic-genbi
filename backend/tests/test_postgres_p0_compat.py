@@ -155,6 +155,8 @@ class _FakeConnection:
         if "select * from analysis_turns" in compact:
             if " where id =" in compact and params and "id" in params:
                 row = self.rows[POSTGRES_TURN_TABLE].get(str(params["id"]))
+                if "session_id" not in params:
+                    return _Result([row] if row else [])
                 if row and row.get("session_id") == params.get("session_id"):
                     return _Result([row])
                 return _Result()
@@ -166,6 +168,9 @@ class _FakeConnection:
                 return _Result(rows)
             return _Result(list(self.rows[POSTGRES_TURN_TABLE].values()))
         if "select * from analysis_codex_item_projections" in compact:
+            if " where codex_item_id =" in compact and params and "codex_item_id" in params:
+                row = self.rows[POSTGRES_CODEX_ITEM_PROJECTION_TABLE].get(str(params["codex_item_id"]))
+                return _Result([row] if row else [])
             if " where genbi_session_id =" in compact and params and "session_id" in params:
                 rows = [
                     row for row in self.rows[POSTGRES_CODEX_ITEM_PROJECTION_TABLE].values()
@@ -429,6 +434,82 @@ class PostgresCodexProjectionP0Test(unittest.TestCase):
         ]
         self.assertEqual(full_scans, [])
         self.assertEqual(len(item_upserts), 1)
+        self.assertFalse(any("where genbi_session_id =" in sql for sql in self.builder.conn.sql_log))
+
+    def test_turn_id_collision_cannot_update_another_session_turn(self) -> None:
+        backend = PostgresCodexProjectionBackend("postgresql://unused")
+        store = CodexProjectionStore(backend=backend)
+        store.save_turn(
+            session_id="session_a",
+            turn_id="turn_shared",
+            input_kind="message",
+            input_text="a",
+            status="running",
+            codex_session_id="session_a",
+            codex_turn_id="turn_shared",
+        )
+
+        with self.assertRaises(ValueError):
+            store.save_turn(
+                session_id="session_b",
+                turn_id="turn_shared",
+                input_kind="message",
+                input_text="b",
+                status="failed",
+                codex_session_id="session_b",
+                codex_turn_id="turn_shared",
+            )
+
+        self.assertEqual(store.get_turn("session_a", "turn_shared").inputText, "a")
+        self.assertIsNone(store.get_turn("session_b", "turn_shared"))
+
+    def test_item_id_collision_cannot_move_item_to_another_session(self) -> None:
+        backend = PostgresCodexProjectionBackend("postgresql://unused")
+        store = CodexProjectionStore(backend=backend)
+        for session_id, turn_id in (("session_a", "turn_a"), ("session_b", "turn_b")):
+            store.save_turn(
+                session_id=session_id,
+                turn_id=turn_id,
+                input_kind="message",
+                input_text=session_id,
+                status="running",
+                codex_session_id=session_id,
+                codex_turn_id=turn_id,
+            )
+        store.upsert_item(
+            session_id="session_a",
+            turn_id="turn_a",
+            codex_item_id="item_shared",
+            item_type="message",
+            status="completed",
+            sequence=1,
+            payload={"text": "a"},
+            created_at="2026-08-01T00:00:00+00:00",
+            completed_at="2026-08-01T00:00:01+00:00",
+            codex_session_id="session_a",
+            codex_turn_id="turn_a",
+        )
+
+        with self.assertRaises(ValueError):
+            store.upsert_item(
+                session_id="session_b",
+                turn_id="turn_b",
+                codex_item_id="item_shared",
+                item_type="message",
+                status="completed",
+                sequence=2,
+                payload={"text": "b"},
+                created_at="2026-08-01T00:00:02+00:00",
+                completed_at="2026-08-01T00:00:03+00:00",
+                codex_session_id="session_b",
+                codex_turn_id="turn_b",
+            )
+
+        self.assertEqual(store.list_items(session_id="session_b", turn_id="turn_b"), [])
+        self.assertEqual(
+            store.list_items(session_id="session_a", turn_id="turn_a")[0].payload,
+            {"text": "a"},
+        )
 
     def test_cross_session_row_writes_do_not_overwrite_each_other(self) -> None:
         backend = PostgresCodexProjectionBackend("postgresql://unused")

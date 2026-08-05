@@ -165,7 +165,9 @@ class CodexProjectionStore:
                 "turn_id must equal codex_turn_id (new-session contract); "
                 f"got turn_id={turn_id!r}, codex_turn_id={effective_codex_turn_id!r}."
             )
-        if self._has_row_backend("get_turn", "upsert_turn"):
+        if self._has_row_backend("get_turn_by_id", "upsert_turn"):
+            existing = self.backend.get_turn_by_id(turn_id)
+        elif self._has_row_backend("get_turn", "upsert_turn"):
             existing = self.backend.get_turn(session_id, turn_id)
         else:
             state = self._read_state()
@@ -298,7 +300,7 @@ class CodexProjectionStore:
         """
         if not codex_item_id.strip():
             raise ValueError("codex_item_id is required.")
-        if self._has_row_backend("get_turn", "upsert_item", "list_items"):
+        if self._has_row_backend("get_turn", "upsert_item", "get_item"):
             turn = self.backend.get_turn(session_id, turn_id)
         else:
             state = self._read_state()
@@ -311,16 +313,22 @@ class CodexProjectionStore:
                 f"cannot upsert projection on session {session_id!r}."
             )
         existing = None
-        if self._has_row_backend("list_items"):
-            for projection in self.backend.list_items(session_id, turn_id):
-                if projection.codexItemId == codex_item_id:
-                    existing = projection
-                    break
+        if self._has_row_backend("get_item"):
+            existing = self.backend.get_item(codex_item_id)
         else:
             for projection in state["projections"]:
                 if projection.codexItemId == codex_item_id:
                     existing = projection
                     break
+        if existing is not None and (
+            existing.genbiSessionId != session_id
+            or existing.genbiTurnId != turn_id
+        ):
+            raise ValueError(
+                f"item {codex_item_id!r} belongs to session {existing.genbiSessionId!r} "
+                f"turn {existing.genbiTurnId!r}; cannot update it on session {session_id!r} "
+                f"turn {turn_id!r}."
+            )
         # ``sequence`` is the dense ordering of the projection in
         # the turn's timeline. The Runtime assigns it; the store
         # just stores the value. The replay path reuses the same

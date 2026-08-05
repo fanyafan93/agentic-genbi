@@ -456,7 +456,7 @@ export function parseAnalysisSse(text: string): BackendTurnEvent[] {
 }
 
 function getInputQuestion(input: AgentInput): string {
-  if (input.kind === "start") return input.question || "分析一下渠道销售占比";
+  if (input.kind === "start") return input.question;
   if (input.kind === "message") return input.content;
   if (input.kind === "reply") return input.optionId;
   return "";
@@ -579,6 +579,15 @@ export function* mapBackendEvents(
           turnId: report.source.turnId,
         };
       }
+      continue;
+    }
+
+    if (event.type === "genbi/artifact/failed") {
+      yield {
+        type: "error",
+        message: asString(event.payload.error) || "Artifact save failed",
+        ...context,
+      };
       continue;
     }
 

@@ -396,6 +396,14 @@ class PostgresCodexProjectionBackend:
             ).fetchone()
         return _turn_record_from_row(row) if row else None
 
+    def get_turn_by_id(self, turn_id: str) -> TurnRecord | None:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"SELECT * FROM {POSTGRES_TURN_TABLE} WHERE id = %(id)s",
+                {"id": turn_id},
+            ).fetchone()
+        return _turn_record_from_row(row) if row else None
+
     def list_turns(self, session_id: str) -> list[TurnRecord]:
         with _connect(self.database_url) as conn:
             rows = conn.execute(
@@ -428,6 +436,17 @@ class PostgresCodexProjectionBackend:
     def upsert_item(self, record: CodexItemProjectionRecord) -> None:
         with _connect(self.database_url) as conn:
             self._upsert_item(conn, record)
+
+    def get_item(self, codex_item_id: str) -> CodexItemProjectionRecord | None:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"""
+                SELECT * FROM {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}
+                WHERE codex_item_id = %(codex_item_id)s
+                """,
+                {"codex_item_id": codex_item_id},
+            ).fetchone()
+        return _codex_item_projection_from_row(row) if row else None
 
     def list_items(
         self,
@@ -491,6 +510,7 @@ class PostgresCodexProjectionBackend:
                 codex_session_id = EXCLUDED.codex_session_id,
                 codex_turn_id = EXCLUDED.codex_turn_id,
                 metadata = EXCLUDED.metadata{extra_updates}
+            WHERE {POSTGRES_TURN_TABLE}.session_id = EXCLUDED.session_id
             """,
             params,
         )
@@ -533,6 +553,8 @@ class PostgresCodexProjectionBackend:
                 completed_at = EXCLUDED.completed_at,
                 genbi_session_id = EXCLUDED.genbi_session_id,
                 genbi_turn_id = EXCLUDED.genbi_turn_id{extra_updates}
+            WHERE {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}.genbi_session_id = EXCLUDED.genbi_session_id
+              AND {POSTGRES_CODEX_ITEM_PROJECTION_TABLE}.genbi_turn_id = EXCLUDED.genbi_turn_id
             """,
             params,
         )

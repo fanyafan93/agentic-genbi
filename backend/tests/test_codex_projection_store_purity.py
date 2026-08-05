@@ -188,6 +188,85 @@ class CodexProjectionStorePurityTest(unittest.TestCase):
             good_projections = store.list_items(session_id="sess_a", turn_id="t_a")
             self.assertEqual([p.codexItemId for p in good_projections], ["it_ok"])
 
+    def test_save_turn_rejects_turn_id_owned_by_another_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = CodexProjectionStore(path=Path(temp_dir) / "p.jsonl")
+            store.save_turn(
+                session_id="sess_a",
+                turn_id="turn_shared",
+                input_kind="start",
+                input_text="a",
+                status="running",
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                store.save_turn(
+                    session_id="sess_b",
+                    turn_id="turn_shared",
+                    input_kind="message",
+                    input_text="b",
+                    status="running",
+                )
+
+            msg = str(ctx.exception)
+            self.assertIn("turn_shared", msg)
+            self.assertIn("sess_a", msg)
+            self.assertIn("sess_b", msg)
+            self.assertEqual(store.get_turn("sess_a", "turn_shared").inputText, "a")
+            self.assertIsNone(store.get_turn("sess_b", "turn_shared"))
+
+    def test_upsert_item_rejects_item_id_owned_by_another_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = CodexProjectionStore(path=Path(temp_dir) / "p.jsonl")
+            store.save_turn(
+                session_id="sess_a",
+                turn_id="turn_a",
+                input_kind="start",
+                input_text="a",
+                status="running",
+            )
+            store.save_turn(
+                session_id="sess_b",
+                turn_id="turn_b",
+                input_kind="start",
+                input_text="b",
+                status="running",
+            )
+            store.upsert_item(
+                session_id="sess_a",
+                turn_id="turn_a",
+                codex_item_id="item_shared",
+                item_type="agentMessage",
+                status="completed",
+                sequence=0,
+                payload={"text": "a"},
+                created_at="2026-08-05T00:00:00Z",
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                store.upsert_item(
+                    session_id="sess_b",
+                    turn_id="turn_b",
+                    codex_item_id="item_shared",
+                    item_type="agentMessage",
+                    status="completed",
+                    sequence=0,
+                    payload={"text": "b"},
+                    created_at="2026-08-05T00:00:01Z",
+                )
+
+            msg = str(ctx.exception)
+            self.assertIn("item_shared", msg)
+            self.assertIn("sess_a", msg)
+            self.assertIn("turn_a", msg)
+            self.assertIn("sess_b", msg)
+            self.assertIn("turn_b", msg)
+            self.assertEqual(store.list_items(session_id="sess_b", turn_id="turn_b"), [])
+            self.assertEqual(
+                store.list_items(session_id="sess_a", turn_id="turn_a")[0].payload,
+                {"text": "a"},
+            )
+
     def test_save_turn_rejects_moving_existing_turn_across_sessions(self) -> None:
         """``save_turn`` is an UPSERT — the existing guard must also
         refuse to re-parent a turn from session A onto session B.

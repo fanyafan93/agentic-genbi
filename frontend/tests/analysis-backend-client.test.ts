@@ -67,6 +67,46 @@ test("maps a failed completed turn to one visible error and done event", () => {
   ]);
 });
 
+test("maps failed interactive report artifact events to a visible error", () => {
+  const events = Array.from(mapBackendEvents([
+    {
+      type: "genbi/artifact/failed",
+      turn_id: "turn_artifact_failed",
+      payload: {
+        artifactType: "interactive_report",
+        error: "interactive_report_save_failed",
+        title: "Broken report",
+      },
+      created_at: "2026-08-05T00:00:00Z",
+    },
+  ], "start"));
+
+  expect(events).toEqual([
+    expect.objectContaining({
+      type: "error",
+      message: "interactive_report_save_failed",
+      turnId: "turn_artifact_failed",
+    }),
+  ]);
+});
+
+test("does not replace empty start questions with a sample prompt", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sseResponse([
+    {
+      type: "turn/completed",
+      turn_id: "turn_empty_start",
+      payload: { status: "completed" },
+      created_at: "2026-08-05T00:00:00Z",
+    },
+  ])));
+
+  const client = new BackendAnalysisAgentClient("http://backend.test");
+  const events = await collect(client.send({ kind: "start", question: "", sessionId: null }));
+
+  expect(events).toEqual([{ type: "done" }]);
+  expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+});
+
 describe("analysis backend client event mapping", () => {
   test("preserves backend thread id on new analysis turns", () => {
     const events = Array.from(mapBackendEvents([

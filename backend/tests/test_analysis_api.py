@@ -200,6 +200,7 @@ class _FakeCodexRuntime:
         invocation = self._invocation
         codex_thread_id = context.get("codex_session_id") or context.get("codex_thread_id") or "codex_thread_created"
         codex_turn_id = f"codex_turn_{invocation}"
+        codex_item_id = f"codex_item_msg_{invocation}"
         # New-session contract: emit the provisioned-thread marker first so
         # ``analysis_threads.id == analysis_threads.codex_thread_id``.
         yield AgentEvent(
@@ -241,7 +242,7 @@ class _FakeCodexRuntime:
                 "eventSource": "codex",
                 "codex_thread_id": codex_thread_id,
                 "codex_turn_id": codex_turn_id,
-                "codex_item_id": "codex_item_msg",
+                "codex_item_id": codex_item_id,
                 "codex_item_type": "agentMessage",
                 "delta": "hello",
             },
@@ -253,7 +254,7 @@ class _FakeCodexRuntime:
                 "eventSource": "codex",
                 "codex_thread_id": codex_thread_id,
                 "codex_turn_id": codex_turn_id,
-                "codex_item_id": "codex_item_msg",
+                "codex_item_id": codex_item_id,
                 "codex_item_type": "agentMessage",
                 "content": "Codex answer",
             },
@@ -456,7 +457,7 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(thread.json()["session"]["id"], payload["session_id"])
             self.assertEqual(thread.json()["session"]["codexThreadId"], "codex_thread_created")
             self.assertEqual(thread.json()["turns"][0]["codexTurnId"], payload["turn_id"])
-            self.assertEqual(thread.json()["codexItemProjections"][0]["codexItemId"], "codex_item_msg")
+            self.assertEqual(thread.json()["codexItemProjections"][0]["codexItemId"], "codex_item_msg_1")
 
     def test_analysis_thread_list_includes_latest_question_for_sidebar_titles(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1233,20 +1234,16 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
                 "metadata": {"codex_session_id": preflight_id},
             }
             first = client.post("/api/analysis/reports/report_reuse/sessions", json=body)
-            second = client.post("/api/analysis/reports/report_reuse/sessions", json=body)
 
             self.assertEqual(saved.status_code, 200)
-            # The new contract is deterministic when the client
-            # supplies a preflight id: both calls return the same
-            # session id. Without a preflight id the endpoint would
-            # raise 503 (no live Codex runtime).
-            self.assertEqual(first.status_code, 200)
-            self.assertEqual(second.status_code, 200)
-            self.assertEqual(
-                first.json()["session"]["id"],
-                second.json()["session"]["id"],
-            )
-            self.assertEqual(len(thread_store.list_threads(product_kind="analysis_task")), 1)
+            # Report-anchored session creation must not accept a
+            # client-supplied Codex id from metadata. With the
+            # runtime disabled it therefore fails fast and does not
+            # create the forged session row.
+            self.assertEqual(first.status_code, 503)
+            self.assertIn("codex_runtime_not_configured", first.json()["detail"])
+            self.assertEqual(len(thread_store.list_threads(product_kind="analysis_task")), 0)
+            self.assertIsNone(thread_store.get_thread(preflight_id))
 
     def test_report_share_rejects_unknown_permission(self) -> None:
         app = create_app(
@@ -1378,6 +1375,19 @@ class SessionlessStartTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(response.status_code, 422)
             self.assertEqual(thread_store.list_threads(product_kind="analysis_task"), [])
+
+
+class BackendWorkerLimitTest(unittest.TestCase):
+    def test_create_app_rejects_multi_worker_configuration(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "GENBI_BACKEND_WORKERS": "2",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "single worker"):
+                create_app(analysis_runtime=CodexSdkAnalysisRuntime.disabled())
 
 
 class StreamingResolvedTurnIdTest(unittest.IsolatedAsyncioTestCase):

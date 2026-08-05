@@ -87,6 +87,7 @@ def create_app(
     thread_store: Any | None = None,
     finereport_repository: FineReportReportRepository | None = None,
 ) -> Any:
+    _enforce_single_worker_runtime()
     if thread_store is not None and (session_catalog is None or codex_projection_store is None):
         session_catalog = session_catalog or getattr(thread_store, "session_catalog", None)
         codex_projection_store = codex_projection_store or getattr(thread_store, "codex_projection_store", None)
@@ -837,6 +838,7 @@ def create_app(
             session_id = await _provision_codex_thread_id(
                 analysis_runtime=configured_analysis_runtime,
                 body=body,
+                allow_client_preflight=False,
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -1009,6 +1011,29 @@ def build_default_analysis_runtime() -> CodexSdkAnalysisRuntime:
     elif analysis_runtime not in {"", "local", "mock"}:
         raise RuntimeError("GENBI_ANALYSIS_RUNTIME only supports codex, local, or mock.")
     return CodexSdkAnalysisRuntime.disabled()
+
+
+def _enforce_single_worker_runtime() -> None:
+    """V1 safety guard: live Codex turn handles are process-local.
+
+    Until the runtime has a cross-process turn registry, a backend
+    configured with more than one worker can route cancel requests to
+    a process that does not own the live SDK turn handle.
+    """
+
+    for env_name in ("GENBI_BACKEND_WORKERS", "WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        raw = os.getenv(env_name)
+        if raw is None or not str(raw).strip():
+            continue
+        try:
+            workers = int(str(raw).strip())
+        except ValueError:
+            continue
+        if workers > 1:
+            raise RuntimeError(
+                f"backend_single_worker_required: {env_name}={workers}; "
+                "Codex turn cancellation requires a single worker in V1."
+            )
 
 
 def _session_view_to_thread_dict(

@@ -141,7 +141,7 @@ class CodexSdkAnalysisRuntime:
         if not self.enabled:
             return False
         key = (str(thread_id or ""), str(turn_id or ""))
-        turn_obj = self._active_turns.pop(key, None)
+        turn_obj = self._active_turns.get(key)
         if turn_obj is None:
             return False
         interrupt = getattr(turn_obj, "interrupt", None)
@@ -172,6 +172,7 @@ class CodexSdkAnalysisRuntime:
                     extra={"thread_id": thread_id, "turn_id": turn_id},
                 )
                 return False
+        self._active_turns.pop(key, None)
         return True
 
     async def _collect_stream(
