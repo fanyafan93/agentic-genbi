@@ -128,6 +128,130 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertEqual(payload["mcp_server"], "GenBI_report")
         self.assertEqual(payload["mcp_result"]["content"][0]["text"], "{\"ok\":true}")
 
+    def test_maps_reasoning_summary_delta_but_not_raw_reasoning_text(self) -> None:
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+
+        summary = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/reasoning/summaryTextDelta",
+                payload=SimpleNamespace(
+                    turn_id="codex_turn_1",
+                    item_id="reasoning_1",
+                    summary_index=0,
+                    delta="正在检查渠道口径。",
+                ),
+            ),
+            codex_thread_id="codex_thread_1",
+        )
+        raw = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/reasoning/textDelta",
+                payload=SimpleNamespace(
+                    turn_id="codex_turn_1",
+                    item_id="reasoning_1",
+                    content_index=0,
+                    delta="hidden chain of thought",
+                ),
+            ),
+            codex_thread_id="codex_thread_1",
+        )
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary.type, "item/reasoning/summaryTextDelta")
+        self.assertEqual(summary.payload["delta"], "正在检查渠道口径。")
+        self.assertEqual(summary.payload["summary_index"], 0)
+        self.assertEqual(summary.payload["codex_item_id"], "reasoning_1")
+        self.assertIsNone(raw)
+
+    def test_maps_started_and_completed_tool_items_with_sanitized_details(self) -> None:
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+        item = SimpleNamespace(
+            id="tool_1",
+            type="mcpToolCall",
+            server="BI_doris",
+            tool="mysql_query",
+            status=SimpleNamespace(value="completed"),
+            arguments={"sql": "select 1", "api_key": "secret-value"},
+            result={"content": [{"type": "text", "text": "one row"}]},
+            duration_ms=1250,
+        )
+
+        started = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/started",
+                payload=SimpleNamespace(turn_id="turn_1", item=SimpleNamespace(root=item)),
+            ),
+            codex_thread_id="session_1",
+        )
+        completed = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/completed",
+                payload=SimpleNamespace(turn_id="turn_1", item=SimpleNamespace(root=item)),
+            ),
+            codex_thread_id="session_1",
+        )
+
+        self.assertIsNotNone(started)
+        self.assertEqual(started.payload["codex_item_id"], "tool_1")
+        self.assertEqual(started.payload["codex_method"], "item/started")
+        self.assertEqual(completed.payload["mcp_arguments"]["sql"], "select 1")
+        self.assertEqual(completed.payload["mcp_arguments"]["api_key"], "[REDACTED]")
+        self.assertNotIn("secret-value", repr(completed.payload))
+
+    def test_completed_reasoning_item_contains_display_summary_only(self) -> None:
+        summary_part = SimpleNamespace(root=SimpleNamespace(text="正在核验数据。"))
+        root = SimpleNamespace(
+            id="reasoning_1",
+            type="reasoning",
+            summary=[summary_part],
+            content=[SimpleNamespace(root=SimpleNamespace(text="hidden reasoning"))],
+        )
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+
+        event = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/completed",
+                payload=SimpleNamespace(turn_id="turn_1", item=SimpleNamespace(root=root)),
+            ),
+            codex_thread_id="session_1",
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.payload["summary"], "正在核验数据。")
+        self.assertNotIn("hidden reasoning", repr(event.payload))
+
+    def test_maps_command_output_and_mcp_progress_notifications(self) -> None:
+        runtime = CodexSdkAnalysisRuntime(async_codex_factory=_FakeAsyncCodex)
+
+        command_output = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/commandExecution/outputDelta",
+                payload=SimpleNamespace(
+                    turn_id="turn_1",
+                    item_id="command_1",
+                    delta="line 1\n",
+                ),
+            ),
+            codex_thread_id="session_1",
+        )
+        mcp_progress = runtime._notification_to_event(
+            SimpleNamespace(
+                method="item/mcpToolCall/progress",
+                payload=SimpleNamespace(
+                    turn_id="turn_1",
+                    item_id="tool_1",
+                    message="Fetched page 1",
+                ),
+            ),
+            codex_thread_id="session_1",
+        )
+
+        self.assertEqual(command_output.type, "item/commandExecution/outputDelta")
+        self.assertEqual(command_output.payload["delta"], "line 1\n")
+        self.assertEqual(command_output.payload["codex_item_id"], "command_1")
+        self.assertEqual(mcp_progress.type, "item/mcpToolCall/progress")
+        self.assertEqual(mcp_progress.payload["message"], "Fetched page 1")
+
     def test_async_stream_resumes_codex_thread_when_context_has_codex_thread_id(self) -> None:
         fake_codex = _FakeAsyncCodex()
         runtime = CodexSdkAnalysisRuntime(async_codex_factory=lambda: fake_codex)

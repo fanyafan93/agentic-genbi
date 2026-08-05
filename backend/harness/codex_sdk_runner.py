@@ -14,6 +14,7 @@ from backend.harness.codex_mcp_config import (
     load_runtime_codex_mcp_servers_from_env,
     to_codex_config_overrides,
 )
+from backend.harness.codex_event_sanitizer import sanitize_codex_value
 from backend.harness.events import AgentEvent
 from backend.harness.minimax_codex_adapter import adapter_base_url, adapter_enabled
 
@@ -367,6 +368,63 @@ class CodexSdkAnalysisRuntime:
                     "codex_turn_id": _payload_turn_id(payload),
                 },
             )
+        if method == "item/reasoning/summaryTextDelta":
+            delta = str(getattr(payload, "delta", "") or "")
+            if not delta:
+                return None
+            return AgentEvent(
+                type=method,
+                turn_id=turn_id,
+                payload={
+                    "runtime": "openai-codex",
+                    "eventSource": "codex",
+                    "codex_method": method,
+                    "codex_thread_id": codex_thread_id,
+                    "codex_turn_id": _payload_turn_id(payload),
+                    "codex_item_id": _payload_item_id(payload),
+                    "codex_item_type": "reasoning",
+                    "summary_index": int(getattr(payload, "summary_index", 0) or 0),
+                    "delta": delta,
+                },
+            )
+        if method == "item/reasoning/textDelta":
+            return None
+        if method == "item/commandExecution/outputDelta":
+            delta = str(getattr(payload, "delta", "") or "")
+            if not delta:
+                return None
+            return AgentEvent(
+                type=method,
+                turn_id=turn_id,
+                payload={
+                    "runtime": "openai-codex",
+                    "eventSource": "codex",
+                    "codex_method": method,
+                    "codex_thread_id": codex_thread_id,
+                    "codex_turn_id": _payload_turn_id(payload),
+                    "codex_item_id": _payload_item_id(payload),
+                    "codex_item_type": "commandExecution",
+                    "delta": sanitize_codex_value(delta),
+                },
+            )
+        if method == "item/mcpToolCall/progress":
+            message = _string_or_none(getattr(payload, "message", None))
+            if not message:
+                return None
+            return AgentEvent(
+                type=method,
+                turn_id=turn_id,
+                payload={
+                    "runtime": "openai-codex",
+                    "eventSource": "codex",
+                    "codex_method": method,
+                    "codex_thread_id": codex_thread_id,
+                    "codex_turn_id": _payload_turn_id(payload),
+                    "codex_item_id": _payload_item_id(payload),
+                    "codex_item_type": "mcpToolCall",
+                    "message": sanitize_codex_value(message),
+                },
+            )
         if method == "item/agentMessage/delta":
             delta = str(getattr(payload, "delta", "") or "")
             if not delta:
@@ -384,42 +442,12 @@ class CodexSdkAnalysisRuntime:
                     "codex_item_id": _payload_item_id(payload),
                 },
             )
-        if method == "item/completed":
-            item = _payload_item(payload)
-            root = getattr(item, "root", item)
-            root_type = _item_type(root)
-            codex_item_id = _item_id(root)
-            if _is_agent_message(root):
-                text = _item_text(root)
-                if text:
-                    return AgentEvent(
-                        type="item/completed",
-                        turn_id=turn_id,
-                        payload={
-                            "runtime": "openai-codex",
-                            "eventSource": "codex",
-                            "codex_method": method,
-                            "role": "assistant",
-                            "content": text,
-                            "codex_thread_id": codex_thread_id,
-                            "codex_turn_id": _payload_turn_id(payload),
-                            "codex_item_id": codex_item_id,
-                            "codex_item_type": root_type,
-                        },
-                )
-            return AgentEvent(
-                type="item/completed",
+        if method in {"item/started", "item/completed"}:
+            return _item_lifecycle_event(
+                method=method,
+                payload=payload,
                 turn_id=turn_id,
-                payload={
-                    "runtime": "openai-codex",
-                    "eventSource": "codex",
-                    "codex_method": method,
-                    "codex_thread_id": codex_thread_id,
-                    "codex_turn_id": _payload_turn_id(payload),
-                    "codex_item_id": codex_item_id,
-                    "codex_item_type": root_type,
-                    **_mcp_tool_call_payload(root),
-                },
+                codex_thread_id=codex_thread_id,
             )
         if method == "turn/completed":
             status = _turn_status(payload) or ""
@@ -497,6 +525,11 @@ def _payload_turn_id(payload: Any) -> str | None:
 
 
 def _payload_item_id(payload: Any) -> str | None:
+    direct = _string_or_none(
+        getattr(payload, "item_id", None) or getattr(payload, "itemId", None)
+    )
+    if direct:
+        return direct
     item = _payload_item(payload)
     root = getattr(item, "root", item)
     return _item_id(root)
@@ -513,6 +546,57 @@ def _item_id(root: Any) -> str | None:
     return _string_or_none(getattr(root, "id", None) or getattr(root, "item_id", None) or getattr(root, "itemId", None))
 
 
+def _item_lifecycle_event(
+    *,
+    method: str,
+    payload: Any,
+    turn_id: str,
+    codex_thread_id: str | None,
+) -> AgentEvent:
+    item = _payload_item(payload)
+    root = getattr(item, "root", item)
+    root_type = _item_type(root)
+    event_payload: dict[str, Any] = {
+        "runtime": "openai-codex",
+        "eventSource": "codex",
+        "codex_method": method,
+        "codex_thread_id": codex_thread_id,
+        "codex_turn_id": _payload_turn_id(payload),
+        "codex_item_id": _item_id(root),
+        "codex_item_type": root_type,
+    }
+    if root_type == "reasoning":
+        summary = _reasoning_summary_text(root)
+        if summary:
+            event_payload["summary"] = summary
+    elif root_type == "mcpToolCall":
+        event_payload.update(_mcp_tool_call_payload(root))
+    elif root_type == "commandExecution":
+        event_payload.update(_command_execution_payload(root))
+    elif root_type == "fileChange":
+        event_payload.update(_file_change_payload(root))
+    elif _is_agent_message(root):
+        text = _item_text(root)
+        event_payload.update(
+            {
+                "role": "assistant",
+                "content": text,
+                "message_phase": _enum_text(getattr(root, "phase", None)),
+            }
+        )
+    return AgentEvent(type=method, turn_id=turn_id, payload=event_payload)
+
+
+def _reasoning_summary_text(root: Any) -> str:
+    texts: list[str] = []
+    for part in getattr(root, "summary", None) or []:
+        value = getattr(part, "root", part)
+        text = _string_or_none(getattr(value, "text", None))
+        if text:
+            texts.append(text)
+    return "\n\n".join(texts)
+
+
 def _mcp_tool_call_payload(root: Any) -> dict[str, Any]:
     if _item_type(root) != "mcpToolCall":
         return {}
@@ -521,15 +605,47 @@ def _mcp_tool_call_payload(root: Any) -> dict[str, Any]:
     out: dict[str, Any] = {
         "mcp_server": _string_or_none(getattr(root, "server", None)),
         "mcp_tool": _string_or_none(getattr(root, "tool", None)),
-        "mcp_status": _string_or_none(getattr(getattr(root, "status", None), "value", None) or getattr(root, "status", None)),
-        "mcp_arguments": getattr(root, "arguments", None),
+        "mcp_status": _enum_text(getattr(root, "status", None)),
+        "mcp_arguments": sanitize_codex_value(getattr(root, "arguments", None)),
+        "duration_ms": getattr(root, "duration_ms", None),
     }
     result = _mcp_tool_result(root)
     if result is not None:
-        out["mcp_result"] = result
+        out["mcp_result"] = sanitize_codex_value(result)
     if error_message:
-        out["mcp_error"] = error_message
+        out["mcp_error"] = sanitize_codex_value(error_message)
     return out
+
+
+def _command_execution_payload(root: Any) -> dict[str, Any]:
+    if _item_type(root) != "commandExecution":
+        return {}
+    return sanitize_codex_value(
+        {
+            "command": getattr(root, "command", None),
+            "cwd": getattr(root, "cwd", None),
+            "command_actions": getattr(root, "command_actions", None),
+            "aggregated_output": getattr(root, "aggregated_output", None),
+            "exit_code": getattr(root, "exit_code", None),
+            "duration_ms": getattr(root, "duration_ms", None),
+            "command_status": _enum_text(getattr(root, "status", None)),
+        }
+    )
+
+
+def _file_change_payload(root: Any) -> dict[str, Any]:
+    if _item_type(root) != "fileChange":
+        return {}
+    return sanitize_codex_value(
+        {
+            "changes": getattr(root, "changes", None),
+            "file_change_status": _enum_text(getattr(root, "status", None)),
+        }
+    )
+
+
+def _enum_text(value: Any) -> str | None:
+    return _string_or_none(getattr(value, "value", None) or value)
 
 
 def _mcp_tool_result(root: Any) -> Any:
