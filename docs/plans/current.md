@@ -97,6 +97,41 @@
     - `test_projection_sequence_renumbers_after_save`：replay 时 sequence 重新按 createdAt 顺序编号为 0/1。
   - 测试：后端 `NoGenBIItemTest` 4 个用例；前端 `analysis-backend-client.test.ts` 新增 `replay is projection-only (no GenBI Item rows required)`。
   - 后端 119/119、前端 95/95、tsc 全过。
+- **旧数据兼容读取**（用户规范）：旧 `analysis_threads` 行里
+  `id != codex_session_id`（一行同时带 GenBI id + Codex-issued id）。
+  新 contract 永远是 `id == codex_session_id`。先做兼容读取，等
+  旧使用量确认后再决定永久保留或一次迁移。
+  - 兼容点：
+    * `SessionCatalog.resolve_session_id(raw_id) -> str | None`：
+      用 raw id **或** `codexSessionId` 都能查到同一行；返回
+      canonical row id（catalog 的真 row id），下游只面对 row，
+      不面对 alias。
+    * `get_view` 内部统一走 `resolve_session_id`。
+    * `register_session` 继续强制 `id == codex_session_id`（新
+      record 永远是新 shape）。
+  - API 落地：
+    * `GET / PATCH / DELETE /api/analysis/sessions/{session_id}` 全部
+      走 `resolve_session_id` 拿 canonical id；找不到才 404。
+    * `POST /api/analysis/sessions/{session_id}/turns`：URL 拿到 raw
+      id 后 resolve；如果 row 存在，runtime 看到
+      `view.session.codexSessionId`（真 codex id），projections 落
+      canonical row；不存在时按 raw id 走 lazy register。
+    * `POST /api/analysis/sessions/{session_id}/cancel`：archive
+      canonical row，response `session.id` 是 canonical id，前端
+      拿到后 replace URL。
+  - 数据形态（不为了数据库形式完美改坏历史）：
+    * 旧 row：保留 `id != codex_session_id` 形态，继续可读。
+    * 新 row：`id == codex_session_id`，`metadata.codex_session_id`
+      也对齐。
+    * `SessionCatalog._read_state` 已有从 JSONL 读 `codexSessionId`
+      的兜底（兼容老字段名 `codexThreadId`）。
+  - 测试：
+    * `SessionCatalogPurityTest.test_resolve_session_id_accepts_legacy_codex_session_id_alias`
+      锁住"任一 id 都能查到同一行，row id 是 canonical"。
+    * `LegacySessionIdCompatibilityTest`（2 例）锁住 API 层
+      `GET / PATCH / DELETE / cancel / continuation` 全部用
+      GenBI alias 也 200，且 `session_id` response 是 canonical。
+  - 验收：后端 129/129、前端 93/93、tsc 全过。
 - **统一 API**（用户规范）：保留 7 个 `/api/analysis/sessions/*`
   路由，body 永不携带 session id。
   - `GET    /api/analysis/sessions`

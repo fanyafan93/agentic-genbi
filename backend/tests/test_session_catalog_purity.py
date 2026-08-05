@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import pathlib
 import tempfile
 import unittest
@@ -182,6 +183,7 @@ class SessionCatalogPurityTest(unittest.TestCase):
             "list_sessions",
             "get_view",
             "list_views",
+            "resolve_session_id",
             "register_session",
             "rename_session",
             "archive_session",
@@ -191,6 +193,59 @@ class SessionCatalogPurityTest(unittest.TestCase):
             "bind_latest_turn_provider",
         }
         self.assertEqual(public, expected)
+
+    def test_resolve_session_id_accepts_legacy_codex_session_id_alias(self) -> None:
+        # Old records were persisted with ``id != codex_session_id``
+        # (the row carried a GenBI-assigned id AND a Codex-issued
+        # id). The new contract is ``id == codex_session_id`` but
+        # we still accept the Codex-issued id on the way in; the
+        # resolver returns the canonical row id so the rest of
+        # the stack only ever sees the row, never the alias.
+        #
+        # We can't go through ``register_session`` to write the
+        # legacy shape: new registrations enforce ``id ==
+        # codex_session_id``. The legacy row therefore has to be
+        # seeded by writing the JSONL file directly, exactly as
+        # the older code would have persisted it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            catalog_path = Path(temp_dir) / "legacy.jsonl"
+            catalog_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_payload = {
+                "id": "genbi_legacy_1",
+                "productKind": "analysis_task",
+                "title": "legacy session",
+                "userId": None,
+                "status": "active",
+                "createdAt": "2026-08-01T00:00:00.000000+00:00",
+                "updatedAt": "2026-08-01T00:00:00.000000+00:00",
+                "metadata": {"codex_session_id": "codex_legacy_1"},
+                "tenantId": None,
+                "workspaceId": None,
+                "codexSessionId": "codex_legacy_1",
+            }
+            catalog_path.write_text(json.dumps(legacy_payload, ensure_ascii=False) + "\n", encoding="utf-8")
+            catalog = SessionCatalog(catalog_path)
+
+            # New record path: id == codexSessionId.
+            catalog.register_session(
+                session_id="new_session_2",
+                product_kind="analysis_task",
+                title="new session",
+                user_id=None,
+                status="active",
+            )
+
+            self.assertEqual(catalog.resolve_session_id("genbi_legacy_1"), "genbi_legacy_1")
+            self.assertEqual(catalog.resolve_session_id("codex_legacy_1"), "genbi_legacy_1")
+            self.assertEqual(catalog.resolve_session_id("new_session_2"), "new_session_2")
+            self.assertEqual(catalog.resolve_session_id(""), None)
+            self.assertEqual(catalog.resolve_session_id("missing"), None)
+
+            view = catalog.get_view("codex_legacy_1")
+            self.assertIsNotNone(view)
+            assert view is not None
+            self.assertEqual(view.session.id, "genbi_legacy_1")
+            self.assertEqual(view.session.codexSessionId, "codex_legacy_1")
 
 
 def importlib_module(name: str):

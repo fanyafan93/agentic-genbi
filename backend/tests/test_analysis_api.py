@@ -1301,6 +1301,106 @@ class SessionScopedContinuationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(thread)
 
 
+class LegacySessionIdCompatibilityTest(unittest.TestCase):
+    """Old ``analysis_threads`` rows had ``id != codex_session_id``; the
+    new contract is ``id == codex_session_id``. The API still
+    accepts either id on the URL path: callers can keep using
+    their old GenBI-side id and the backend resolves the
+    canonical row, OR callers can use the Codex-side id directly.
+    """
+
+    def test_legacy_row_is_resolvable_by_either_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stores = _TestStores(Path(temp_dir) / "thread-store.jsonl")
+            # Seed a legacy row by writing the JSONL directly
+            # (``register_session`` refuses to persist a row
+            # where ``id != codex_session_id`` — new writes are
+            # always the new shape).
+            legacy_payload = {
+                "id": "genbi_legacy_1",
+                "productKind": "analysis_task",
+                "title": "legacy session",
+                "userId": None,
+                "status": "active",
+                "createdAt": "2026-08-01T00:00:00.000000+00:00",
+                "updatedAt": "2026-08-01T00:00:00.000000+00:00",
+                "metadata": {"codex_session_id": "codex_legacy_1"},
+                "tenantId": None,
+                "workspaceId": None,
+                "codexSessionId": "codex_legacy_1",
+            }
+            stores.session_catalog.path.parent.mkdir(parents=True, exist_ok=True)
+            stores.session_catalog.path.write_text(
+                json.dumps(legacy_payload, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                session_catalog=stores.session_catalog,
+                codex_projection_store=stores.codex_projection_store,
+            )
+            client = TestClient(app)
+
+            # The old GenBI-side id still returns the row.
+            by_genbi = client.get("/api/analysis/sessions/genbi_legacy_1")
+            self.assertEqual(by_genbi.status_code, 200)
+            self.assertEqual(by_genbi.json()["session"]["id"], "genbi_legacy_1")
+
+            # The new Codex-side id also returns the same row.
+            by_codex = client.get("/api/analysis/sessions/codex_legacy_1")
+            self.assertEqual(by_codex.status_code, 200)
+            self.assertEqual(by_codex.json()["session"]["id"], "genbi_legacy_1")
+            self.assertEqual(by_codex.json()["session"]["codexSessionId"], "codex_legacy_1")
+
+            # Cancelling by the GenBI-side id archives the row
+            # under the canonical id; the response surfaces the
+            # canonical id so clients can update their URL.
+            cancel = client.post("/api/analysis/sessions/genbi_legacy_1/cancel")
+            self.assertEqual(cancel.status_code, 200)
+            self.assertEqual(cancel.json()["session"]["id"], "genbi_legacy_1")
+            self.assertEqual(cancel.json()["session"]["status"], "archived")
+
+    def test_legacy_row_continuation_routes_to_codex_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stores = _TestStores(Path(temp_dir) / "thread-store.jsonl")
+            legacy_payload = {
+                "id": "genbi_legacy_1",
+                "productKind": "analysis_task",
+                "title": "legacy session",
+                "userId": None,
+                "status": "active",
+                "createdAt": "2026-08-01T00:00:00.000000+00:00",
+                "updatedAt": "2026-08-01T00:00:00.000000+00:00",
+                "metadata": {"codex_session_id": "codex_legacy_1"},
+                "tenantId": None,
+                "workspaceId": None,
+                "codexSessionId": "codex_legacy_1",
+            }
+            stores.session_catalog.path.parent.mkdir(parents=True, exist_ok=True)
+            stores.session_catalog.path.write_text(
+                json.dumps(legacy_payload, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            app = create_app(
+                analysis_runtime=_FakeCodexRuntime(),  # type: ignore[arg-type]
+                session_catalog=stores.session_catalog,
+                codex_projection_store=stores.codex_projection_store,
+            )
+            client = TestClient(app)
+
+            # Hit the continuation endpoint with the OLD GenBI
+            # id; the backend must resolve it to the Codex-side
+            # id before forwarding to the runtime so projections
+            # land under the canonical row.
+            response = client.post(
+                "/api/analysis/sessions/genbi_legacy_1/turns",
+                json={"message": "follow up", "turn_kind": "message"},
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["session_id"], "codex_legacy_1")
+
+
 class SessionTurnStateDecouplingTest(unittest.IsolatedAsyncioTestCase):
     """Locks the user spec that session/turn state machines do not overlap.
 

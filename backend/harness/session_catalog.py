@@ -141,14 +141,37 @@ class SessionCatalog:
         sessions.sort(key=lambda s: s.updatedAt, reverse=True)
         return sessions[:limit]
 
+    def resolve_session_id(self, raw_id: str) -> str | None:
+        """Look up the canonical row id for an incoming id.
+
+        Old records were persisted with ``analysis_threads.id !=
+        codex_session_id`` (the row carried both a GenBI-assigned id
+        and the Codex-issued id). The new contract is
+        ``id == codex_session_id``. We accept either id on the way
+        in and return the canonical row id so the rest of the stack
+        always works with the row, never the alias.
+
+        Returns ``None`` when no row matches either id; callers turn
+        that into a 404.
+        """
+        if not raw_id or not raw_id.strip():
+            return None
+        state = self._read_state()
+        if raw_id in state:
+            return raw_id
+        for record in state.values():
+            if record.codexSessionId and record.codexSessionId == raw_id:
+                return record.id
+        return None
+
     def get_view(self, session_id: str) -> SessionView | None:
-        session = self.get_session(session_id)
-        if session is None:
+        canonical_id = self.resolve_session_id(session_id)
+        if canonical_id is None:
             return None
         return SessionView(
-            session=session,
-            latestTurnStatus=self._latest_turn_status(session_id),
-            latestTurnId=self._latest_turn_id(session_id),
+            session=self.get_session(canonical_id),
+            latestTurnStatus=self._latest_turn_status(canonical_id),
+            latestTurnId=self._latest_turn_id(canonical_id),
         )
 
     def list_views(

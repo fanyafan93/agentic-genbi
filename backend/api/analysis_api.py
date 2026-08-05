@@ -456,11 +456,11 @@ def create_app(
         body never carries a session id; the URL is the single
         source of truth.
         """
-        view = configured_session_catalog.get_view(session_id)
-        if view is None:
+        canonical_id = configured_session_catalog.resolve_session_id(session_id)
+        if canonical_id is None:
             raise HTTPException(status_code=404, detail="analysis_session_not_found")
         if body.title is not None:
-            configured_session_catalog.rename_session(session_id, body.title)
+            configured_session_catalog.rename_session(canonical_id, body.title)
         if body.status is not None:
             if body.status not in {"active", "archived"}:
                 raise HTTPException(
@@ -468,10 +468,10 @@ def create_app(
                     detail="session_status_invalid: only 'active' or 'archived' are accepted",
                 )
             if body.status == "archived":
-                configured_session_catalog.archive_session(session_id)
+                configured_session_catalog.archive_session(canonical_id)
             else:
-                configured_session_catalog.reactivate_session(session_id)
-        refreshed = configured_session_catalog.get_view(session_id)
+                configured_session_catalog.reactivate_session(canonical_id)
+        refreshed = configured_session_catalog.get_view(canonical_id)
         assert refreshed is not None
         return {"session": _session_view_to_thread_dict(refreshed, configured_codex_projection_store)}
 
@@ -479,10 +479,13 @@ def create_app(
     def delete_analysis_session(session_id: str) -> dict[str, Any]:
         """Delete a session (and its turns + projections via the
         catalog's cascade hook)."""
-        deleted = configured_session_catalog.delete_session(session_id)
+        canonical_id = configured_session_catalog.resolve_session_id(session_id)
+        if canonical_id is None:
+            raise HTTPException(status_code=404, detail="analysis_session_not_found")
+        deleted = configured_session_catalog.delete_session(canonical_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="analysis_session_not_found")
-        return {"deleted": True, "session_id": session_id}
+        return {"deleted": True, "session_id": canonical_id}
 
     @app.post("/api/analysis/sessions/{session_id}/turns")
     async def create_session_turn(
@@ -493,23 +496,44 @@ def create_app(
 
         The session id comes from the URL; the body never carries
         a session id (no ``session_id`` / ``conversation_id`` /
-        ``task_id`` aliases).
+        ``task_id`` aliases). The URL may carry either the
+        ``analysis_threads.id`` (legacy GenBI alias) or the
+        ``codex_session_id`` (new contract). When the row already
+        exists we resolve the canonical row id + its
+        ``codex_session_id`` and forward the Codex-side id to the
+        runtime, so projections land under the canonical row. When
+        the row does not exist (e.g. a brand-new id handed in by
+        a client that skipped the sessionless start), the runtime
+        lazy-registers it during ``_astream_runtime_events``; the
+        URL id is treated as the Codex-side id in that case.
         """
         if not session_id.strip():
             raise HTTPException(status_code=400, detail="session_id_required")
+        view = configured_session_catalog.get_view(session_id)
+        if view is not None:
+            # The row is the source of truth; the runtime must see
+            # the Codex-issued id, never the legacy GenBI alias.
+            codex_session_id = view.session.codexSessionId or view.session.id
+        else:
+            codex_session_id = session_id
         request = AnalysisTurnRequest(
             question=body.message.strip(),
-            session_id=session_id,
+            session_id=codex_session_id,
             user_id=body.user_id,
             turn_kind=str(body.turn_kind or "message").strip().lower() or "message",  # type: ignore[arg-type]
-            metadata={**(body.metadata or {}), "domain": "analysis_task", "session_id": session_id, "codex_session_id": session_id},
+            metadata={
+                **(body.metadata or {}),
+                "domain": "analysis_task",
+                "session_id": codex_session_id,
+                "codex_session_id": codex_session_id,
+            },
         )
         return await _create_analysis_turn_payload(
             configured_analysis_runtime,
             configured_session_catalog, configured_codex_projection_store,
             configured_interactive_report_store,
             request,
-            session_id=session_id,
+            session_id=codex_session_id,
         )
 
     @app.post("/api/analysis/sessions/{session_id}/cancel")
@@ -521,11 +545,11 @@ def create_app(
         row (if any) is closed through the projection store when
         the Runtime writes its terminal event.
         """
-        view = configured_session_catalog.get_view(session_id)
-        if view is None:
+        canonical_id = configured_session_catalog.resolve_session_id(session_id)
+        if canonical_id is None:
             raise HTTPException(status_code=404, detail="analysis_session_not_found")
-        configured_session_catalog.archive_session(session_id)
-        refreshed = configured_session_catalog.get_view(session_id)
+        configured_session_catalog.archive_session(canonical_id)
+        refreshed = configured_session_catalog.get_view(canonical_id)
         assert refreshed is not None
         return {"session": _session_view_to_thread_dict(refreshed, configured_codex_projection_store)}
 
