@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -13,6 +16,8 @@ from backend.harness.minimax_codex_adapter import (
     adapter_enabled,
     _iter_rewritten_sse,
     _rewrite_model_name,
+    proxy_minimax_response,
+    report_build_no_progress_response,
     rewrite_request_body,
     rewrite_response_event,
     rewrite_sse_chunk_text,
@@ -30,6 +35,23 @@ class MinimaxCodexAdapterTest(unittest.TestCase):
             "http://backend/proxy/v1",
         )
 
+    def test_report_build_no_progress_response_is_deterministic(
+        self,
+    ) -> None:
+        status, headers, payload = (
+            report_build_no_progress_response()
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(
+            headers["content-type"],
+            "application/json",
+        )
+        self.assertEqual(
+            json.loads(payload)["error"]["code"],
+            "report_build_no_progress",
+        )
+
     def test_rewrite_codex_auto_review_model_to_configured_minimax_model(self) -> None:
         self.assertEqual(_rewrite_model_name("codex-auto-review", {"GENBI_CODEX_AUTO_REVIEW_MODEL": "MiniMax-Review"}), "MiniMax-Review")
         self.assertEqual(_rewrite_model_name("codex-auto-review", {"GENBI_ANALYSIS_MODEL": "MiniMax-M3"}), "MiniMax-M3")
@@ -41,6 +63,201 @@ class MinimaxCodexAdapterTest(unittest.TestCase):
 
         self.assertEqual(rewritten["model"], "MiniMax-M3")
         self.assertEqual(maps, [])
+
+    def test_proxy_explicit_upstream_snapshot_overrides_environment(self) -> None:
+        captured: dict[str, object] = {}
+
+        class Response:
+            status = 200
+            headers = {"content-type": "application/json"}
+
+            def read(self) -> bytes:
+                return b'{"id":"response-from-db-connection"}'
+
+        def open_request(request: object, *, timeout: float) -> Response:
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return Response()
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "GENBI_MINIMAX_UPSTREAM_BASE_URL": "https://env.example/v1",
+                    "GENBI_MINIMAX_UPSTREAM_API_KEY": "env-secret",
+                },
+                clear=False,
+            ),
+            patch(
+                "backend.harness.minimax_codex_adapter.urllib.request.urlopen",
+                side_effect=open_request,
+            ),
+        ):
+            status, _, payload = proxy_minimax_response(
+                b'{"model":"MiniMax-M3","input":"ping"}',
+                stream=False,
+                upstream_base_url="https://db.example/v1/",
+                upstream_api_key="db-secret",
+            )
+
+        request = captured["request"]
+        self.assertEqual(status, 200)
+        self.assertEqual(request.full_url, "https://db.example/v1/responses")
+        self.assertEqual(request.get_header("Authorization"), "Bearer db-secret")
+        self.assertNotIn(b"db-secret", payload)
+        self.assertNotIn(b"env-secret", payload)
+
+    def test_proxy_uses_environment_when_explicit_snapshot_is_absent(self) -> None:
+        captured: dict[str, object] = {}
+
+        class Response:
+            status = 200
+            headers = {"content-type": "application/json"}
+
+            def read(self) -> bytes:
+                return b'{"id":"response-from-env-connection"}'
+
+        def open_request(request: object, *, timeout: float) -> Response:
+            captured["request"] = request
+            return Response()
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "GENBI_MINIMAX_UPSTREAM_BASE_URL": "https://env.example/v1/",
+                    "GENBI_MINIMAX_UPSTREAM_API_KEY": "env-secret",
+                },
+                clear=False,
+            ),
+            patch(
+                "backend.harness.minimax_codex_adapter.urllib.request.urlopen",
+                side_effect=open_request,
+            ),
+        ):
+            status, _, payload = proxy_minimax_response(
+                b'{"model":"MiniMax-M3","input":"ping"}',
+                stream=False,
+            )
+
+        request = captured["request"]
+        self.assertEqual(status, 200)
+        self.assertEqual(request.full_url, "https://env.example/v1/responses")
+        self.assertEqual(request.get_header("Authorization"), "Bearer env-secret")
+        self.assertNotIn(b"env-secret", payload)
+
+    def test_proxy_redacts_explicit_key_from_upstream_error_response(self) -> None:
+        upstream_error = urllib.error.HTTPError(
+            "https://db.example/v1/responses",
+            401,
+            "Unauthorized",
+            {"content-type": "application/json"},
+            io.BytesIO(b'{"error":"rejected db-secret"}'),
+        )
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"GENBI_MINIMAX_UPSTREAM_API_KEY": "env-secret"},
+                clear=False,
+            ),
+            patch(
+                "backend.harness.minimax_codex_adapter.urllib.request.urlopen",
+                side_effect=upstream_error,
+            ),
+        ):
+            status, _, payload = proxy_minimax_response(
+                b'{"model":"MiniMax-M3","input":"ping"}',
+                stream=False,
+                upstream_base_url="https://db.example/v1",
+                upstream_api_key="db-secret",
+            )
+
+        self.assertEqual(status, 401)
+        self.assertNotIn(b"db-secret", payload)
+        self.assertIn(b"[REDACTED]", payload)
+
+    def test_proxy_redacts_explicit_key_from_success_response(self) -> None:
+        class Response:
+            status = 200
+            headers = {"content-type": "application/json"}
+
+            def read(self) -> bytes:
+                return b'{"output_text":"unexpected db-secret echo"}'
+
+        with patch(
+            "backend.harness.minimax_codex_adapter.urllib.request.urlopen",
+            return_value=Response(),
+        ):
+            status, _, payload = proxy_minimax_response(
+                b'{"model":"MiniMax-M3","input":"ping"}',
+                stream=False,
+                upstream_base_url="https://db.example/v1",
+                upstream_api_key="db-secret",
+            )
+
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"db-secret", payload)
+        self.assertIn(b"[REDACTED]", payload)
+
+    def test_proxy_redacts_explicit_key_from_stream_response(self) -> None:
+        class Response:
+            status = 200
+            headers = {"content-type": "text/event-stream"}
+
+            def __init__(self) -> None:
+                self.chunks = [
+                    b'data: {"type":"response.output_text.delta","delta":"db-secret"}\n\n'
+                ]
+
+            def read(self, size: int) -> bytes:
+                return self.chunks.pop(0) if self.chunks else b""
+
+            def close(self) -> None:
+                return None
+
+        with patch(
+            "backend.harness.minimax_codex_adapter.urllib.request.urlopen",
+            return_value=Response(),
+        ):
+            status, _, payload = proxy_minimax_response(
+                b'{"model":"MiniMax-M3","input":"ping"}',
+                stream=True,
+                upstream_base_url="https://db.example/v1",
+                upstream_api_key="db-secret",
+            )
+
+        response_body = b"".join(payload)
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"db-secret", response_body)
+        self.assertIn(b"[REDACTED]", response_body)
+
+    def test_proxy_redacts_explicit_key_from_stream_error_event(self) -> None:
+        class Response:
+            status = 200
+            headers = {"content-type": "text/event-stream"}
+
+            def read(self, size: int) -> bytes:
+                raise OSError("connection failed for db-secret")
+
+            def close(self) -> None:
+                return None
+
+        with patch(
+            "backend.harness.minimax_codex_adapter.urllib.request.urlopen",
+            return_value=Response(),
+        ):
+            status, _, payload = proxy_minimax_response(
+                b'{"model":"MiniMax-M3","input":"ping"}',
+                stream=True,
+                upstream_base_url="https://db.example/v1",
+                upstream_api_key="db-secret",
+            )
+
+        response_body = b"".join(payload)
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"db-secret", response_body)
+        self.assertIn(b"[REDACTED]", response_body)
 
     def test_rewrite_request_flattens_namespace_tools(self) -> None:
         body = {

@@ -38,6 +38,8 @@ Agentic GenBI 是一个围绕业务问题展开的 Agentic BI 分析工作台。
 | `Analysis Asset` | Report 之外的可复用分析资产，如 SQL、数据快照、分析路径和 `SKILL.md`。 |
 | `Report Source` | 可选的 `turnId`；存在时可反查来源 Session，不存在时 Report 仍可独立保存和展示。 |
 
+Report 的 list 明细表可以通过非空 `exportColumns` 显式开启“导出 Excel”。导出使用当前 Report 筛选、列头筛选和排序，由后端按声明列重新查询并生成 `.xlsx`；Pivot 和未声明导出列的表格不显示该操作，分组汇总表默认不配置导出列。首期为同步下载，单次最多 10 万行。
+
 ## 最终边界
 
 Codex 负责：
@@ -81,4 +83,4 @@ GenBI 负责：
 - 不把浏览器端隐藏按钮、筛选或提示词当安全边界。
 - 不在前端 mock 中伪装真实权限、真实共享或真实审批。
 - 不自研 Codex 已经提供的通用 Agent 工程底座。
-- Report 暂不做版本管理、Excel 导出、租户/RLS 和复杂审计。
+- Report 暂不做版本管理、异步/百万行 Excel 导出、自动拆 Sheet、租户/RLS 和复杂审计。

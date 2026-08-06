@@ -36,6 +36,34 @@ class FakeQueryRunner:
         return [{"region": "华东", "amount": 1200.5}]
 
 
+class BuildQuerySource:
+    def __init__(self, queries: dict[str, Any]) -> None:
+        self.queries = queries
+
+
+def test_query_service_accepts_report_build_query_source() -> None:
+    source = BuildQuerySource(
+        {
+            "q-sales": {
+                "dataSource": "mysql",
+                "sql": "SELECT region, amount FROM sales",
+                "parameters": {},
+                "pagination": False,
+            }
+        }
+    )
+    runner = FakeQueryRunner()
+
+    result = ReportQueryService(runner, max_rows=50).execute(
+        source,
+        "q-sales",
+        filters={},
+    )
+
+    assert result["rows"] == [{"region": "华东", "amount": 1200.5}]
+    assert runner.calls[0][0] == "mysql"
+
+
 @pytest.mark.parametrize(
     "sql",
     [
@@ -162,6 +190,83 @@ def test_paginated_query_returns_rows_columns_and_total(
     assert page_params["genbi_offset"] == 5
 
 
+def test_paginated_query_applies_declared_column_filters_and_sort(
+    tmp_path: Path,
+) -> None:
+    config = report_config()
+    query = config["queries"]["sales-query"]
+    query["pagination"] = True
+    query["controls"] = {
+        "sortableFields": ["amount"],
+        "filterableFields": ["region"],
+    }
+    report = ReportStore(tmp_path / "reports.json").create_report(
+        config,
+        owner_id="user-1",
+    )
+    runner = FakeQueryRunner(count=7)
+
+    ReportQueryService(runner, max_rows=1000).execute(
+        report,
+        "sales-query",
+        filters={"region": "华东"},
+        page=1,
+        page_size=20,
+        sort={"field": "amount", "direction": "desc"},
+        column_filters={"region": ["华东", "华南"]},
+    )
+
+    _, count_sql, count_params = runner.calls[0]
+    _, page_sql, page_params = runner.calls[1]
+    assert (
+        "WHERE `region` IN "
+        "(%(genbi_column_region_0)s, %(genbi_column_region_1)s)"
+        in count_sql
+    )
+    assert "ORDER BY `amount` DESC" not in count_sql
+    assert "ORDER BY `amount` DESC" in page_sql
+    assert (
+        page_sql.index("AS genbi_page")
+        < page_sql.rindex("ORDER BY `amount` DESC")
+        < page_sql.index("LIMIT %(genbi_limit)s")
+    )
+    assert count_params == {
+        "region": "华东",
+        "genbi_column_region_0": "华东",
+        "genbi_column_region_1": "华南",
+    }
+    assert page_params["genbi_limit"] == 20
+
+
+def test_query_controls_reject_undeclared_fields(tmp_path: Path) -> None:
+    config = report_config()
+    query = config["queries"]["sales-query"]
+    query["pagination"] = True
+    query["controls"] = {
+        "sortableFields": ["amount"],
+        "filterableFields": ["region"],
+    }
+    report = ReportStore(tmp_path / "reports.json").create_report(
+        config,
+        owner_id="user-1",
+    )
+
+    with pytest.raises(ReportFilterError, match="not sortable"):
+        ReportQueryService(FakeQueryRunner()).execute(
+            report,
+            "sales-query",
+            filters={"region": "华东"},
+            sort={"field": "region", "direction": "asc"},
+        )
+    with pytest.raises(ReportFilterError, match="not filterable"):
+        ReportQueryService(FakeQueryRunner()).execute(
+            report,
+            "sales-query",
+            filters={"region": "华东"},
+            column_filters={"amount": ["1200.5"]},
+        )
+
+
 def test_non_paginated_query_is_capped_without_changing_saved_sql(
     tmp_path: Path,
 ) -> None:
@@ -190,3 +295,70 @@ def test_non_paginated_query_is_capped_without_changing_saved_sql(
     assert "LIMIT %(genbi_limit)s" in sql
     assert params["genbi_limit"] == 100
 
+
+def test_export_query_selects_declared_columns_and_applies_controls(
+    tmp_path: Path,
+) -> None:
+    config = report_config()
+    query = config["queries"]["sales-query"]
+    query["controls"] = {
+        "sortableFields": ["amount"],
+        "filterableFields": ["region"],
+    }
+    report = ReportStore(tmp_path / "reports.json").create_report(
+        config,
+        owner_id="user-1",
+    )
+    runner = FakeQueryRunner()
+
+    rows = ReportQueryService(runner, max_rows=1000).execute_export(
+        report,
+        "sales-query",
+        filters={"region": "华东"},
+        fields=["region", "amount"],
+        max_rows=100_000,
+        sort={"field": "amount", "direction": "desc"},
+        column_filters={"region": ["华东"]},
+    )
+
+    assert rows == [{"region": "华东", "amount": 1200.5}]
+    _, sql, params = runner.calls[0]
+    assert "SELECT `region`, `amount`" in sql
+    assert "ORDER BY `amount` DESC" in sql
+    assert params["genbi_limit"] == 100_001
+    assert params["genbi_column_region_0"] == "华东"
+
+
+def test_export_query_rejects_results_above_limit() -> None:
+    class OversizedRunner(FakeQueryRunner):
+        def run(
+            self,
+            data_source: str,
+            sql: str,
+            params: dict[str, Any],
+        ) -> list[dict[str, Any]]:
+            self.calls.append((data_source, sql, params))
+            return [
+                {"region": f"区域-{index}"}
+                for index in range(4)
+            ]
+
+    source = BuildQuerySource(
+        {
+            "q-sales": {
+                "dataSource": "mysql",
+                "sql": "SELECT region FROM sales",
+                "parameters": {},
+                "pagination": True,
+            }
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="3"):
+        ReportQueryService(OversizedRunner()).execute_export(
+            source,
+            "q-sales",
+            filters={},
+            fields=["region"],
+            max_rows=3,
+        )

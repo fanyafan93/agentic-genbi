@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict
-from datetime import UTC, datetime
+from collections.abc import Callable
+from dataclasses import asdict, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
@@ -29,6 +30,9 @@ from backend.reports.models import (
     report_to_payload,
     share_to_payload,
 )
+from backend.reports.build_models import (
+    ReportBuildRecord,
+)
 from backend.reports.schema import report_config_payload
 from backend.business_semantics.knowledge_store import KnowledgeRecord, KnowledgeStore
 
@@ -41,6 +45,7 @@ POSTGRES_ANALYSIS_ASSET_TABLE = "analysis_assets"
 POSTGRES_ARTIFACT_LINEAGE_TABLE = "analysis_artifact_lineage"
 POSTGRES_REPORT_TABLE = "reports"
 POSTGRES_REPORT_SHARE_TABLE = "report_shares"
+POSTGRES_REPORT_BUILD_TABLE = "report_builds"
 
 
 def postgres_persistence_enabled() -> bool:
@@ -96,6 +101,16 @@ def build_postgres_report_store() -> "PostgresReportStore":
     if not database_url:
         raise RuntimeError("GENBI_DATABASE_URL or AUTH_DATABASE_URL is required for Postgres report persistence.")
     return PostgresReportStore(database_url)
+
+
+def build_postgres_report_build_store() -> "PostgresReportBuildStore":
+    database_url = get_postgres_database_url()
+    if not database_url:
+        raise RuntimeError(
+            "GENBI_DATABASE_URL or AUTH_DATABASE_URL is required "
+            "for Postgres ReportBuild persistence."
+        )
+    return PostgresReportBuildStore(database_url)
 
 
 def build_postgres_analysis_asset_store() -> "PostgresAnalysisAssetStore":
@@ -848,6 +863,285 @@ class PostgresAnalysisAssetStore(AnalysisAssetStore):
             )
 
 
+class PostgresReportBuildStore:
+    def __init__(self, database_url: str) -> None:
+        self.database_url = _normalize_postgres_url(database_url)
+        self.ensure_schema()
+
+    def ensure_schema(self) -> None:
+        with _connect(self.database_url) as conn:
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {POSTGRES_REPORT_BUILD_TABLE} (
+                    id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL
+                        REFERENCES {POSTGRES_THREAD_TABLE}(id)
+                        ON DELETE CASCADE,
+                    turn_id TEXT NOT NULL
+                        REFERENCES {POSTGRES_TURN_TABLE}(id)
+                        ON DELETE CASCADE,
+                    target_report_id TEXT
+                        REFERENCES {POSTGRES_REPORT_TABLE}(id)
+                        ON DELETE SET NULL,
+                    status TEXT NOT NULL,
+                    content JSONB NOT NULL,
+                    validation_errors JSONB NOT NULL
+                        DEFAULT '[]'::jsonb,
+                    revision BIGINT NOT NULL DEFAULT 0,
+                    published_report_id TEXT
+                        REFERENCES {POSTGRES_REPORT_TABLE}(id)
+                        ON DELETE SET NULL,
+                    last_successful_step TEXT,
+                    step_attempts JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    expires_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS "
+                f"{POSTGRES_REPORT_BUILD_TABLE}_session_id_updated_at_idx "
+                f"ON {POSTGRES_REPORT_BUILD_TABLE} "
+                "(session_id, updated_at DESC)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS "
+                f"{POSTGRES_REPORT_BUILD_TABLE}_turn_id_idx "
+                f"ON {POSTGRES_REPORT_BUILD_TABLE} (turn_id)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS "
+                f"{POSTGRES_REPORT_BUILD_TABLE}_owner_id_status_updated_at_idx "
+                f"ON {POSTGRES_REPORT_BUILD_TABLE} "
+                "(owner_id, status, updated_at DESC)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS "
+                f"{POSTGRES_REPORT_BUILD_TABLE}_expires_at_idx "
+                f"ON {POSTGRES_REPORT_BUILD_TABLE} (expires_at)"
+            )
+
+    def create_build(
+        self,
+        record: ReportBuildRecord,
+    ) -> ReportBuildRecord:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"""
+                INSERT INTO {POSTGRES_REPORT_BUILD_TABLE} (
+                    id, owner_id, session_id, turn_id,
+                    target_report_id, status, content,
+                    validation_errors, revision,
+                    published_report_id, last_successful_step,
+                    step_attempts, created_at, updated_at, expires_at
+                ) VALUES (
+                    %(id)s, %(owner_id)s, %(session_id)s, %(turn_id)s,
+                    %(target_report_id)s, %(status)s, %(content)s,
+                    %(validation_errors)s, %(revision)s,
+                    %(published_report_id)s, %(last_successful_step)s,
+                    %(step_attempts)s, %(created_at)s, %(updated_at)s,
+                    %(expires_at)s
+                )
+                RETURNING *
+                """,
+                _report_build_params(record),
+            ).fetchone()
+        if not row:
+            raise RuntimeError("report_build_create_failed")
+        return _report_build_from_row(row)
+
+    def get_build(self, build_id: str) -> ReportBuildRecord | None:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"SELECT * FROM {POSTGRES_REPORT_BUILD_TABLE} "
+                "WHERE id = %(id)s",
+                {"id": build_id},
+            ).fetchone()
+        return _report_build_from_row(row) if row else None
+
+    def get_active_for_session(
+        self,
+        session_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> ReportBuildRecord | None:
+        clauses = [
+            "session_id = %(session_id)s",
+            "status IN ('building', 'validating', 'failed')",
+            "expires_at > now()",
+        ]
+        params: dict[str, Any] = {"session_id": session_id}
+        if owner_id:
+            clauses.append("owner_id = %(owner_id)s")
+            params["owner_id"] = owner_id
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"""
+                SELECT * FROM {POSTGRES_REPORT_BUILD_TABLE}
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, revision DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        return _report_build_from_row(row) if row else None
+
+    def mutate_build(
+        self,
+        build_id: str,
+        *,
+        owner_id: str,
+        mutation: Callable[
+            [ReportBuildRecord],
+            ReportBuildRecord,
+        ],
+    ) -> ReportBuildRecord | None:
+        with _connect(self.database_url) as conn:
+            with conn.transaction():
+                row = conn.execute(
+                    f"""
+                    SELECT * FROM {POSTGRES_REPORT_BUILD_TABLE}
+                    WHERE id = %(id)s AND owner_id = %(owner_id)s
+                    FOR UPDATE
+                    """,
+                    {"id": build_id, "owner_id": owner_id},
+                ).fetchone()
+                if not row:
+                    return None
+                current = _report_build_from_row(row)
+                updated = mutation(current)
+                if (
+                    updated.id != current.id
+                    or updated.ownerId != current.ownerId
+                    or updated.sessionId != current.sessionId
+                    or updated.turnId != current.turnId
+                ):
+                    raise ValueError("report_build_identity_changed")
+                saved = conn.execute(
+                    f"""
+                    UPDATE {POSTGRES_REPORT_BUILD_TABLE}
+                    SET status = %(status)s,
+                        content = %(content)s,
+                        validation_errors = %(validation_errors)s,
+                        revision = %(revision)s,
+                        published_report_id = %(published_report_id)s,
+                        last_successful_step = %(last_successful_step)s,
+                        step_attempts = %(step_attempts)s,
+                        updated_at = %(updated_at)s,
+                        expires_at = %(expires_at)s
+                    WHERE id = %(id)s AND owner_id = %(owner_id)s
+                    RETURNING *
+                    """,
+                    _report_build_params(updated),
+                ).fetchone()
+        return _report_build_from_row(saved) if saved else None
+
+    def publish_build(
+        self,
+        build_id: str,
+        *,
+        owner_id: str,
+        turn_id: str,
+    ) -> tuple[ReportBuildRecord, ReportRecord] | None:
+        with _connect(self.database_url) as conn:
+            with conn.transaction():
+                row = conn.execute(
+                    f"""
+                    SELECT * FROM {POSTGRES_REPORT_BUILD_TABLE}
+                    WHERE id = %(id)s AND owner_id = %(owner_id)s
+                    FOR UPDATE
+                    """,
+                    {"id": build_id, "owner_id": owner_id},
+                ).fetchone()
+                if not row:
+                    return None
+                current = _report_build_from_row(row)
+                if current.publishedReportId:
+                    report_row = conn.execute(
+                        f"SELECT * FROM {POSTGRES_REPORT_TABLE} "
+                        "WHERE id = %(id)s AND deleted_at IS NULL",
+                        {"id": current.publishedReportId},
+                    ).fetchone()
+                    if not report_row:
+                        raise ValueError("published_report_not_found")
+                    return current, _report_from_row(report_row)
+
+                normalized = report_config_payload(current.content)
+                report_params = _report_params(
+                    normalized,
+                    report_id=f"report_{uuid4().hex}",
+                    owner_id=owner_id,
+                    turn_id=turn_id,
+                )
+                report_row = conn.execute(
+                    f"""
+                    INSERT INTO {POSTGRES_REPORT_TABLE} (
+                        id, title, subtitle, owner_id, turn_id,
+                        layout, filters, charts, tables, queries
+                    ) VALUES (
+                        %(id)s, %(title)s, %(subtitle)s,
+                        %(owner_id)s, %(turn_id)s,
+                        %(layout)s, %(filters)s, %(charts)s,
+                        %(tables)s, %(queries)s
+                    )
+                    RETURNING *
+                    """,
+                    report_params,
+                ).fetchone()
+                if not report_row:
+                    raise RuntimeError("report_create_failed")
+                now = datetime.now(UTC)
+                published = replace(
+                    current,
+                    status="published",
+                    content=normalized,
+                    validationErrors=[],
+                    revision=current.revision + 1,
+                    publishedReportId=str(report_row["id"]),
+                    lastSuccessfulStep="publish_report_build",
+                    updatedAt=now.isoformat(),
+                    expiresAt=(now + timedelta(hours=24)).isoformat(),
+                )
+                build_row = conn.execute(
+                    f"""
+                    UPDATE {POSTGRES_REPORT_BUILD_TABLE}
+                    SET status = %(status)s,
+                        content = %(content)s,
+                        validation_errors = %(validation_errors)s,
+                        revision = %(revision)s,
+                        published_report_id = %(published_report_id)s,
+                        last_successful_step = %(last_successful_step)s,
+                        step_attempts = %(step_attempts)s,
+                        updated_at = %(updated_at)s,
+                        expires_at = %(expires_at)s
+                    WHERE id = %(id)s AND owner_id = %(owner_id)s
+                    RETURNING *
+                    """,
+                    _report_build_params(published),
+                ).fetchone()
+                if not build_row:
+                    raise RuntimeError("report_build_publish_failed")
+                return (
+                    _report_build_from_row(build_row),
+                    _report_from_row(report_row),
+                )
+
+    def cleanup_expired(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        with _connect(self.database_url) as conn:
+            result = conn.execute(
+                f"DELETE FROM {POSTGRES_REPORT_BUILD_TABLE} "
+                "WHERE expires_at <= %(now)s",
+                {"now": now or datetime.now(UTC)},
+            )
+        return result.rowcount or 0
+
+
 class PostgresReportStore:
     def __init__(self, database_url: str) -> None:
         self.database_url = _normalize_postgres_url(database_url)
@@ -876,9 +1170,20 @@ class PostgresReportStore:
                     tables JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                     queries JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    deleted_at TIMESTAMPTZ,
+                    is_example BOOLEAN NOT NULL DEFAULT false
                 )
                 """
+            )
+            conn.execute(
+                f"ALTER TABLE {POSTGRES_REPORT_TABLE} "
+                "ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ"
+            )
+            conn.execute(
+                f"ALTER TABLE {POSTGRES_REPORT_TABLE} "
+                "ADD COLUMN IF NOT EXISTS is_example BOOLEAN "
+                "NOT NULL DEFAULT false"
             )
             conn.execute(
                 f"""
@@ -965,7 +1270,9 @@ class PostgresReportStore:
                     tables = %(tables)s,
                     queries = %(queries)s,
                     updated_at = now()
-                WHERE id = %(id)s AND owner_id = %(owner_id)s
+                WHERE id = %(id)s
+                  AND owner_id = %(owner_id)s
+                  AND deleted_at IS NULL
                 RETURNING *
                 """,
                 params,
@@ -979,7 +1286,7 @@ class PostgresReportStore:
         turn_ids: set[str] | None = None,
         limit: int = 50,
     ) -> list[ReportRecord]:
-        clauses: list[str] = []
+        clauses: list[str] = ["deleted_at IS NULL"]
         params: dict[str, Any] = {"limit": limit}
         if owner_id:
             clauses.append("owner_id = %(owner_id)s")
@@ -1001,7 +1308,8 @@ class PostgresReportStore:
     def get_report(self, report_id: str) -> ReportRecord | None:
         with _connect(self.database_url) as conn:
             row = conn.execute(
-                f"SELECT * FROM {POSTGRES_REPORT_TABLE} WHERE id = %(id)s",
+                f"SELECT * FROM {POSTGRES_REPORT_TABLE} "
+                "WHERE id = %(id)s AND deleted_at IS NULL",
                 {"id": report_id},
             ).fetchone()
         return _report_from_row(row) if row else None
@@ -1010,13 +1318,40 @@ class PostgresReportStore:
         with _connect(self.database_url) as conn:
             row = conn.execute(
                 f"""
-                DELETE FROM {POSTGRES_REPORT_TABLE}
+                UPDATE {POSTGRES_REPORT_TABLE}
+                SET deleted_at = COALESCE(deleted_at, now())
                 WHERE id = %(id)s AND owner_id = %(owner_id)s
                 RETURNING id
                 """,
                 {"id": report_id, "owner_id": owner_id},
             ).fetchone()
         return row is not None
+
+    def set_report_example(
+        self,
+        report_id: str,
+        *,
+        owner_id: str,
+        is_example: bool,
+    ) -> ReportRecord | None:
+        with _connect(self.database_url) as conn:
+            row = conn.execute(
+                f"""
+                UPDATE {POSTGRES_REPORT_TABLE}
+                SET is_example = %(is_example)s,
+                    updated_at = now()
+                WHERE id = %(id)s
+                  AND owner_id = %(owner_id)s
+                  AND deleted_at IS NULL
+                RETURNING *
+                """,
+                {
+                    "id": report_id,
+                    "owner_id": owner_id,
+                    "is_example": bool(is_example),
+                },
+            ).fetchone()
+        return _report_from_row(row) if row else None
 
     def share_report(
         self,
@@ -1031,7 +1366,8 @@ class PostgresReportStore:
         with _connect(self.database_url) as conn:
             report = conn.execute(
                 f"SELECT 1 FROM {POSTGRES_REPORT_TABLE} "
-                "WHERE id = %(id)s AND owner_id = %(owner_id)s",
+                "WHERE id = %(id)s AND owner_id = %(owner_id)s "
+                "AND deleted_at IS NULL",
                 {"id": report_id, "owner_id": owner_id},
             ).fetchone()
             if not report:
@@ -1058,7 +1394,8 @@ class PostgresReportStore:
         with _connect(self.database_url) as conn:
             report = conn.execute(
                 f"SELECT 1 FROM {POSTGRES_REPORT_TABLE} "
-                "WHERE id = %(id)s AND owner_id = %(owner_id)s",
+                "WHERE id = %(id)s AND owner_id = %(owner_id)s "
+                "AND deleted_at IS NULL",
                 {"id": report_id, "owner_id": owner_id},
             ).fetchone()
             if not report:
@@ -1080,6 +1417,8 @@ class PostgresReportStore:
                 f"""
                 SELECT * FROM {POSTGRES_REPORT_TABLE}
                 WHERE owner_id = %(user_id)s
+                  AND is_example = false
+                  AND deleted_at IS NULL
                 ORDER BY updated_at DESC
                 LIMIT %(limit)s
                 """,
@@ -1092,12 +1431,32 @@ class PostgresReportStore:
                 FROM {POSTGRES_REPORT_SHARE_TABLE} AS share
                 JOIN {POSTGRES_REPORT_TABLE} AS report ON report.id = share.report_id
                 WHERE share.recipient_user_id = %(user_id)s
+                  AND report.is_example = false
+                  AND report.deleted_at IS NULL
                 ORDER BY report.updated_at DESC
                 LIMIT %(limit)s
                 """,
                 {"user_id": user_id, "limit": limit},
             ).fetchall()
+            example_rows = conn.execute(
+                f"""
+                SELECT * FROM (
+                    SELECT DISTINCT ON (title) *
+                    FROM {POSTGRES_REPORT_TABLE}
+                    WHERE is_example = true
+                      AND deleted_at IS NULL
+                    ORDER BY title, updated_at DESC, id DESC
+                ) AS latest_examples
+                ORDER BY updated_at DESC
+                LIMIT %(limit)s
+                """,
+                {"limit": limit},
+            ).fetchall()
         mine = [_report_from_row(row) for row in mine_rows]
+        examples = [
+            _report_from_row(row)
+            for row in example_rows
+        ]
         shared = [
             {
                 **share_to_payload(_report_share_from_row(row)),
@@ -1111,6 +1470,10 @@ class PostgresReportStore:
                 for report in mine
             ],
             "sharedWithMe": shared,
+            "examples": [
+                {"report": report_to_payload(report)}
+                for report in examples
+            ],
         }
 
 
@@ -1489,6 +1852,28 @@ def _report_params(
     }
 
 
+def _report_build_params(
+    record: ReportBuildRecord,
+) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "owner_id": record.ownerId,
+        "session_id": record.sessionId,
+        "turn_id": record.turnId,
+        "target_report_id": record.targetReportId,
+        "status": record.status,
+        "content": _jsonb(record.content),
+        "validation_errors": _jsonb(record.validationErrors),
+        "revision": record.revision,
+        "published_report_id": record.publishedReportId,
+        "last_successful_step": record.lastSuccessfulStep,
+        "step_attempts": _jsonb(record.stepAttempts),
+        "created_at": record.createdAt,
+        "updated_at": record.updatedAt,
+        "expires_at": record.expiresAt,
+    }
+
+
 def _session_record_from_row(row: dict[str, Any]) -> SessionRecord:
     codex_session_id = row.get("codex_session_id") or row.get("codex_thread_id")
     return SessionRecord(
@@ -1623,6 +2008,50 @@ def _report_from_row(row: dict[str, Any]) -> ReportRecord:
         queries=dict(row["queries"] or {}),
         createdAt=_iso(row["created_at"]) or "",
         updatedAt=_iso(row["updated_at"]) or "",
+        isExample=bool(row.get("is_example", False)),
+    )
+
+
+def _report_build_from_row(
+    row: dict[str, Any],
+) -> ReportBuildRecord:
+    return ReportBuildRecord(
+        id=str(row["id"]),
+        ownerId=str(row["owner_id"]),
+        sessionId=str(row["session_id"]),
+        turnId=str(row["turn_id"]),
+        targetReportId=(
+            str(row["target_report_id"])
+            if row.get("target_report_id")
+            else None
+        ),
+        status=str(row["status"]),
+        content=dict(row.get("content") or {}),
+        validationErrors=[
+            dict(item)
+            for item in row.get("validation_errors") or []
+            if isinstance(item, dict)
+        ],
+        revision=int(row.get("revision") or 0),
+        publishedReportId=(
+            str(row["published_report_id"])
+            if row.get("published_report_id")
+            else None
+        ),
+        lastSuccessfulStep=(
+            str(row["last_successful_step"])
+            if row.get("last_successful_step")
+            else None
+        ),
+        stepAttempts={
+            str(key): int(value)
+            for key, value in dict(
+                row.get("step_attempts") or {}
+            ).items()
+        },
+        createdAt=_iso(row.get("created_at")) or "",
+        updatedAt=_iso(row.get("updated_at")) or "",
+        expiresAt=_iso(row.get("expires_at")) or "",
     )
 
 

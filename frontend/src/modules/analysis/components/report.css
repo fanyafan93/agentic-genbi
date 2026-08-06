@@ -13,8 +13,104 @@
   border-radius: 0;
 }
 
+.report-preview-body .report-canvas > div {
+  min-width: 0;
+}
+
+.report-panel .report-canvas > div {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+
 .report-table-block {
   min-height: 360px;
+}
+
+.report-table-toolbar {
+  display: flex;
+  min-height: 2.25rem;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding-bottom: 0.5rem;
+}
+
+.report-table-toolbar span {
+  color: #b42318;
+  font-size: 0.78rem;
+}
+
+.report-table-toolbar button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 0.42rem 0.75rem;
+}
+
+.report-table-toolbar button:hover:not(:disabled) {
+  border-color: var(--accent-coral);
+  color: var(--accent-coral);
+}
+
+.report-table-toolbar button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.report-table-stage {
+  position: relative;
+  min-width: 0;
+}
+
+.report-table-native-scrollbar {
+  position: absolute;
+  z-index: 4;
+  scrollbar-color: rgba(100, 116, 139, 0.68) rgba(226, 232, 240, 0.72);
+  scrollbar-width: auto;
+}
+
+.report-table-native-scrollbar-horizontal {
+  right: 14px;
+  bottom: 0;
+  left: 0;
+  height: 14px;
+  overflow-x: scroll;
+  overflow-y: hidden;
+}
+
+.report-table-native-scrollbar-horizontal > div {
+  height: 1px;
+}
+
+.report-table-native-scrollbar-vertical {
+  top: 0;
+  right: 0;
+  bottom: 14px;
+  width: 14px;
+  overflow-x: hidden;
+  overflow-y: scroll;
+}
+
+.report-table-native-scrollbar-vertical > div {
+  width: 1px;
+}
+
+.report-table-refreshing {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 2;
+  border: 1px solid color-mix(in srgb, var(--accent-coral) 24%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+  box-shadow: 0 8px 22px rgb(15 23 42 / 12%);
+  color: var(--accent-coral);
+  font-size: 0.78rem;
+  line-height: 1;
+  padding: 0.55rem 0.75rem;
+  pointer-events: none;
 }
 
 .report-query-loading,
@@ -44,4 +140,9 @@
   justify-content: flex-end;
   gap: 0.75rem;
   padding-top: 0.75rem;
+}
+
+.report-page-size-select {
+  min-width: 108px;
+  margin-right: auto;
 }

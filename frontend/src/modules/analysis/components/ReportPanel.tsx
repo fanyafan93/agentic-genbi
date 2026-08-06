@@ -73,14 +73,28 @@ function TableBlock({ tableId }: { tableId: string }) {
   return <ReportTable tableId={tableId} />;
 }
 
-function FilterBlock({ filterIds }: { filterIds: string[] }) {
+function FilterBlock({
+  filterIds,
+  columnSpan,
+}: {
+  filterIds: string[];
+  columnSpan?: unknown;
+}) {
   const {
     report,
     filterValues,
     setFilterValue,
   } = useReportContext();
   return (
-    <div className="report-filter-row" aria-label="报告筛选条件">
+    <div
+      className="report-filter-row"
+      aria-label="报告筛选条件"
+      style={{
+        display: "flex",
+        gridColumn: reportGridColumn(columnSpan),
+        minWidth: 0,
+      }}
+    >
       {filterIds.map((filterId) => {
         const definition = report.filters[filterId];
         if (!definition) return null;
@@ -153,6 +167,7 @@ function ReportFilter({
   return (
     <DatePicker.RangePicker
       aria-label={definition.label}
+      style={{ width: 280, maxWidth: "100%" }}
       value={rangeValue}
       onChange={(next) => onChange(
         filterId,
@@ -169,35 +184,51 @@ export const reportPuckConfig: Config = {
     FilterBlock: {
       fields: {
         filterIds: { type: "text" },
+        columnSpan: { type: "number" },
       },
-      defaultProps: { filterIds: [] },
+      defaultProps: { filterIds: [], columnSpan: 12 },
       render: (props) => (
         <FilterBlock
           filterIds={Array.isArray(props.filterIds)
             ? props.filterIds.map(String)
             : []}
+          columnSpan={props.columnSpan}
         />
       ),
     },
     ChartBlock: {
-      fields: { chartId: { type: "text" } },
-      defaultProps: { chartId: "" },
+      fields: {
+        chartId: { type: "text" },
+        columnSpan: { type: "number" },
+      },
+      defaultProps: { chartId: "", columnSpan: 12 },
       render: (props) => (
         <article
           className="report-chart-block"
           data-testid="report-chart"
+          style={{
+            gridColumn: reportGridColumn(props.columnSpan),
+            minWidth: 0,
+          }}
         >
           <ChartBlock chartId={String(props.chartId)} />
         </article>
       ),
     },
     TableBlock: {
-      fields: { tableId: { type: "text" } },
-      defaultProps: { tableId: "" },
+      fields: {
+        tableId: { type: "text" },
+        columnSpan: { type: "number" },
+      },
+      defaultProps: { tableId: "", columnSpan: 12 },
       render: (props) => (
         <article
           className="report-table-block"
           data-testid="report-table"
+          style={{
+            gridColumn: reportGridColumn(props.columnSpan),
+            minWidth: 0,
+          }}
         >
           <TableBlock tableId={String(props.tableId)} />
         </article>
@@ -226,33 +257,27 @@ export const reportPuckConfig: Config = {
 
 export function ReportPanel({
   taskTitle,
-  running,
   loading = false,
   initialReport,
 }: ReportPanelProps) {
   if (!initialReport) {
-    const busy = loading || running;
     return (
       <section
         className="report-panel report-awaiting"
         aria-label="分析结果"
       >
         <div
-          className={`report-awaiting-body ${busy ? "is-busy" : "is-idle"}`}
+          className={`report-awaiting-body ${loading ? "is-busy" : "is-idle"}`}
           role="status"
         >
-          {busy ? (
+          {loading ? (
             <>
               <span
                 className="report-awaiting-spinner"
                 aria-hidden="true"
               />
-              <strong>{loading ? "报告加载中" : "分析进行中"}</strong>
-              <small>
-                {loading
-                  ? "正在恢复已生成的分析结果。"
-                  : "指标、图表和明细将在分析完成后呈现。"}
-              </small>
+              <strong>报告加载中</strong>
+              <small>正在恢复已生成的分析结果。</small>
             </>
           ) : (
             <>
@@ -310,4 +335,9 @@ function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function reportGridColumn(value: unknown): string {
+  const span = typeof value === "number" ? Math.floor(value) : 12;
+  return span >= 1 && span < 12 ? `span ${span}` : "1 / -1";
 }

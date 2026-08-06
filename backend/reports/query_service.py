@@ -11,9 +11,6 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
 
-from backend.reports.models import ReportRecord
-
-
 PARAMETER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -33,6 +30,10 @@ class ReportQueryExecutionError(RuntimeError):
     pass
 
 
+class ReportExportLimitExceeded(RuntimeError):
+    pass
+
+
 class QueryRunner(Protocol):
     def run(
         self,
@@ -43,10 +44,19 @@ class QueryRunner(Protocol):
         ...
 
 
+class ReportQuerySource(Protocol):
+    queries: Mapping[str, Any]
+
+
 def validate_readonly_sql(sql: str) -> None:
     text = str(sql or "").strip()
     if not text:
         raise UnsafeReportQuery("report query SQL is required")
+    if "${" in text:
+        raise UnsafeReportQuery(
+            "report query parameters must use :name placeholders, "
+            "not ${name} templates"
+        )
     try:
         statements = sqlglot.parse(text, read="mysql")
     except ParseError as exc:
@@ -196,35 +206,51 @@ class ReportQueryService:
 
     def execute(
         self,
-        report: ReportRecord,
+        report: ReportQuerySource,
         query_id: str,
         *,
         filters: Mapping[str, Any],
         page: int = 1,
         page_size: int = 50,
+        sort: Mapping[str, Any] | None = None,
+        column_filters: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         query = report.queries.get(query_id)
         if not isinstance(query, dict):
             raise ReportQueryNotFound(query_id)
         data_source = str(query.get("dataSource") or "").strip()
         sql, params = bind_query_parameters(query, filters)
+        filtered_sql, controlled_params = _apply_column_filters(
+            sql,
+            params,
+            query.get("controls"),
+            column_filters or {},
+        )
+        sort_clause = _sort_clause(
+            query.get("controls"),
+            sort,
+        )
         try:
             if bool(query.get("pagination", False)):
                 count_rows = self._runner.run(
                     data_source,
-                    f"SELECT COUNT(*) AS total FROM ({sql}) AS genbi_count",
-                    dict(params),
+                    (
+                        "SELECT COUNT(*) AS total "
+                        f"FROM ({filtered_sql}) AS genbi_count"
+                    ),
+                    dict(controlled_params),
                 )
                 total = int(count_rows[0].get("total") or 0) if count_rows else 0
                 page_params = {
-                    **params,
+                    **controlled_params,
                     "genbi_limit": page_size,
                     "genbi_offset": (page - 1) * page_size,
                 }
                 rows = self._runner.run(
                     data_source,
                     (
-                        f"SELECT * FROM ({sql}) AS genbi_page "
+                        f"SELECT * FROM ({filtered_sql}) AS genbi_page"
+                        f"{sort_clause} "
                         "LIMIT %(genbi_limit)s OFFSET %(genbi_offset)s"
                     ),
                     page_params,
@@ -235,10 +261,14 @@ class ReportQueryService:
                 rows = self._runner.run(
                     data_source,
                     (
-                        f"SELECT * FROM ({sql}) AS genbi_query "
+                        f"SELECT * FROM ({filtered_sql}) AS genbi_query"
+                        f"{sort_clause} "
                         "LIMIT %(genbi_limit)s"
                     ),
-                    {**params, "genbi_limit": self._max_rows},
+                    {
+                        **controlled_params,
+                        "genbi_limit": self._max_rows,
+                    },
                 )
                 total = len(rows)
                 result_page = 1
@@ -258,6 +288,134 @@ class ReportQueryService:
             "pageSize": result_page_size,
             "total": total,
         }
+
+    def execute_export(
+        self,
+        report: ReportQuerySource,
+        query_id: str,
+        *,
+        filters: Mapping[str, Any],
+        fields: list[str],
+        max_rows: int,
+        sort: Mapping[str, Any] | None = None,
+        column_filters: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        query = report.queries.get(query_id)
+        if not isinstance(query, dict):
+            raise ReportQueryNotFound(query_id)
+        if not fields or any(
+            not isinstance(field, str)
+            or not PARAMETER_NAME.fullmatch(field)
+            for field in fields
+        ):
+            raise ReportFilterError("export fields are invalid")
+        data_source = str(query.get("dataSource") or "").strip()
+        sql, params = bind_query_parameters(query, filters)
+        filtered_sql, controlled_params = _apply_column_filters(
+            sql,
+            params,
+            query.get("controls"),
+            column_filters or {},
+        )
+        sort_clause = _sort_clause(query.get("controls"), sort)
+        selected_fields = ", ".join(f"`{field}`" for field in fields)
+        try:
+            rows = self._runner.run(
+                data_source,
+                (
+                    f"SELECT {selected_fields} FROM ({filtered_sql}) "
+                    f"AS genbi_export{sort_clause} "
+                    "LIMIT %(genbi_limit)s"
+                ),
+                {
+                    **controlled_params,
+                    "genbi_limit": max_rows + 1,
+                },
+            )
+        except (
+            UnsafeReportQuery,
+            ReportFilterError,
+            ReportQueryNotFound,
+        ):
+            raise
+        except Exception as exc:
+            raise ReportQueryExecutionError("report export query failed") from exc
+        if len(rows) > max_rows:
+            raise ReportExportLimitExceeded(
+                f"report export exceeds {max_rows} rows"
+            )
+        return rows
+
+
+def _apply_column_filters(
+    sql: str,
+    params: Mapping[str, Any],
+    controls: Any,
+    column_filters: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    allowed = _control_fields(controls, "filterableFields")
+    clauses: list[str] = []
+    controlled_params = dict(params)
+    for field, raw_values in column_filters.items():
+        if field not in allowed:
+            raise ReportFilterError(f"column {field} is not filterable")
+        if (
+            not isinstance(raw_values, list)
+            or not raw_values
+            or len(raw_values) > 100
+            or any(not isinstance(value, str) for value in raw_values)
+        ):
+            raise ReportFilterError(
+                f"column filter values are invalid: {field}"
+            )
+        parameter_names: list[str] = []
+        for index, value in enumerate(raw_values):
+            parameter_name = f"genbi_column_{field}_{index}"
+            parameter_names.append(parameter_name)
+            controlled_params[parameter_name] = value
+        placeholders = ", ".join(
+            f"%({parameter_name})s"
+            for parameter_name in parameter_names
+        )
+        clauses.append(f"`{field}` IN ({placeholders})")
+    if not clauses:
+        return sql, controlled_params
+    return (
+        "SELECT * FROM "
+        f"({sql}) AS genbi_filtered WHERE {' AND '.join(clauses)}",
+        controlled_params,
+    )
+
+
+def _sort_clause(
+    controls: Any,
+    sort: Mapping[str, Any] | None,
+) -> str:
+    if sort is None:
+        return ""
+    field = sort.get("field")
+    direction = sort.get("direction")
+    if not isinstance(field, str) or field not in _control_fields(
+        controls,
+        "sortableFields",
+    ):
+        raise ReportFilterError(f"column {field} is not sortable")
+    if direction not in {"asc", "desc"}:
+        raise ReportFilterError("sort direction must be asc or desc")
+    return f" ORDER BY `{field}` {str(direction).upper()}"
+
+
+def _control_fields(controls: Any, key: str) -> set[str]:
+    if not isinstance(controls, Mapping):
+        return set()
+    values = controls.get(key, [])
+    if not isinstance(values, list):
+        return set()
+    return {
+        field
+        for field in values
+        if isinstance(field, str) and PARAMETER_NAME.fullmatch(field)
+    }
 
 
 class MySqlQueryRunner:

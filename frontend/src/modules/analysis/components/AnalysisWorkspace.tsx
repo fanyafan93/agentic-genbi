@@ -8,7 +8,11 @@ import {
   type BusinessSemanticSection,
   type StructuredKnowledgeSource,
 } from "@/modules/business-semantics/components/BusinessSemanticLibrary";
-import { useFlow, type FlowNode } from "../hooks/use-flow";
+import {
+  applyReportRevision,
+  useFlow,
+  type FlowNode,
+} from "../hooks/use-flow";
 import { AnalysisTaskThread } from "./AnalysisTaskThread";
 import { ReportPanel } from "./ReportPanel";
 import { MyAnalysisPage } from "./MyAnalysisPage";
@@ -26,11 +30,14 @@ import {
   type BackendAnalysisSessionSummary,
 } from "../agentClients/backendClient";
 import {
+  deleteReport,
+  getActiveReportBuild,
   listReportCenter,
   listReportsBySession,
   shouldUseBackendReports,
 } from "../api/report-service";
 import type {
+  Report,
   SavedReport,
   SharedReport,
 } from "../types/report";
@@ -61,8 +68,8 @@ function NavIcon({ name }: { name: NavIconName }) {
     dashboard: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
     analysisTask: <><path d="M6 3.8h8l4 4V20a1.8 1.8 0 0 1-1.8 1.8H6A1.8 1.8 0 0 1 4.2 20V5.6A1.8 1.8 0 0 1 6 3.8Z" /><path d="M14 4v4h4" /><path className="task-bar task-bar-1" d="M8 17v-3" /><path className="task-bar task-bar-2" d="M11 17v-6" /><path className="task-bar task-bar-3" d="M14 17v-4.5" /></>,
     assetLibrary: <><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h5l2 2h6A1.5 1.5 0 0 1 20 7.5v11A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-13Z" /><path d="M8 15h8M8 11h5" /></>,
-    businessSemantics: <><ellipse cx="12" cy="5.5" rx="6.5" ry="2.5" /><path d="M5.5 5.5v6c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5v-6" /><path d="M5.5 9c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5" /><path d="M8 18h8M12 14v4" /></>,
-    system: <><path d="M12 3.5 19 6v5.4c0 4.2-2.8 7.6-7 9.1-4.2-1.5-7-4.9-7-9.1V6l7-2.5Z" /><path d="m9 12 2 2 4-4" /></>,
+    businessSemantics: <><path d="M10.4 10.4 7.7 7.7" /><path d="m13.6 10.4 2.7-2.7" /><path d="M12 14.2v2.5" /><circle cx="12" cy="12" r="2.2" /><circle cx="6" cy="6" r="2.3" /><circle cx="18" cy="6" r="2.3" /><circle cx="12" cy="19" r="2.3" /></>,
+    system: <><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></>,
   };
 
   return <svg data-icon={name} aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
@@ -162,9 +169,9 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     ? initialSessionId
     : null;
   const [activeTool, setActiveTool] = useState<ActiveTool>("analysis-workspace");
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const [selectedAnalysisTask, setSelectedAnalysisTask] = useState<string | null>(null);
-  const [splitPercent, setSplitPercent] = useState(40);
+  const [splitPercent, setSplitPercent] = useState(34);
   const [mobilePane, setMobilePane] = useState<"analysisTask" | "assetLibrary">("analysisTask");
   const [currentAnalysisTaskId, setCurrentAnalysisTaskId] = useState<string | null>(routedSessionId);
   const [businessSemanticSection, setBusinessSemanticSection] = useState<BusinessSemanticSection>("structured");
@@ -172,6 +179,7 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
   const [systemSection, setSystemSection] = useState<SystemSection>("overview");
   const [savedReports, setSavedReports] = useState<SavedReport[]>([]);
   const [sharedReports, setSharedReports] = useState<SharedReport[]>([]);
+  const [exampleReports, setExampleReports] = useState<SavedReport[]>([]);
   const [analysisThreads, setAnalysisThreads] = useState<BackendAnalysisSessionSummary[]>([]);
   const [analysisThreadsLoading, setAnalysisThreadsLoading] = useState(false);
   const [selectingAnalysisThreads, setSelectingAnalysisThreads] = useState(false);
@@ -180,6 +188,8 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
   const [openedReportId, setOpenedReportId] = useState<string | null>(null);
   const [openedReportThreadId, setOpenedReportThreadId] = useState<string | null>(null);
   const [openedReportLoadingThreadId, setOpenedReportLoadingThreadId] = useState<string | null>(null);
+  const [restoredBuildReport, setRestoredBuildReport] = useState<Report | null>(null);
+  const [restoredBuildSessionId, setRestoredBuildSessionId] = useState<string | null>(null);
   const [analysisTaskNotice, setAnalysisTaskNotice] = useState("");
   const locallyRunningSessionIdsRef = useRef(new Set<string>());
   const skipSelectedThreadSyncRef = useRef<string | null>(null);
@@ -228,6 +238,8 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     let cancelled = false;
     if (!shouldUseBackendReports()) {
       setSavedReports([]);
+      setSharedReports([]);
+      setExampleReports([]);
       return () => { cancelled = true; };
     }
     void listReportCenter(reportOwnerId)
@@ -235,11 +247,13 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
         if (cancelled) return;
         setSavedReports(center.mine);
         setSharedReports(center.sharedWithMe);
+        setExampleReports(center.examples ?? []);
       })
       .catch(() => {
         if (cancelled) return;
         setSavedReports([]);
         setSharedReports([]);
+        setExampleReports([]);
       });
     return () => { cancelled = true; };
   }, [reportOwnerId]);
@@ -265,6 +279,8 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     const reportLoadRequestId = ++reportLoadRequestRef.current;
     setCurrentAnalysisTaskId(initialSessionId);
     setAnalysisTaskNotice("");
+    setRestoredBuildReport(null);
+    setRestoredBuildSessionId(null);
     if (shouldUseBackendReports()) setOpenedReportLoadingThreadId(initialSessionId);
 
     void getBackendAnalysisSession(initialSessionId)
@@ -322,6 +338,29 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
             if (!cancelled && reportLoadRequestId === reportLoadRequestRef.current && !initialReport) {
               setOpenedReportId(null);
               setOpenedReportThreadId(null);
+            }
+          }
+          try {
+            const activeBuild = await getActiveReportBuild(
+              initialSessionId,
+            );
+            if (
+              cancelled
+              || reportLoadRequestId
+                !== reportLoadRequestRef.current
+            ) return;
+            setRestoredBuildReport(activeBuild.report);
+            setRestoredBuildSessionId(
+              activeBuild.report ? initialSessionId : null,
+            );
+          } catch {
+            if (
+              !cancelled
+              && reportLoadRequestId
+                === reportLoadRequestRef.current
+            ) {
+              setRestoredBuildReport(null);
+              setRestoredBuildSessionId(null);
             }
           }
         }
@@ -385,7 +424,28 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     flow.report
     && (flow.report.sourceSessionId === currentAnalysisTaskId),
   );
-  const currentPanelReport = flowReportBelongsToCurrentTask ? flow.report : openedReportBelongsToCurrentTask && openedReport ? openedReport.report : undefined;
+  const restoredBuildBelongsToCurrentTask = Boolean(
+    restoredBuildReport
+    && restoredBuildSessionId === currentAnalysisTaskId,
+  );
+  const progressiveReport = flowReportBelongsToCurrentTask
+    ? applyReportRevision(
+        restoredBuildBelongsToCurrentTask
+          ? restoredBuildReport
+          : null,
+        flow.report!,
+      )
+    : (
+        restoredBuildBelongsToCurrentTask
+          ? restoredBuildReport
+          : null
+      );
+  const currentPanelReport = progressiveReport
+    ?? (
+      openedReportBelongsToCurrentTask && openedReport
+        ? openedReport.report
+        : undefined
+    );
   const currentPanelReportLoading = Boolean(
     currentAnalysisTaskId && openedReportLoadingThreadId === currentAnalysisTaskId,
   );
@@ -453,6 +513,8 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     setInitialFlowMessages([]);
     setOpenedReportId(null);
     setOpenedReportThreadId(null);
+    setRestoredBuildReport(null);
+    setRestoredBuildSessionId(null);
     const reportLoadRequestId = ++reportLoadRequestRef.current;
     let restoredInitialReport = false;
     if (shouldUseBackendReports()) setOpenedReportLoadingThreadId(thread.id);
@@ -488,6 +550,18 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
       } catch {
         if (reportLoadRequestId !== reportLoadRequestRef.current) return;
         setOpenedReportId(null);
+      }
+      try {
+        const activeBuild = await getActiveReportBuild(thread.id);
+        if (reportLoadRequestId !== reportLoadRequestRef.current) return;
+        setRestoredBuildReport(activeBuild.report);
+        setRestoredBuildSessionId(
+          activeBuild.report ? thread.id : null,
+        );
+      } catch {
+        if (reportLoadRequestId !== reportLoadRequestRef.current) return;
+        setRestoredBuildReport(null);
+        setRestoredBuildSessionId(null);
       } finally {
         if (reportLoadRequestId === reportLoadRequestRef.current) setOpenedReportLoadingThreadId(null);
       }
@@ -605,42 +679,49 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
     void flow.start(question, sourceReportId ? { sourceReportId } : undefined);
   }
 
-  async function handleOpenReport(saved: SavedReport) {
+  async function handleOpenReport(saved: SavedReport): Promise<boolean> {
     if (flow.running) {
       setAnalysisTaskNotice("当前任务正在分析，停止回答后再切换报表。");
-      return;
+      return false;
     }
     setAnalysisTaskNotice("");
     draftReportIdRef.current = null;
     const sourceThreadId = saved.report.sourceSessionId;
-    if (!sourceThreadId) return;
-    setOpenedReportId(saved.report.id);
-    setOpenedReportThreadId(null);
-    setSelectedAnalysisTask(saved.report.title);
-    setCurrentAnalysisTaskId(sourceThreadId);
-    setInitialFlowMessages([]);
-    setActiveTool("analysis-workspace");
-    setMobilePane("analysisTask");
+    if (!sourceThreadId) return false;
     const reportLoadRequestId = ++reportLoadRequestRef.current;
     if (shouldUseBackendReports()) setOpenedReportLoadingThreadId(sourceThreadId);
     try {
       const detail = await getBackendAnalysisSession(sourceThreadId);
-      if (reportLoadRequestId !== reportLoadRequestRef.current) return;
+      if (reportLoadRequestId !== reportLoadRequestRef.current) return false;
       const sessionRow = detail.session ?? detail.thread;
-      if (!sessionRow) return;
+      if (!sessionRow || sessionRow.status === "archived") return false;
+      setOpenedReportId(saved.report.id);
+      setOpenedReportThreadId(null);
       setSelectedAnalysisTask(analysisThreadTitle(sessionRow) || saved.report.title);
+      setCurrentAnalysisTaskId(sourceThreadId);
       setInitialFlowMessages(flowNodesFromBackendSession(detail));
+      setActiveTool("analysis-workspace");
+      setMobilePane("analysisTask");
       setAnalysisThreads((threads) => {
         if (threads.some((thread) => thread.id === sessionRow.id)) {
           return threads.map((thread) => (thread.id === sessionRow.id ? sessionRow : thread));
         }
         return orderAnalysisThreads([sessionRow, ...threads]);
       });
+      return true;
     } catch {
-      if (reportLoadRequestId !== reportLoadRequestRef.current) return;
-      setInitialFlowMessages([]);
+      return false;
     } finally {
       if (reportLoadRequestId === reportLoadRequestRef.current) setOpenedReportLoadingThreadId(null);
+    }
+  }
+
+  async function handleDeleteReport(saved: SavedReport): Promise<void> {
+    await deleteReport(saved.report.id, reportOwnerId);
+    setSavedReports((items) => items.filter((item) => item.report.id !== saved.report.id));
+    if (openedReportId === saved.report.id) {
+      setOpenedReportId(null);
+      setOpenedReportThreadId(null);
     }
   }
 
@@ -705,6 +786,11 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
               aria-label={item.label}
               aria-current={activeTool === item.id ? "page" : undefined}
               onClick={() => {
+                if (item.id === "workspace") {
+                  setActiveTool(item.id);
+                  setCollapsed(true);
+                  return;
+                }
                 if (item.id === "business-semantics") {
                   setActiveTool(item.id);
                   setCollapsed(false);
@@ -743,7 +829,7 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
         </nav>
 
         <aside className={`panel ${activeTool === "analysis-workspace" ? "analysis-tasks" : ""}`} aria-label="侧栏">
-          {activeTool === "analysis-workspace" ? (
+          {activeTool === "workspace" ? null : activeTool === "analysis-workspace" ? (
             <div className="analysis-task-panel">
               <header className="panel-header"><span className="panel-kicker">ANALYSIS WORKSPACE</span><h2>分析工作台</h2></header>
               <label className="analysis-task-search"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg><input type="search" placeholder="搜索分析任务" /></label>
@@ -856,22 +942,11 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
           {activeTool === "system" ? (
             <SystemAdminPage section={systemSection} onSectionChange={setSystemSection} />
           ) : activeTool === "analysis-assets" ? (
-             <MyAnalysisPage reports={savedReports} sharedReports={sharedReports} onOpenReport={handleOpenReport} onCreateAnalysis={handleCreateAnalysisFromReport} />
+             <MyAnalysisPage reports={savedReports} sharedReports={sharedReports} exampleReports={exampleReports} onOpenReport={handleOpenReport} onCreateAnalysis={handleCreateAnalysisFromReport} onDeleteReport={handleDeleteReport} />
           ) : activeTool === "business-semantics" ? (
              <BusinessSemanticLibrary section={businessSemanticSection} structuredKnowledgeSource={structuredKnowledgeSource} />
           ) : activeTool === "workspace" ? (
-            <section className="overview-workbench" aria-label="工作台">
-              <header>
-                <span>WORKBENCH</span>
-                <h1>工作台</h1>
-                <p>这里聚合最近分析、待确认口径、常用资产和运行状态；真正开始分析时进入分析工作台。</p>
-              </header>
-              <div className="overview-card-grid">
-                <article><span>待确认</span><strong>2 个业务口径</strong><small>复购率退款排除、渠道归因优先级</small></article>
-                <article><span>最近资产</span><strong>5 个分析资产</strong><small>报告、SQL、业务规则和可复用分析方法</small></article>
-                <article><span>语义层</span><strong>6 类语义模型</strong><small>FineReport、MySQL/Doris、ETL、金蝶、SQL 示例、指标维度</small></article>
-              </div>
-            </section>
+            <section aria-label="工作台" />
           ) : <div key={currentAnalysisTaskId ?? "new"} className="workbench-frame" style={{ height: "100%" }}>
               <div className="mobile-pane-switch" role="tablist" aria-label="分析任务工作区">
                 <button className={mobilePane === "analysisTask" ? "active" : ""} type="button" onClick={() => setMobilePane("analysisTask")}>分析工作台</button>
@@ -892,7 +967,7 @@ export function AnalysisWorkspace({ initialSessionId = null }: AnalysisWorkspace
                   onStop={flow.stop}
                 />
 
-                <div className="workspace-resizer" role="separator" aria-label="调整分析工作台和当前任务资产宽度" aria-orientation="vertical" onPointerDown={startResize} onDoubleClick={() => setSplitPercent(40)}><span /></div>
+                <div className="workspace-resizer" role="separator" aria-label="调整分析工作台和当前任务资产宽度" aria-orientation="vertical" onPointerDown={startResize} onDoubleClick={() => setSplitPercent(34)}><span /></div>
 
                 <div className={`analysis-result-pane ${mobilePane !== "assetLibrary" ? "mobile-hidden" : ""}`}>
                   <ReportPanel taskTitle={selectedAnalysisTask ?? "当前分析任务"} running={flow.running} loading={currentPanelReportLoading} initialReport={currentPanelReport ?? undefined} />

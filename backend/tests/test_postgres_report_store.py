@@ -83,6 +83,7 @@ def _report_row(
         "queries": config["queries"],
         "created_at": "2026-08-05T00:00:00+00:00",
         "updated_at": "2026-08-05T00:00:00+00:00",
+        "is_example": False,
     }
 
 
@@ -107,6 +108,11 @@ def test_report_schema_drops_legacy_tables_and_creates_direct_tables() -> None:
     assert "DROP TABLE IF EXISTS analysis_report_versions" in sql
     assert "DROP TABLE IF EXISTS analysis_reports" in sql
     assert "turn_id TEXT REFERENCES analysis_turns(id) ON DELETE SET NULL" in sql
+    assert "deleted_at TIMESTAMPTZ" in direct_create
+    assert "is_example BOOLEAN NOT NULL DEFAULT false" in direct_create
+    assert "ALTER TABLE reports" in sql
+    assert "ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ" in sql
+    assert "ADD COLUMN IF NOT EXISTS is_example BOOLEAN" in sql
     assert "artifact_type" not in direct_create
     assert "datasets" not in direct_create
     assert "source_thread_id" not in direct_create
@@ -196,7 +202,7 @@ def test_postgres_update_replaces_config_without_changing_owner() -> None:
     }
 
 
-def test_postgres_delete_physically_removes_report_and_cascades_shares() -> None:
+def test_postgres_delete_soft_deletes_report_and_preserves_shares() -> None:
     connection = _Connection()
     connection.next_row = {"id": "report-1"}
 
@@ -207,13 +213,105 @@ def test_postgres_delete_physically_removes_report_and_cascades_shares() -> None
         store = PostgresReportStore("postgresql://test")
         deleted = store.delete_report("report-1", owner_id="owner-1")
 
-    delete_sql = next(
+    soft_delete_sql = next(
         sql
         for sql, _ in connection.calls
-        if "DELETE FROM reports" in sql
+        if "UPDATE reports" in sql and "deleted_at" in sql
     )
     assert deleted is True
-    assert "owner_id = %(owner_id)s" in delete_sql
+    assert "deleted_at = COALESCE(deleted_at, now())" in soft_delete_sql
+    assert "owner_id = %(owner_id)s" in soft_delete_sql
+    assert not any(
+        "DELETE FROM reports" in sql for sql, _ in connection.calls
+    )
     assert not any(
         "DELETE FROM report_shares" in sql for sql, _ in connection.calls
     )
+
+
+def test_postgres_store_marks_owned_live_report_as_example() -> None:
+    connection = _Connection()
+    connection.next_row = {**_report_row(), "is_example": True}
+
+    with patch(
+        "backend.persistence.postgres_stores._connect",
+        side_effect=lambda *_args: _connection_context(connection),
+    ):
+        store = PostgresReportStore("postgresql://test")
+        result = store.set_report_example(
+            "report-1",
+            owner_id="owner-1",
+            is_example=True,
+        )
+
+    update_sql, params = next(
+        (sql, params)
+        for sql, params in connection.calls
+        if "SET is_example" in sql
+    )
+    assert "owner_id = %(owner_id)s" in update_sql
+    assert "deleted_at IS NULL" in update_sql
+    assert params == {
+        "id": "report-1",
+        "owner_id": "owner-1",
+        "is_example": True,
+    }
+    assert result is not None and result.isExample is True
+
+
+def test_postgres_normal_reads_and_owner_mutations_exclude_deleted_reports() -> None:
+    connection = _Connection()
+    connection.next_row = _report_row()
+
+    with patch(
+        "backend.persistence.postgres_stores._connect",
+        side_effect=lambda *_args: _connection_context(connection),
+    ), patch(
+        "backend.persistence.postgres_stores._jsonb",
+        side_effect=lambda value: value,
+    ):
+        store = PostgresReportStore("postgresql://test")
+        store.list_reports(owner_id="owner-1")
+        store.get_report("report-1")
+        store.update_report(
+            "report-1",
+            report_config("更新"),
+            owner_id="owner-1",
+        )
+        store.share_report(
+            "report-1",
+            owner_id="owner-1",
+            recipient_user_id="user-2",
+            permission="view",
+        )
+        store.revoke_report_share(
+            "report-1",
+            owner_id="owner-1",
+            recipient_user_id="user-2",
+        )
+        store.list_report_center(user_id="owner-1")
+
+    sql = "\n".join(statement for statement, _ in connection.calls)
+    assert "WHERE deleted_at IS NULL AND owner_id = %(owner_id)s" in sql
+    assert "WHERE id = %(id)s AND deleted_at IS NULL" in sql
+    assert "WHERE id = %(id)s AND owner_id = %(owner_id)s AND deleted_at IS NULL" in sql
+    mine_sql = next(
+        statement
+        for statement, _ in connection.calls
+        if "WHERE owner_id = %(user_id)s" in statement
+    )
+    shared_sql = next(
+        statement
+        for statement, _ in connection.calls
+        if "share.recipient_user_id = %(user_id)s" in statement
+    )
+    example_sql = next(
+        statement
+        for statement, _ in connection.calls
+        if "WHERE is_example = true" in statement
+    )
+    assert "is_example = false" in mine_sql
+    assert "report.is_example = false" in shared_sql
+    assert "is_example = true" in example_sql
+    assert "DISTINCT ON (title)" in example_sql
+    assert "AND report.deleted_at IS NULL" in sql

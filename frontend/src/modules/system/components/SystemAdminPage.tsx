@@ -8,12 +8,19 @@ import {
   getSystemAccess,
   type SystemAccess,
 } from "../system-api";
+import { SystemContextPanel } from "./SystemContextPanel";
 import { SystemMcpPanel } from "./SystemMcpPanel";
-import { SystemPromptsPanel } from "./SystemPromptsPanel";
+import { SystemModelConnectionsPanel } from "./SystemModelConnectionsPanel";
 import { SystemRuntimePanel } from "./SystemRuntimePanel";
 import { SystemUsersPanel } from "./SystemUsersPanel";
 
-export type SystemSection = "overview" | "users" | "mcp" | "prompts" | "runtime";
+export type SystemSection =
+  | "overview"
+  | "users"
+  | "models"
+  | "mcp"
+  | "context"
+  | "runtime";
 
 export const systemSections: Array<{
   id: SystemSection;
@@ -22,9 +29,10 @@ export const systemSections: Array<{
 }> = [
   { id: "overview", label: "系统总览", description: "配置与运行状态" },
   { id: "users", label: "用户与权限", description: "账号、角色和状态" },
+  { id: "models", label: "模型连接", description: "提供方、模型与密钥" },
   { id: "mcp", label: "MCP 服务", description: "连接、工具和授权" },
-  { id: "prompts", label: "系统提示词", description: "版本、发布和回滚" },
-  { id: "runtime", label: "模型与运行策略", description: "模型、沙箱和审批" },
+  { id: "context", label: "上下文管理", description: "指令与有效上下文" },
+  { id: "runtime", label: "运行策略", description: "沙箱、审批和内置工具" },
 ];
 
 type SystemAdminPageProps = {
@@ -122,8 +130,9 @@ export function SystemAdminPage({
       <div className="system-console-main">
         {activeSection === "overview" && <SystemOverview onNavigate={navigate} />}
         {activeSection === "users" && <SystemUsersPanel />}
+        {activeSection === "models" && <SystemModelConnectionsPanel />}
         {activeSection === "mcp" && <SystemMcpPanel />}
-        {activeSection === "prompts" && <SystemPromptsPanel />}
+        {activeSection === "context" && <SystemContextPanel />}
         {activeSection === "runtime" && <SystemRuntimePanel />}
       </div>
     </section>
@@ -140,7 +149,7 @@ function SystemOverview({
     <div className="system-overview">
       <div className="system-section-heading">
         <div><span>OVERVIEW</span><h2>治理域</h2></div>
-        <p>所有变更均在服务端校验，并记录操作者与目标。</p>
+        <p>所有变更均在服务端校验；完整的系统审计将在后续统一建设。</p>
       </div>
       <div className="system-overview-grid">
         {cards.map((card, index) => (
@@ -154,7 +163,7 @@ function SystemOverview({
       </div>
       <aside className="system-boundary-note">
         <strong>安全边界</strong>
-        <p>敏感配置不在浏览器回显；停用、发布和运行策略只影响后续请求，正在执行的分析不会被中途改写。</p>
+        <p>敏感配置入库前由服务端加密，管理员可按需直接查看明文；停用、发布和运行策略只影响后续请求。</p>
       </aside>
     </div>
   );

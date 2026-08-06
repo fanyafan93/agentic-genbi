@@ -18,7 +18,7 @@ export function SystemRuntimePanel() {
     void getRuntimePolicy()
       .then((value) => {
         setRuntime(value);
-        setDraft(value);
+        setDraft(editableRuntimePolicy(value));
       })
       .catch((error) => setMessage(error instanceof Error ? error.message : "运行策略加载失败"));
   }, []);
@@ -29,8 +29,8 @@ export function SystemRuntimePanel() {
     try {
       const saved = await saveRuntimePolicy(draft);
       setRuntime(saved);
-      setDraft(saved);
-      setMessage("策略已保存，将用于后续分析");
+      setDraft(editableRuntimePolicy(saved));
+      setMessage("运行策略已保存，将用于后续分析");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "策略保存失败");
     }
@@ -39,8 +39,8 @@ export function SystemRuntimePanel() {
   return (
     <div className="system-domain-panel">
       <div className="system-section-heading">
-        <div><span>EXECUTION</span><h2>模型与运行策略</h2></div>
-        <p>控制后续分析使用的模型、工具开放程度和执行边界。</p>
+        <div><span>EXECUTION</span><h2>运行策略</h2></div>
+        <p>控制工具开放程度、审批方式和执行边界。</p>
       </div>
       {draft && runtime ? (
         <>
@@ -49,11 +49,6 @@ export function SystemRuntimePanel() {
             <span>修改不会中断正在执行的分析</span>
           </div>
           <div className="system-policy-grid">
-            <label>
-              <span>默认模型</span>
-              <small>用于后续创建和继续的分析任务</small>
-              <input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} />
-            </label>
             <label>
               <span>审批策略</span>
               <small>决定工具调用是否进入自动安全审查</small>
@@ -85,7 +80,7 @@ export function SystemRuntimePanel() {
             <p>全权限沙箱不会在管理后台开放。数据源只读、权限判断和审计仍由服务端强制执行。</p>
           </aside>
           <div className="system-form-actions">
-            <button type="button" className="secondary" onClick={() => setDraft(runtime)}>放弃更改</button>
+            <button type="button" className="secondary" onClick={() => setDraft(editableRuntimePolicy(runtime))}>放弃更改</button>
             <button type="button" onClick={() => void save()}>保存并应用</button>
           </div>
         </>
@@ -93,4 +88,12 @@ export function SystemRuntimePanel() {
       {message && <p className="system-inline-message" role="status">{message}</p>}
     </div>
   );
+}
+
+function editableRuntimePolicy(runtime: RuntimeStatus): SystemRuntimePolicy {
+  return {
+    approvalMode: runtime.approvalMode,
+    sandbox: runtime.sandbox,
+    defaultToolsEnabled: runtime.defaultToolsEnabled,
+  };
 }

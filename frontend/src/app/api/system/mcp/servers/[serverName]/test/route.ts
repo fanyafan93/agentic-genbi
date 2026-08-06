@@ -16,16 +16,7 @@ export async function POST(_: Request, context: RouteContext) {
   const { serverName } = await context.params;
   try {
     await requireSystemAdministrator(session.user.id, prisma);
-    const result = await testSystemMcpServer(serverName);
-    await prisma.systemAuditLog.create({
-      data: {
-        actorId: session.user.id,
-        action: "mcp.test",
-        targetType: "mcp_server",
-        targetId: serverName,
-        after: { ok: result.ok, status: result.status },
-      },
-    });
+    const result = await testSystemMcpServer(serverName, session.user.id);
     return NextResponse.json(result);
   } catch (error) {
     return systemRouteError(error);

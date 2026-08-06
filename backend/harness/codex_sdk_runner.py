@@ -9,36 +9,48 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterable
+from urllib.parse import quote
 
 from backend.config import load_project_env
 from backend.harness.codex_mcp_config import (
+    codex_mcp_runtime_environment,
     load_runtime_codex_mcp_servers_from_env,
     to_codex_config_overrides,
 )
 from backend.harness.codex_event_sanitizer import sanitize_codex_value
 from backend.harness.events import AgentEvent
 from backend.harness.minimax_codex_adapter import adapter_base_url, adapter_enabled
-from backend.system_management import published_system_prompt, runtime_policy_overrides
+from backend.reports.build_context import ReportToolExecutionRegistry
+from backend.system_management import (
+    managed_base_instructions,
+    published_system_prompt,
+    runtime_policy_overrides,
+)
+from backend.system_management.model_connections import (
+    ModelRuntimeConnection,
+    resolve_default_model_connection,
+)
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-CODEX_ANALYSIS_INSTRUCTIONS = """
-围绕用户提出的业务问题推进分析。
-
-- 涉及真实业务数据时，必须先查证，不能编造表、字段、指标、金额、占比或增长结论。
-- 报告里只输出有据可查的数据和明确的下一步建议。
-- 输出中文。
-""".strip()
+_UNSET_MODEL_CONNECTION = object()
 
 
 CODEX_ANALYSIS_INSTRUCTIONS = """
 围绕用户提出的业务问题推进分析。
 - 涉及真实业务数据时，必须先查证，不能编造表、字段、指标、金额、占比或增长结论。
 - 报告只输出有据可查的数据和明确下一步建议。
-- 需要生成 Report 时，保存 layout、filters、charts、tables、queries 配置；queries 保存只读 SQL 和筛选参数绑定，不要内嵌查询结果行。
-- 新建 Report 调用 GenBI_report.create_report；修改当前 Report 调用 GenBI_report.update_report，并传入完整 Report 配置。
+- 需要生成 Report 时，先调用 GenBI_report.start_report_build。
+- 按实际分析进度逐步调用 set_report_filters、upsert_report_query、upsert_report_chart、upsert_report_table 和 set_report_layout；每完成一个结构变更立即持久化，不要只描述下一步。
+- Report Build 开始后，不要单独输出计划或进度文本；每轮必须直接调用下一个必要的 Report 工具，工具失败时立即按结构化错误修正参数后重试。
+- 一次只写入一个 query、chart 或 table；完成后调用 validate_report_build，验证通过后调用 publish_report_build。
+- publish_report_build 成功前不得结束当前 Turn；未发布的 Build 不是成功结果。
+- 需要恢复当前构建状态时调用 get_report_build；不要在聊天或单次工具调用中提交完整 Report JSON。
+- 不要调用旧的一次性 Report 工具。
+- queries 只保存只读 SQL 和筛选参数绑定，不要内嵌查询结果行。
+- query.dataSource 只使用 doris 或 mysql；它表示数据库连接类型，不是库名或表名。
+- layout.content 只使用 FilterBlock、ChartBlock、TableBlock、SectionBlock、MarkdownBlock，所有可见块直接放入 content；图表 option 必须是含 series 数组的原生 ECharts 配置。
+- SQL 筛选占位符只使用未加引号的 :参数名，并提供同名 parameters 绑定；不要使用 ${参数名} 模板。
 - 不要把完整 Report 正文写在聊天回复中。
 - 输出中文。
 """.strip()
@@ -51,6 +63,10 @@ class CodexSdkRunnerContext:
     codex_thread_id: str | None = None
     cwd: str | None = None
     initial_report: dict[str, Any] | None = None
+    report_tool_owner_id: str | None = None
+    report_tool_tenant_id: str | None = None
+    report_tool_workspace_id: str | None = None
+    report_tool_roles: tuple[str, ...] = ()
 
 
 class CodexSdkAnalysisRuntime:
@@ -66,8 +82,15 @@ class CodexSdkAnalysisRuntime:
         codex_bin: str | None = None,
         codex_factory: Callable[[], Any] | None = None,
         async_codex_factory: Callable[[], Any] | None = None,
+        base_instructions_resolver: Callable[[], str | None] | None = None,
         system_prompt_resolver: Callable[[], str] | None = None,
         runtime_policy_resolver: Callable[[], dict[str, Any]] | None = None,
+        model_connection_resolver: (
+            Callable[[], ModelRuntimeConnection | None] | None
+        ) = None,
+        report_tool_execution_registry: (
+            ReportToolExecutionRegistry | None
+        ) = None,
     ) -> None:
         load_project_env()
         self.provider = _codex_provider_from_env()
@@ -99,11 +122,23 @@ class CodexSdkAnalysisRuntime:
             )
         self._codex_factory = codex_factory
         self._async_codex_factory = async_codex_factory
+        self._base_instructions_resolver = (
+            base_instructions_resolver or managed_base_instructions
+        )
         self._system_prompt_resolver = system_prompt_resolver or (
             lambda: published_system_prompt(CODEX_ANALYSIS_INSTRUCTIONS)
         )
         self._runtime_policy_resolver = (
             runtime_policy_resolver or runtime_policy_overrides
+        )
+        self._uses_default_model_connection_resolver = (
+            model_connection_resolver is None
+        )
+        self._model_connection_resolver = (
+            model_connection_resolver or resolve_default_model_connection
+        )
+        self._report_tool_execution_registry = (
+            report_tool_execution_registry
         )
         self.enabled = True
         # Registry of in-flight Codex turn objects keyed by
@@ -112,6 +147,12 @@ class CodexSdkAnalysisRuntime:
         # the only thing that owns the actual ``turn`` handle;
         # everything else goes through this map.
         self._active_turns: dict[tuple[str, str], Any] = {}
+
+    def bind_report_tool_execution_registry(
+        self,
+        registry: ReportToolExecutionRegistry,
+    ) -> None:
+        self._report_tool_execution_registry = registry
 
     @classmethod
     def from_env(cls) -> "CodexSdkAnalysisRuntime":
@@ -220,11 +261,66 @@ class CodexSdkAnalysisRuntime:
         runner_context = _normalize_context(context, default_cwd=self.cwd)
         codex_thread_id: str | None = runner_context.codex_thread_id
         provisioned_turn_id = _context_turn_id(context)
+        model_connection = self._resolve_model_connection()
+        report_tool_token = self._reserve_report_tool_execution(
+            runner_context
+        )
+        report_tool_env = (
+            {
+                "GENBI_REPORT_TOOL_ENDPOINT": os.getenv(
+                    "GENBI_REPORT_TOOL_ENDPOINT",
+                    "http://127.0.0.1:8000/api/internal/report-build-tools",
+                ).strip(),
+                "GENBI_REPORT_TOOL_TOKEN": report_tool_token,
+            }
+            if report_tool_token
+            else None
+        )
+        report_execution_id = (
+            self._report_tool_execution_registry.execution_id(
+                report_tool_token
+            )
+            if (
+                report_tool_token
+                and self._report_tool_execution_registry is not None
+            )
+            else None
+        )
+        provider_base_url: str | None = None
+        provider = _connection_provider_id(
+            model_connection,
+            self.provider,
+        )
+        provider_type = (
+            model_connection.provider_type
+            if model_connection is not None
+            else self.provider
+        )
+        if (
+            report_execution_id
+            and provider_type == "minimax"
+            and adapter_enabled()
+        ):
+            provider_base_url = (
+                _connection_codex_base_url(
+                    model_connection,
+                    self.base_url,
+                ).rstrip("/")
+                + f"/executions/{report_execution_id}"
+            )
 
         try:
-            async with self._make_async_codex() as codex:
-                await self._login_if_configured(codex)
-                thread = await self._open_thread(codex, runner_context)
+            async with self._make_async_codex(
+                model_connection=model_connection,
+                extra_env=report_tool_env,
+                provider_base_url=provider_base_url,
+            ) as codex:
+                await self._login_if_configured(codex, model_connection)
+                thread = await self._open_thread(
+                    codex,
+                    runner_context,
+                    model_connection,
+                )
                 codex_thread_id = str(getattr(thread, "id", codex_thread_id or ""))
                 # Emit the provisioned-thread marker BEFORE any other event so
                 # GenBI Runtime can persist the analysis thread with the
@@ -243,9 +339,20 @@ class CodexSdkAnalysisRuntime:
 
                 turn = await thread.turn(
                     self._turn_input(question, runner_context),
-                    **self._turn_kwargs(runner_context),
+                    **self._turn_kwargs(runner_context, model_connection),
                 )
                 provisioned_codex_turn_id = _string_or_none(getattr(turn, "id", None))
+                if (
+                    report_tool_token
+                    and self._report_tool_execution_registry is not None
+                    and provisioned_codex_turn_id
+                    and codex_thread_id
+                ):
+                    self._report_tool_execution_registry.bind(
+                        report_tool_token,
+                        session_id=codex_thread_id,
+                        turn_id=provisioned_codex_turn_id,
+                    )
                 # Register the live turn handle so the API
                 # layer can interrupt it mid-stream. The
                 # handle is removed from the registry once the
@@ -272,6 +379,35 @@ class CodexSdkAnalysisRuntime:
                 try:
                     async for notification in turn.stream():
                         event = self._notification_to_event(notification, codex_thread_id=codex_thread_id)
+                        if (
+                            event
+                            and event.type == "turn/completed"
+                            and event.payload.get("status")
+                            not in {"failed", "cancelled", "canceled"}
+                            and report_execution_id
+                            and self._report_tool_execution_registry
+                            .has_incomplete_report_build(
+                                report_execution_id
+                            )
+                        ):
+                            event = AgentEvent(
+                                type="turn/completed",
+                                turn_id=event.turn_id,
+                                payload={
+                                    **event.payload,
+                                    "status": "failed",
+                                    "error": {
+                                        "code": (
+                                            "report_build_incomplete"
+                                        ),
+                                        "message": (
+                                            "Codex completed before the "
+                                            "active Report build was "
+                                            "published."
+                                        ),
+                                    },
+                                },
+                            )
                         if event:
                             yield event
                 finally:
@@ -282,36 +418,76 @@ class CodexSdkAnalysisRuntime:
                         self._active_turns.pop((codex_thread_id, provisioned_codex_turn_id), None)
         except ImportError as exc:
             raise RuntimeError("Install the `openai-codex` Python package to use GENBI_ANALYSIS_RUNTIME=codex.") from exc
+        finally:
+            if (
+                report_tool_token
+                and self._report_tool_execution_registry is not None
+            ):
+                try:
+                    self._report_tool_execution_registry.release(
+                        report_tool_token
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "report_tool_execution_release_failed"
+                    )
 
-    def _make_async_codex(self) -> Any:
+    def _make_async_codex(
+        self,
+        *,
+        model_connection: ModelRuntimeConnection | None = None,
+        extra_env: dict[str, str] | None = None,
+        provider_base_url: str | None = None,
+    ) -> Any:
         if self._async_codex_factory:
             return self._async_codex_factory()
-        self._sync_codex_home_config()
+        self._sync_codex_home_config(model_connection)
         from openai_codex import AsyncCodex, CodexConfig
 
-        env = self._codex_env() or {}
+        env = self._codex_env(model_connection) or {}
+        env.update(extra_env or {})
         if self.codex_home:
             env["CODEX_HOME"] = self.codex_home
         return AsyncCodex(
             CodexConfig(
                 codex_bin=self.codex_bin,
-                config_overrides=tuple(self._config_overrides()),
+                config_overrides=tuple(
+                    self._config_overrides(
+                        model_connection,
+                        provider_base_url=provider_base_url,
+                    )
+                ),
                 cwd=self.cwd,
                 env=env or None,
             )
         )
 
-    def _sync_codex_home_config(self) -> None:
+    def _sync_codex_home_config(
+        self,
+        model_connection: (
+            ModelRuntimeConnection | None | object
+        ) = _UNSET_MODEL_CONNECTION,
+    ) -> None:
         if not self.codex_home:
             return
+        connection = self._connection_or_resolve(model_connection)
+        provider = _connection_provider_id(connection, self.provider)
+        # Managed providers are injected through this turn's immutable
+        # CodexConfig overrides. Do not write them into the shared CODEX_HOME:
+        # concurrent turns could otherwise race while switching defaults.
+        home_provider = (
+            "openai"
+            if connection is not None and connection.source == "managed"
+            else provider
+        )
         policy_default_tools = self._runtime_policy_resolver().get(
             "default_tools_enabled"
         )
         _render_codex_home_config(
             self.codex_home,
-            provider=self.provider,
-            base_url=self.base_url,
-            api_key_env=_provider_env_key(self.provider),
+            provider=home_provider,
+            base_url=_connection_codex_base_url(connection, self.base_url),
+            api_key_env=_connection_api_key_env(connection, provider),
             mcp_servers=load_runtime_codex_mcp_servers_from_env(),
             default_tools_enabled=(
                 policy_default_tools
@@ -320,23 +496,46 @@ class CodexSdkAnalysisRuntime:
             ),
         )
 
-    async def _login_if_configured(self, codex: Any) -> None:
-        if self.provider != "openai" or not self.api_key:
+    async def _login_if_configured(
+        self,
+        codex: Any,
+        model_connection: (
+            ModelRuntimeConnection | None | object
+        ) = _UNSET_MODEL_CONNECTION,
+    ) -> None:
+        connection = self._connection_or_resolve(model_connection)
+        provider = _connection_provider_id(connection, self.provider)
+        api_key = connection.api_key if connection else self.api_key
+        if provider != "openai" or not api_key:
             return
         login_api_key = getattr(codex, "login_api_key", None)
         if not callable(login_api_key):
             return
-        await login_api_key(self.api_key)
+        await login_api_key(api_key)
 
-    async def _open_thread(self, codex: Any, context: CodexSdkRunnerContext) -> Any:
-        thread_kwargs = self._thread_kwargs(context)
+    async def _open_thread(
+        self,
+        codex: Any,
+        context: CodexSdkRunnerContext,
+        model_connection: (
+            ModelRuntimeConnection | None | object
+        ) = _UNSET_MODEL_CONNECTION,
+    ) -> Any:
+        thread_kwargs = self._thread_kwargs(context, model_connection)
         if context.codex_thread_id:
             return await codex.thread_resume(context.codex_thread_id, **thread_kwargs)
         return await codex.thread_start(**thread_kwargs)
 
-    def _thread_kwargs(self, context: CodexSdkRunnerContext) -> dict[str, Any]:
+    def _thread_kwargs(
+        self,
+        context: CodexSdkRunnerContext,
+        model_connection: (
+            ModelRuntimeConnection | None | object
+        ) = _UNSET_MODEL_CONNECTION,
+    ) -> dict[str, Any]:
         from openai_codex import ApprovalMode, Sandbox
 
+        connection = self._connection_or_resolve(model_connection)
         policy = self._runtime_policy_resolver()
         kwargs: dict[str, Any] = {
             "approval_mode": (
@@ -352,11 +551,17 @@ class CodexSdkAnalysisRuntime:
                 else Sandbox.read_only
             ),
         }
-        model = str(policy.get("model") or self.model or "").strip()
+        model = str(
+            connection.model if connection else self.model or ""
+        ).strip()
         if model:
             kwargs["model"] = model
-        if self.provider != "openai":
-            kwargs["model_provider"] = self.provider
+        provider = _connection_provider_id(connection, self.provider)
+        if provider != "openai":
+            kwargs["model_provider"] = provider
+        base_instructions = self._base_instructions_resolver()
+        if base_instructions and base_instructions.strip():
+            kwargs["base_instructions"] = base_instructions.strip()
         policy_default_tools = policy.get("default_tools_enabled")
         thread_config = (
             {"default_tools_enabled": policy_default_tools}
@@ -367,9 +572,16 @@ class CodexSdkAnalysisRuntime:
             kwargs["config"] = thread_config
         return kwargs
 
-    def _turn_kwargs(self, context: CodexSdkRunnerContext) -> dict[str, Any]:
+    def _turn_kwargs(
+        self,
+        context: CodexSdkRunnerContext,
+        model_connection: (
+            ModelRuntimeConnection | None | object
+        ) = _UNSET_MODEL_CONNECTION,
+    ) -> dict[str, Any]:
         from openai_codex import ApprovalMode, Sandbox
 
+        connection = self._connection_or_resolve(model_connection)
         policy = self._runtime_policy_resolver()
         kwargs: dict[str, Any] = {
             "approval_mode": (
@@ -384,7 +596,9 @@ class CodexSdkAnalysisRuntime:
                 else Sandbox.read_only
             ),
         }
-        model = str(policy.get("model") or self.model or "").strip()
+        model = str(
+            connection.model if connection else self.model or ""
+        ).strip()
         if model:
             kwargs["model"] = model
         return kwargs
@@ -411,16 +625,32 @@ class CodexSdkAnalysisRuntime:
             ),
         ]
 
-    def _config_overrides(self) -> list[str]:
+    def _config_overrides(
+        self,
+        model_connection: (
+            ModelRuntimeConnection | None | object
+        ) = _UNSET_MODEL_CONNECTION,
+        *,
+        provider_base_url: str | None = None,
+    ) -> list[str]:
+        connection = self._connection_or_resolve(model_connection)
+        provider = _connection_provider_id(connection, self.provider)
         overrides: list[str] = []
-        if self.provider != "openai":
-            env_key = _provider_env_key(self.provider)
+        if provider != "openai":
+            env_key = _connection_api_key_env(connection, provider)
+            display_name = (
+                connection.display_name if connection else provider
+            )
+            base_url = provider_base_url or _connection_codex_base_url(
+                connection,
+                self.base_url,
+            )
             overrides.extend(
                 [
-                    f"model_providers.{self.provider}.name={_toml_string(self.provider)}",
-                    f"model_providers.{self.provider}.base_url={_toml_string(self.base_url)}",
-                    f"model_providers.{self.provider}.env_key={_toml_string(env_key)}",
-                    f"model_providers.{self.provider}.wire_api=\"responses\"",
+                    f"model_providers.{provider}.name={_toml_string(display_name)}",
+                    f"model_providers.{provider}.base_url={_toml_string(base_url)}",
+                    f"model_providers.{provider}.env_key={_toml_string(env_key)}",
+                    f"model_providers.{provider}.wire_api=\"responses\"",
                 ]
             )
         policy_default_tools = self._runtime_policy_resolver().get(
@@ -437,10 +667,73 @@ class CodexSdkAnalysisRuntime:
         overrides.extend(to_codex_config_overrides(raw_mcp_servers))
         return overrides
 
-    def _codex_env(self) -> dict[str, str]:
-        if self.provider == "openai" or not self.api_key:
-            return {}
-        return {_provider_env_key(self.provider): self.api_key}
+    def _codex_env(
+        self,
+        model_connection: (
+            ModelRuntimeConnection | None | object
+        ) = _UNSET_MODEL_CONNECTION,
+    ) -> dict[str, str]:
+        connection = self._connection_or_resolve(model_connection)
+        provider = _connection_provider_id(connection, self.provider)
+        api_key = connection.api_key if connection else self.api_key
+        environment = codex_mcp_runtime_environment(
+            load_runtime_codex_mcp_servers_from_env()
+        )
+        if provider != "openai" and api_key:
+            environment[
+                _connection_api_key_env(connection, provider)
+            ] = api_key
+        return environment
+
+    def _resolve_model_connection(
+        self,
+    ) -> ModelRuntimeConnection | None:
+        connection = self._model_connection_resolver()
+        if (
+            connection is not None
+            and (
+                not self._uses_default_model_connection_resolver
+                or connection.source == "managed"
+            )
+        ):
+            return connection
+        if not self.model:
+            return None
+        return ModelRuntimeConnection(
+            name=self.provider or "openai",
+            display_name=(
+                "MiniMax" if self.provider == "minimax" else self.provider
+            ),
+            provider_type=self.provider or "openai",
+            model=self.model,
+            base_url=self.base_url,
+            api_key=self.api_key or "",
+            source="environment",
+        )
+
+    def _connection_or_resolve(
+        self,
+        model_connection: ModelRuntimeConnection | None | object,
+    ) -> ModelRuntimeConnection | None:
+        if model_connection is _UNSET_MODEL_CONNECTION:
+            return self._resolve_model_connection()
+        if isinstance(model_connection, ModelRuntimeConnection):
+            return model_connection
+        return None
+
+    def _reserve_report_tool_execution(
+        self,
+        context: CodexSdkRunnerContext,
+    ) -> str | None:
+        registry = self._report_tool_execution_registry
+        if registry is None or not context.report_tool_owner_id:
+            return None
+        return registry.reserve(
+            owner_id=context.report_tool_owner_id,
+            tenant_id=context.report_tool_tenant_id,
+            workspace_id=context.report_tool_workspace_id,
+            roles=context.report_tool_roles,
+        )
 
     def _notification_to_event(self, notification: Any, *, codex_thread_id: str | None) -> AgentEvent | None:
         method = str(getattr(notification, "method", "") or "")
@@ -577,6 +870,24 @@ def _normalize_context(
             data.get("initial_report")
             if isinstance(data.get("initial_report"), dict)
             else None
+        ),
+        report_tool_owner_id=_string_or_none(
+            data.get("report_tool_owner_id")
+        ),
+        report_tool_tenant_id=_string_or_none(
+            data.get("report_tool_tenant_id")
+        ),
+        report_tool_workspace_id=_string_or_none(
+            data.get("report_tool_workspace_id")
+        ),
+        report_tool_roles=tuple(
+            str(role).strip().lower()
+            for role in (
+                data.get("report_tool_roles")
+                if isinstance(data.get("report_tool_roles"), (list, tuple))
+                else ()
+            )
+            if str(role).strip()
         ),
     )
 
@@ -854,6 +1165,44 @@ def _provider_env_key(provider: str) -> str:
     return f"{provider.upper()}_API_KEY"
 
 
+def _connection_provider_id(
+    connection: ModelRuntimeConnection | None,
+    fallback_provider: str,
+) -> str:
+    if connection is None:
+        return fallback_provider
+    if connection.source == "managed":
+        return connection.provider_id
+    return fallback_provider or connection.provider_type
+
+
+def _connection_api_key_env(
+    connection: ModelRuntimeConnection | None,
+    provider: str,
+) -> str:
+    if connection is not None and connection.source == "managed":
+        return "GENBI_MANAGED_MODEL_API_KEY"
+    return _provider_env_key(provider)
+
+
+def _connection_codex_base_url(
+    connection: ModelRuntimeConnection | None,
+    fallback_base_url: str,
+) -> str:
+    if connection is None:
+        return fallback_base_url
+    if (
+        connection.source == "managed"
+        and connection.provider_type == "minimax"
+        and adapter_enabled()
+    ):
+        base_url = adapter_base_url().rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3].rstrip("/")
+        return f"{base_url}/{quote(connection.name, safe='')}/v1"
+    return connection.base_url
+
+
 def _analysis_thread_config() -> dict[str, Any]:
     default_tools_enabled = _codex_default_tools_enabled_from_env()
     if default_tools_enabled is None:
@@ -910,13 +1259,7 @@ def _render_codex_home_config(
             ]
         )
     for server in mcp_servers:
-        lines.append(f"mcp_servers.{server.name}.command={_toml_string(server.command)}")
-        if server.args:
-            lines.append(f"mcp_servers.{server.name}.args={_toml_array(server.args)}")
-        for env_key, env_value in server.env.items():
-            lines.append(
-                f"mcp_servers.{server.name}.env.{env_key}={_toml_string(env_value)}"
-            )
+        lines.extend(to_codex_config_overrides([server]))
         lines.append("")
     config_path.write_text("\n".join(lines), encoding="utf-8")
 

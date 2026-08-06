@@ -2,8 +2,12 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   createReport,
   deleteReport,
+  executeReportBuildQuery,
   executeReportQuery,
+  exportReportTable,
+  getActiveReportBuild,
   getReport,
+  getReportBuild,
   listReportCenter,
   listReportsBySession,
   shareReport,
@@ -124,6 +128,93 @@ describe("direct Report API client", () => {
       page: 1,
       pageSize: 50,
     });
+  });
+
+  test("downloads a configured table export without sending SQL", async () => {
+    vi.stubEnv(
+      "NEXT_PUBLIC_GENBI_API_BASE_URL",
+      "http://192.168.101.12:8000",
+    );
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("xlsx", {
+        status: 200,
+        headers: {
+          "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "Content-Disposition": "attachment; filename*=UTF-8''orders.xlsx",
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const exported = await exportReportTable(
+      "report-1",
+      "orders",
+      {
+        filters: { region: "华东" },
+        sort: { field: "amount", direction: "desc" },
+        columnFilters: { region: ["华东"] },
+      },
+    );
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://192.168.101.12:8000/api/reports/report-1/tables/orders/export",
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
+      filters: { region: "华东" },
+      sort: { field: "amount", direction: "desc" },
+      columnFilters: { region: ["华东"] },
+    });
+    expect(exported.filename).toBe("orders.xlsx");
+    expect(await exported.blob.text()).toBe("xlsx");
+  });
+
+  test("reads and queries persisted Report builds", async () => {
+    vi.stubEnv(
+      "NEXT_PUBLIC_GENBI_API_BASE_URL",
+      "http://192.168.101.12:8000",
+    );
+    const buildReport = {
+      ...reportFixture,
+      id: "build-1",
+      buildId: "build-1",
+      buildRevision: 3,
+      buildStatus: "building" as const,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        build: { id: "build-1", revision: 3 },
+        report: buildReport,
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        build: { id: "build-1", revision: 3 },
+        report: buildReport,
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        columns: [],
+        rows: [{ channel: "抖音", sales: 10 }],
+        page: 1,
+        pageSize: 50,
+        total: 1,
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const exact = await getReportBuild("build-1");
+    const active = await getActiveReportBuild("session-1");
+    const query = await executeReportBuildQuery(
+      "build-1",
+      "q-sales",
+      { filters: {}, page: 1, pageSize: 50 },
+    );
+
+    expect(exact.report.buildRevision).toBe(3);
+    expect(active.report?.buildId).toBe("build-1");
+    expect(query.rows).toEqual([{ channel: "抖音", sales: 10 }]);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "http://192.168.101.12:8000/api/report-builds/build-1",
+      "http://192.168.101.12:8000/api/analysis/sessions/session-1/report-builds/active",
+      "http://192.168.101.12:8000/api/report-builds/build-1/queries/q-sales",
+    ]);
   });
 
   test("uses only direct Report and Report Center paths", async () => {

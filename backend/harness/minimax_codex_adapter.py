@@ -119,11 +119,26 @@ def rewrite_sse_chunk_text(text: str, namespace_maps: Iterable[NamespaceToolMap]
     return "\n\n".join(rewritten_blocks)
 
 
-def proxy_minimax_response(raw_body: bytes, *, stream: bool) -> tuple[int, dict[str, str], bytes | Iterable[bytes]]:
+def proxy_minimax_response(
+    raw_body: bytes,
+    *,
+    stream: bool,
+    upstream_base_url: str | None = None,
+    upstream_api_key: str | None = None,
+) -> tuple[int, dict[str, str], bytes | Iterable[bytes]]:
     body = json.loads(raw_body.decode("utf-8") or "{}")
     rewritten_body, namespace_maps = rewrite_request_body(body)
-    upstream_url = minimax_upstream_base_url() + "/responses"
-    api_key = minimax_api_key()
+    selected_base_url = (
+        minimax_upstream_base_url()
+        if upstream_base_url is None
+        else upstream_base_url.strip().rstrip("/")
+    )
+    upstream_url = selected_base_url + "/responses"
+    api_key = (
+        minimax_api_key()
+        if upstream_api_key is None
+        else upstream_api_key.strip()
+    )
     if not api_key:
         return 401, {"content-type": "application/json"}, json.dumps({"error": "minimax_api_key_missing"}).encode("utf-8")
     payload = json.dumps(rewritten_body, ensure_ascii=False).encode("utf-8")
@@ -140,17 +155,47 @@ def proxy_minimax_response(raw_body: bytes, *, stream: bool) -> tuple[int, dict[
     try:
         response = urllib.request.urlopen(req, timeout=float(os.getenv("GENBI_MINIMAX_ADAPTER_TIMEOUT_SECONDS", "180")))
     except urllib.error.HTTPError as exc:
-        return exc.code, {"content-type": exc.headers.get("content-type", "application/json")}, exc.read()
+        return (
+            exc.code,
+            {"content-type": exc.headers.get("content-type", "application/json")},
+            _redact_bytes(exc.read(), (api_key,)),
+        )
     headers = {"content-type": response.headers.get("content-type", "text/event-stream" if stream else "application/json")}
     if stream:
-        return response.status, headers, _iter_rewritten_sse(response, namespace_maps)
+        return response.status, headers, _iter_rewritten_sse(
+            response,
+            namespace_maps,
+            redacted_values=(api_key,),
+        )
     data = response.read()
     try:
         event = json.loads(data.decode("utf-8"))
         data = json.dumps(rewrite_response_event(event, namespace_maps), ensure_ascii=False).encode("utf-8")
     except Exception:
         pass
-    return response.status, headers, data
+    return response.status, headers, _redact_bytes(data, (api_key,))
+
+
+def report_build_no_progress_response(
+) -> tuple[int, dict[str, str], bytes]:
+    return (
+        409,
+        {"content-type": "application/json"},
+        json.dumps(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "report_build_no_progress",
+                    "message": (
+                        "Report generation stopped after three "
+                        "model rounds without a successful "
+                        "persisted build update."
+                    ),
+                }
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+    )
 
 
 def _is_namespace_tool(tool: Any) -> bool:
@@ -225,7 +270,13 @@ def _rewrite_sse_block(block: str, namespace_maps: Iterable[NamespaceToolMap]) -
     return "\n".join(out)
 
 
-def _iter_rewritten_sse(response: Any, namespace_maps: list[NamespaceToolMap]) -> Iterable[bytes]:
+def _iter_rewritten_sse(
+    response: Any,
+    namespace_maps: list[NamespaceToolMap],
+    *,
+    redacted_values: Iterable[str] = (),
+) -> Iterable[bytes]:
+    redactions = tuple(value for value in redacted_values if value)
     buffer = ""
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     try:
@@ -236,19 +287,41 @@ def _iter_rewritten_sse(response: Any, namespace_maps: list[NamespaceToolMap]) -
             buffer += decoder.decode(chunk, final=False)
             while "\n\n" in buffer:
                 block, buffer = buffer.split("\n\n", 1)
-                yield (_rewrite_sse_block(block, namespace_maps) + "\n\n").encode("utf-8")
+                rewritten = _rewrite_sse_block(block, namespace_maps) + "\n\n"
+                yield _redact_text(rewritten, redactions).encode("utf-8")
         buffer += decoder.decode(b"", final=True)
         if buffer:
-            yield _rewrite_sse_block(buffer, namespace_maps).encode("utf-8")
+            rewritten = _rewrite_sse_block(buffer, namespace_maps)
+            yield _redact_text(rewritten, redactions).encode("utf-8")
     except TimeoutError:
         yield _sse_error_event("minimax_stream_timeout", "MiniMax response stream timed out.")
     except OSError as exc:
-        yield _sse_error_event("minimax_stream_error", str(exc) or "MiniMax response stream failed.")
+        message = str(exc) or "MiniMax response stream failed."
+        yield _sse_error_event(
+            "minimax_stream_error",
+            _redact_text(message, redactions),
+        )
     finally:
         try:
             response.close()
         except Exception:
             pass
+
+
+def _redact_bytes(value: bytes, redacted_values: Iterable[str]) -> bytes:
+    redacted = value
+    for secret in redacted_values:
+        if secret:
+            redacted = redacted.replace(secret.encode("utf-8"), b"[REDACTED]")
+    return redacted
+
+
+def _redact_text(value: str, redacted_values: Iterable[str]) -> str:
+    redacted = value
+    for secret in redacted_values:
+        if secret:
+            redacted = redacted.replace(secret, "[REDACTED]")
+    return redacted
 
 
 def _sse_error_event(code: str, message: str) -> bytes:

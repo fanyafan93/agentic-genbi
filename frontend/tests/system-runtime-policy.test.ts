@@ -9,13 +9,11 @@ describe("system runtime policy", () => {
   test("accepts the supported safe execution policies", () => {
     expect(
       validateSystemRuntimePolicy({
-        model: "MiniMax-M3",
         approvalMode: "deny_all",
         sandbox: "workspace_write",
         defaultToolsEnabled: false,
       }),
     ).toEqual({
-      model: "MiniMax-M3",
       approvalMode: "deny_all",
       sandbox: "workspace_write",
       defaultToolsEnabled: false,
@@ -25,7 +23,6 @@ describe("system runtime policy", () => {
   test("rejects full access and unknown approval modes", () => {
     expect(() =>
       validateSystemRuntimePolicy({
-        model: "MiniMax-M3",
         approvalMode: "never",
         sandbox: "full_access",
         defaultToolsEnabled: true,
@@ -33,14 +30,18 @@ describe("system runtime policy", () => {
     ).toThrow(SystemRuntimePolicyError);
   });
 
-  test("requires a model name", () => {
-    expect(() =>
+  test("keeps model selection outside the runtime policy", () => {
+    expect(
       validateSystemRuntimePolicy({
-        model: " ",
+        model: "legacy-model-must-not-be-persisted",
         approvalMode: "auto_review",
         sandbox: "read_only",
         defaultToolsEnabled: true,
       }),
-    ).toThrow("runtime_model_required");
+    ).toEqual({
+      approvalMode: "auto_review",
+      sandbox: "read_only",
+      defaultToolsEnabled: true,
+    });
   });
 });

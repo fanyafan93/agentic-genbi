@@ -115,3 +115,46 @@ def test_runtime_context_uses_initial_report_key(tmp_path: Path) -> None:
     )
 
     assert context["initial_report"] == report
+
+
+def test_runtime_context_uses_server_session_principal_for_report_tools(
+    tmp_path: Path,
+) -> None:
+    catalog = SessionCatalog(tmp_path / "sessions.jsonl")
+    catalog.register_session(
+        session_id="session-1",
+        product_kind="analysis_task",
+        title="Report",
+        user_id="user-1",
+        status="active",
+        metadata={
+            "tenant_id": "tenant-1",
+            "workspace_id": "workspace-1",
+        },
+        codex_session_id="session-1",
+    )
+    runner = CodexTurnRunner(
+        analysis_runtime=FakeReportRuntime(),
+        session_catalog=catalog,
+        codex_projection_store=CodexProjectionStore(
+            tmp_path / "turns.jsonl"
+        ),
+        report_projector=ReportProjector(
+            ReportStore(tmp_path / "reports.json")
+        ),
+    )
+
+    context = runner.runtime_context(
+        AnalysisTurnRequest(
+            question="分析",
+            user_id="user-1",
+            metadata={"roles": ["analyst"]},
+        ),
+        session_id="session-1",
+        turn_id="turn-1",
+    )
+
+    assert context["report_tool_owner_id"] == "user-1"
+    assert context["report_tool_tenant_id"] == "tenant-1"
+    assert context["report_tool_workspace_id"] == "workspace-1"
+    assert context["report_tool_roles"] == ["analyst"]

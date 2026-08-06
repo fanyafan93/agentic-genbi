@@ -401,6 +401,78 @@ describe("analysis backend client event mapping", () => {
     })]);
   });
 
+  test("reloads the authoritative Report build on build_updated", async () => {
+    const buildReport = {
+      id: "build-1",
+      title: "渠道销售分析",
+      subtitle: "2026-08",
+      ownerId: "owner-1",
+      turnId: "turn-build",
+      sourceSessionId: "session-1",
+      isExample: false,
+      buildId: "build-1",
+      buildRevision: 4,
+      buildStatus: "building",
+      buildValidationErrors: [],
+      layout: { root: { props: {} }, content: [], zones: {} },
+      filters: {},
+      queries: {},
+      charts: {},
+      tables: {},
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(sseResponse([
+        {
+          type: "genbi/report/build_updated",
+          turn_id: "turn-build",
+          payload: {
+            buildId: "build-1",
+            sessionId: "session-1",
+            revision: 4,
+            status: "building",
+            changedSection: "charts",
+          },
+        },
+        {
+          type: "turn/completed",
+          turn_id: "turn-build",
+          payload: {
+            session_id: "session-1",
+            status: "completed",
+          },
+        },
+      ]))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        build: { id: "build-1", revision: 4 },
+        report: buildReport,
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const events = await collect(
+      new BackendAnalysisAgentClient("http://backend.test").send({
+        kind: "message",
+        content: "生成报告",
+        sessionId: "session-1",
+      }),
+    );
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "report",
+      report: expect.objectContaining({
+        buildId: "build-1",
+        buildRevision: 4,
+      }),
+      threadId: "session-1",
+      turnId: "turn-build",
+    }));
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      "http://backend.test/api/report-builds/build-1",
+    );
+  });
+
   test("requires an explicit sessionId on continuation messages", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(sseResponse([

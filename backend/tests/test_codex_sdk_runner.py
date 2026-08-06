@@ -15,6 +15,7 @@ from backend.harness.codex_sdk_runner import (
     CodexSdkAnalysisRuntime,
     CodexSdkRunnerContext,
 )
+from backend.system_management.model_connections import ModelRuntimeConnection
 
 
 class _FakeAsyncCodex:
@@ -79,6 +80,30 @@ class _FakeTurn:
         )
 
 
+class _RecordingReportToolRegistry:
+    def __init__(self, *, incomplete: bool = False) -> None:
+        self.reserved = None
+        self.bound = None
+        self.released = None
+        self.incomplete = incomplete
+
+    def reserve(self, **kwargs):
+        self.reserved = kwargs
+        return "signed-report-tool-token"
+
+    def execution_id(self, token: str) -> str:
+        return "report-execution-1"
+
+    def bind(self, token: str, *, session_id: str, turn_id: str) -> None:
+        self.bound = (token, session_id, turn_id)
+
+    def has_incomplete_report_build(self, execution_id: str) -> bool:
+        return self.incomplete
+
+    def release(self, token: str) -> None:
+        self.released = token
+
+
 class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
     def test_analysis_instructions_do_not_duplicate_codex_identity_or_mcp_catalog(self) -> None:
         self.assertNotIn("openai-codex", CODEX_ANALYSIS_INSTRUCTIONS)
@@ -88,25 +113,65 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertNotIn("dm.dm_channel_mtsg_sale_total", CODEX_ANALYSIS_INSTRUCTIONS)
         self.assertIn("涉及真实业务数据时，必须先查证", CODEX_ANALYSIS_INSTRUCTIONS)
         self.assertIn("不能编造表、字段、指标、金额、占比或增长结论", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertIn("start_report_build", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertIn("publish_report_build", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertIn(
+            "不要单独输出计划或进度文本",
+            CODEX_ANALYSIS_INSTRUCTIONS,
+        )
+        self.assertIn(
+            "dataSource 只使用 doris 或 mysql",
+            CODEX_ANALYSIS_INSTRUCTIONS,
+        )
+        self.assertIn(
+            "publish_report_build 成功前不得结束当前 Turn",
+            CODEX_ANALYSIS_INSTRUCTIONS,
+        )
+        self.assertNotIn("create_report", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertNotIn("update_report", CODEX_ANALYSIS_INSTRUCTIONS)
+        self.assertNotIn("report_json", CODEX_ANALYSIS_INSTRUCTIONS)
         self.assertIn("输出中文", CODEX_ANALYSIS_INSTRUCTIONS)
 
-    def test_thread_uses_the_current_published_system_prompt(self) -> None:
+    def test_thread_uses_the_current_managed_context_instructions(self) -> None:
         runtime = CodexSdkAnalysisRuntime(
             async_codex_factory=_FakeAsyncCodex,
-            system_prompt_resolver=lambda: "由系统管理发布的提示词",
+            base_instructions_resolver=lambda: "由系统管理保存的基础指令",
+            system_prompt_resolver=lambda: "由系统管理保存的系统提示词",
         )
 
         kwargs = runtime._thread_kwargs(
             CodexSdkRunnerContext(genbi_thread_id="thread_1", genbi_turn_id="turn_1")
         )
 
-        self.assertEqual(kwargs["developer_instructions"], "由系统管理发布的提示词")
+        self.assertEqual(kwargs["base_instructions"], "由系统管理保存的基础指令")
+        self.assertEqual(kwargs["developer_instructions"], "由系统管理保存的系统提示词")
 
-    def test_thread_uses_the_current_managed_runtime_policy(self) -> None:
+    def test_thread_keeps_codex_native_base_when_no_custom_base_is_saved(self) -> None:
         runtime = CodexSdkAnalysisRuntime(
             async_codex_factory=_FakeAsyncCodex,
+            base_instructions_resolver=lambda: None,
+            system_prompt_resolver=lambda: "系统提示词",
+        )
+
+        kwargs = runtime._thread_kwargs(CodexSdkRunnerContext())
+
+        self.assertNotIn("base_instructions", kwargs)
+        self.assertEqual(kwargs["developer_instructions"], "系统提示词")
+
+    def test_thread_uses_the_current_managed_runtime_policy(self) -> None:
+        connection = ModelRuntimeConnection(
+            name="managed",
+            display_name="Managed",
+            provider_type="openai_compatible",
+            model="managed-model",
+            base_url="https://models.example.test/v1",
+            api_key="managed-key",
+        )
+        runtime = CodexSdkAnalysisRuntime(
+            async_codex_factory=_FakeAsyncCodex,
+            model_connection_resolver=lambda: connection,
             runtime_policy_resolver=lambda: {
-                "model": "managed-model",
+                "model": "legacy-policy-model",
                 "approval_mode": "deny_all",
                 "sandbox": "workspace_write",
                 "default_tools_enabled": True,
@@ -116,9 +181,125 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         kwargs = runtime._thread_kwargs(CodexSdkRunnerContext())
 
         self.assertEqual(kwargs["model"], "managed-model")
+        self.assertEqual(kwargs["model_provider"], "genbi_managed")
         self.assertEqual(kwargs["approval_mode"].value, "deny_all")
         self.assertEqual(kwargs["sandbox"].value, "workspace-write")
         self.assertEqual(kwargs["config"], {"default_tools_enabled": True})
+
+    def test_each_turn_uses_one_current_model_connection_snapshot(self) -> None:
+        first = ModelRuntimeConnection(
+            name="first",
+            display_name="First",
+            provider_type="openai_compatible",
+            model="model-first",
+            base_url="https://first.example.test/v1",
+            api_key="first-key",
+        )
+        second = ModelRuntimeConnection(
+            name="second",
+            display_name="Second",
+            provider_type="openai_compatible",
+            model="model-second",
+            base_url="https://second.example.test/v1",
+            api_key="second-key",
+        )
+        current = [first]
+        resolver_calls: list[str] = []
+        codex_runs: list[_FakeAsyncCodex] = []
+
+        def resolve() -> ModelRuntimeConnection:
+            resolver_calls.append(current[0].name)
+            return current[0]
+
+        def factory() -> _FakeAsyncCodex:
+            codex = _FakeAsyncCodex()
+            codex_runs.append(codex)
+            return codex
+
+        runtime = CodexSdkAnalysisRuntime(
+            async_codex_factory=factory,
+            model_connection_resolver=resolve,
+        )
+
+        list(runtime.stream("first turn"))
+        current[0] = second
+        list(runtime.stream("second turn"))
+
+        self.assertEqual(resolver_calls, ["first", "second"])
+        self.assertEqual(
+            [run.started_kwargs["model"] for run in codex_runs],
+            ["model-first", "model-second"],
+        )
+        self.assertEqual(
+            [run.started_kwargs["model_provider"] for run in codex_runs],
+            ["genbi_first", "genbi_second"],
+        )
+
+    def test_managed_connection_builds_custom_provider_config_and_secret_env(
+        self,
+    ) -> None:
+        connection = ModelRuntimeConnection(
+            name="custom-primary",
+            display_name="Custom",
+            provider_type="openai_compatible",
+            model="custom-model",
+            base_url="https://models.example.test/v1",
+            api_key="plain-model-key",
+        )
+        runtime = CodexSdkAnalysisRuntime(
+            async_codex_factory=_FakeAsyncCodex,
+            model_connection_resolver=lambda: connection,
+        )
+
+        overrides = runtime._config_overrides(connection)
+        environment = runtime._codex_env(connection)
+
+        self.assertIn(
+            'model_providers.genbi_custom_primary.base_url="https://models.example.test/v1"',
+            overrides,
+        )
+        self.assertIn(
+            'model_providers.genbi_custom_primary.wire_api="responses"',
+            overrides,
+        )
+        self.assertEqual(
+            environment["GENBI_MANAGED_MODEL_API_KEY"],
+            "plain-model-key",
+        )
+
+    def test_managed_minimax_connection_uses_its_named_local_adapter(
+        self,
+    ) -> None:
+        connection = ModelRuntimeConnection(
+            name="minimax-primary",
+            display_name="MiniMax Primary",
+            provider_type="minimax",
+            model="MiniMax-M3",
+            base_url="https://api.minimaxi.com/v1",
+            api_key="plain-model-key",
+        )
+        runtime = CodexSdkAnalysisRuntime(
+            async_codex_factory=_FakeAsyncCodex,
+            model_connection_resolver=lambda: connection,
+        )
+
+        overrides = runtime._config_overrides(connection)
+
+        self.assertIn(
+            (
+                "model_providers.genbi_minimax_primary.base_url="
+                '"http://127.0.0.1:8000/api/codex-minimax/'
+                'minimax-primary/v1"'
+            ),
+            overrides,
+        )
+        self.assertIn(
+            (
+                "model_providers.genbi_minimax_primary.env_key="
+                '"GENBI_MANAGED_MODEL_API_KEY"'
+            ),
+            overrides,
+        )
 
     def test_refreshes_runtime_home_after_mcp_enabled_policy_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -177,6 +358,71 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertEqual(item_events[0].payload["content"], "complete text")
         self.assertEqual(item_events[0].payload["codex_item_id"], "codex_item_msg")
         self.assertEqual(events[-1].payload["status"], "completed")
+
+    def test_stream_binds_and_releases_signed_report_tool_context(self) -> None:
+        registry = _RecordingReportToolRegistry()
+        runtime = CodexSdkAnalysisRuntime(
+            async_codex_factory=_FakeAsyncCodex,
+            report_tool_execution_registry=registry,
+        )
+
+        list(
+            runtime.stream(
+                "生成报表",
+                context={
+                    "report_tool_owner_id": "user-1",
+                    "report_tool_tenant_id": "tenant-1",
+                    "report_tool_workspace_id": "workspace-1",
+                    "report_tool_roles": ["analyst"],
+                },
+            )
+        )
+
+        self.assertEqual(
+            registry.reserved,
+            {
+                "owner_id": "user-1",
+                "tenant_id": "tenant-1",
+                "workspace_id": "workspace-1",
+                "roles": ("analyst",),
+            },
+        )
+        self.assertEqual(
+            registry.bound,
+            (
+                "signed-report-tool-token",
+                "codex_thread_started",
+                "codex_turn_1",
+            ),
+        )
+        self.assertEqual(
+            registry.released,
+            "signed-report-tool-token",
+        )
+
+    def test_stream_marks_completed_turn_failed_when_build_is_unpublished(
+        self,
+    ) -> None:
+        registry = _RecordingReportToolRegistry(incomplete=True)
+        runtime = CodexSdkAnalysisRuntime(
+            async_codex_factory=_FakeAsyncCodex,
+            report_tool_execution_registry=registry,
+        )
+
+        events = list(
+            runtime.stream(
+                "生成报表",
+                context={"report_tool_owner_id": "user-1"},
+            )
+        )
+
+        terminal = events[-1]
+        self.assertEqual(terminal.type, "turn/completed")
+        self.assertEqual(terminal.payload["status"], "failed")
+        self.assertEqual(
+            terminal.payload["error"]["code"],
+            "report_build_incomplete",
+        )
 
     def test_mcp_tool_call_includes_result_payload(self) -> None:
         from backend.harness.codex_sdk_runner import _mcp_tool_call_payload
@@ -489,6 +735,121 @@ class CodexSdkAnalysisRuntimeTest(unittest.TestCase):
         self.assertIn(
             'model_providers.minimax.base_url="http://127.0.0.1:8000/api/codex-minimax/v1"',
             runtime._config_overrides(),
+        )
+
+    def test_minimax_turn_scopes_adapter_to_report_execution(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "GENBI_ENV_FILE": "missing-test.env",
+                "GENBI_LLM_PROVIDER": "minimax",
+                "GENBI_ANALYSIS_MODEL": "MiniMax-M3",
+                "MINIMAX_API_KEY": "minimax-test-key",
+            },
+            clear=True,
+        ):
+            runtime = CodexSdkAnalysisRuntime()
+
+        self.assertIn(
+            (
+                "model_providers.minimax.base_url="
+                '"http://127.0.0.1:8000/api/codex-minimax/v1/'
+                'executions/report-execution-1"'
+            ),
+            runtime._config_overrides(
+                provider_base_url=(
+                    "http://127.0.0.1:8000/api/codex-minimax/v1/"
+                    "executions/report-execution-1"
+                )
+            ),
+        )
+
+    def test_stream_passes_execution_scoped_minimax_base_url(
+        self,
+    ) -> None:
+        registry = _RecordingReportToolRegistry()
+        fake_codex = _FakeAsyncCodex()
+        runtime = CodexSdkAnalysisRuntime(
+            async_codex_factory=lambda: fake_codex,
+            model_connection_resolver=lambda: None,
+            report_tool_execution_registry=registry,
+        )
+        runtime.provider = "minimax"
+        runtime.model = None
+        runtime.base_url = (
+            "http://127.0.0.1:8000/api/codex-minimax/v1"
+        )
+        original_make = runtime._make_async_codex
+
+        with patch(
+            "backend.harness.codex_sdk_runner.adapter_enabled",
+            return_value=True,
+        ), patch.object(
+            runtime,
+            "_make_async_codex",
+            wraps=original_make,
+        ) as make_codex:
+            list(
+                runtime.stream(
+                    "生成报表",
+                    context={
+                        "report_tool_owner_id": "user-1",
+                    },
+                )
+            )
+
+        self.assertEqual(
+            make_codex.call_args.kwargs["provider_base_url"],
+            (
+                "http://127.0.0.1:8000/api/codex-minimax/v1/"
+                "executions/report-execution-1"
+            ),
+        )
+
+    def test_managed_minimax_stream_uses_scoped_adapter_path(
+        self,
+    ) -> None:
+        registry = _RecordingReportToolRegistry()
+        fake_codex = _FakeAsyncCodex()
+        managed_connection = ModelRuntimeConnection(
+            name="minimax",
+            display_name="MiniMax",
+            provider_type="minimax",
+            model="MiniMax-M3",
+            base_url="https://api.minimaxi.com/v1",
+            api_key="managed-key",
+            source="managed",
+        )
+        runtime = CodexSdkAnalysisRuntime(
+            async_codex_factory=lambda: fake_codex,
+            model_connection_resolver=lambda: managed_connection,
+            report_tool_execution_registry=registry,
+        )
+        original_make = runtime._make_async_codex
+
+        with patch(
+            "backend.harness.codex_sdk_runner.adapter_enabled",
+            return_value=True,
+        ), patch.object(
+            runtime,
+            "_make_async_codex",
+            wraps=original_make,
+        ) as make_codex:
+            list(
+                runtime.stream(
+                    "生成报表",
+                    context={
+                        "report_tool_owner_id": "user-1",
+                    },
+                )
+            )
+
+        self.assertEqual(
+            make_codex.call_args.kwargs["provider_base_url"],
+            (
+                "http://127.0.0.1:8000/api/codex-minimax/"
+                "minimax/v1/executions/report-execution-1"
+            ),
         )
 
     def test_missing_codex_bin_env_falls_back_to_path_resolution(self) -> None:

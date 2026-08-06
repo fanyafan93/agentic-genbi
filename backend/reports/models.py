@@ -18,6 +18,7 @@ class ReportRecord:
     queries: dict[str, Any]
     createdAt: str
     updatedAt: str
+    isExample: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,11 @@ def share_to_payload(record: ReportShareRecord) -> dict[str, Any]:
 
 
 def report_from_payload(payload: dict[str, Any]) -> ReportRecord:
-    return ReportRecord(**_filter_record_fields(payload, ReportRecord))
+    normalized = {"isExample": False, **payload}
+    normalized["isExample"] = bool(normalized.get("isExample"))
+    return ReportRecord(
+        **_filter_record_fields(normalized, ReportRecord)
+    )
 
 
 def share_from_payload(payload: dict[str, Any]) -> ReportShareRecord:

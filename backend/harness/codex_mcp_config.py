@@ -15,13 +15,24 @@ import shutil
 from dataclasses import asdict, dataclass, field
 from typing import Iterable
 
+from backend.mcp_servers.genbi_report_build_tools import (
+    report_build_tool_schemas,
+)
+
 
 @dataclass(frozen=True)
 class CodexMcpServer:
     name: str
-    command: str
+    command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    env_vars: list[str] = field(default_factory=list)
+    transport: str = "stdio"
+    url: str = ""
+    bearer_token_env_var: str = ""
+    oauth_client_id: str = ""
+    oauth_resource: str = ""
+    runtime_env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -101,6 +112,17 @@ def load_runtime_codex_mcp_servers_from_env(
     are explicitly allowed by GenBI configuration.
     """
     env = environ if environ is not None else dict(os.environ)
+    if environ is None:
+        from backend.system_management.mcp_registry import try_build_mcp_registry
+
+        registry = try_build_mcp_registry()
+        if registry is not None:
+            allowed_names = _allowed_runtime_server_names(env)
+            return [
+                server
+                for server in registry.runtime_servers()
+                if allowed_names is None or server.name in allowed_names
+            ]
     if enabled_overrides is None and environ is None:
         from backend.system_management import mcp_enabled_overrides
 
@@ -131,16 +153,59 @@ def to_codex_config_overrides(servers: Iterable[CodexMcpServer]) -> list[str]:
     """Convert MCP server entries into CodexConfig.config_overrides TOML strings."""
     overrides: list[str] = []
     for server in servers:
-        overrides.append(f"mcp_servers.{server.name}.command={_toml_string(server.command)}")
-        if server.args:
+        if server.transport == "streamable_http":
             overrides.append(
-                f"mcp_servers.{server.name}.args={_toml_array(server.args)}"
+                f"mcp_servers.{server.name}.url={_toml_string(server.url)}"
             )
-        for env_key, env_value in server.env.items():
+            if server.bearer_token_env_var:
+                overrides.append(
+                    f"mcp_servers.{server.name}.bearer_token_env_var="
+                    f"{_toml_string(server.bearer_token_env_var)}"
+                )
+            if server.oauth_client_id:
+                overrides.append(
+                    f"mcp_servers.{server.name}.oauth_client_id="
+                    f"{_toml_string(server.oauth_client_id)}"
+                )
+            if server.oauth_resource:
+                overrides.append(
+                    f"mcp_servers.{server.name}.oauth_resource="
+                    f"{_toml_string(server.oauth_resource)}"
+                )
+        else:
             overrides.append(
-                f"mcp_servers.{server.name}.env.{env_key}={_toml_string(env_value)}"
+                f"mcp_servers.{server.name}.command={_toml_string(server.command)}"
             )
+            if server.args:
+                overrides.append(
+                    f"mcp_servers.{server.name}.args={_toml_array(server.args)}"
+                )
+            for env_key, env_value in server.env.items():
+                overrides.append(
+                    f"mcp_servers.{server.name}.env.{env_key}={_toml_string(env_value)}"
+                )
+            env_vars = list(server.env_vars)
+            if server.name == "GenBI_report":
+                for env_var in (
+                    "GENBI_REPORT_TOOL_ENDPOINT",
+                    "GENBI_REPORT_TOOL_TOKEN",
+                ):
+                    if env_var not in env_vars:
+                        env_vars.append(env_var)
+            if env_vars:
+                overrides.append(
+                    f"mcp_servers.{server.name}.env_vars={_toml_array(env_vars)}"
+                )
     return overrides
+
+
+def codex_mcp_runtime_environment(
+    servers: Iterable[CodexMcpServer],
+) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    for server in servers:
+        environment.update(server.runtime_env)
+    return environment
 
 
 def codex_mcp_server_statuses(
@@ -251,17 +316,12 @@ def _known_tools(server: CodexMcpServer, *, trusted: bool) -> list[CodexMcpTool]
     if server.name == "GenBI_report":
         return [
             CodexMcpTool(
-                name="create_report",
-                description="Create a complete query-backed GenBI Report.",
+                name=str(tool["name"]),
+                description=str(tool["description"]),
                 permission="report.write",
                 trusted=trusted,
-            ),
-            CodexMcpTool(
-                name="update_report",
-                description="Replace an existing GenBI Report configuration.",
-                permission="report.write",
-                trusted=trusted,
-            ),
+            )
+            for tool in report_build_tool_schemas()
         ]
     if "mysql" in " ".join([server.command, *server.args]).lower() or "doris" in server.name.lower():
         return [

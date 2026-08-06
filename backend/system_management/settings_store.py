@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from typing import Any
 
 from backend.persistence.postgres_stores import get_postgres_database_url
@@ -64,3 +65,33 @@ def runtime_policy_overrides() -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return dict(value)
+
+
+def set_mcp_enabled_override(
+    name: str,
+    enabled: bool,
+    *,
+    actor_id: str,
+) -> None:
+    database_url = get_postgres_database_url()
+    if not database_url:
+        return
+    from psycopg import connect
+
+    with connect(database_url) as connection:
+        connection.execute(
+            """
+            INSERT INTO "SystemSetting" (key, value, "updatedById", "updatedAt")
+            VALUES (%s, %s::jsonb, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (key)
+            DO UPDATE SET
+                value = EXCLUDED.value,
+                "updatedById" = EXCLUDED."updatedById",
+                "updatedAt" = CURRENT_TIMESTAMP
+            """,
+            (
+                f"{MCP_ENABLED_PREFIX}{name}",
+                json.dumps({"enabled": enabled}),
+                actor_id,
+            ),
+        )

@@ -564,7 +564,10 @@ export function useFlow(
     }
 
     if (event.type === "report") {
-      setReport(event.report);
+      setReport((current) => applyReportRevision(
+        current,
+        event.report,
+      ));
       return currentNodes;
     }
 
@@ -785,6 +788,19 @@ function createFlowSessionSnapshot(nodes: FlowNode[]): FlowSessionSnapshot {
     codexLineage: {},
     running: false,
   };
+}
+
+export function applyReportRevision(
+  current: Report | null,
+  incoming: Report,
+): Report {
+  if (current === null) return incoming;
+  if (!incoming.buildId) return incoming;
+  if (!current.buildId) return incoming;
+  if (current.buildId !== incoming.buildId) return incoming;
+  const currentRevision = current.buildRevision ?? -1;
+  const incomingRevision = incoming.buildRevision ?? -1;
+  return incomingRevision > currentRevision ? incoming : current;
 }
 
 function resolveStateAction<T>(update: SetStateAction<T>, current: T): T {

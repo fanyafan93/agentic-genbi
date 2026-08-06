@@ -116,6 +116,8 @@ updatedAt
 
 `queries` 保存数据源、只读 SQL、筛选参数绑定和分页配置，不保存结果行。后端校验 SQL 后执行查询，ReportContext 保存筛选值并把查询结果交给 ECharts 和 VTable。Puck 只负责布局。
 
+`tables.<tableId>.exportColumns` 是 list 明细表的可选导出白名单；字段必须是安全 SQL 标识符，并声明标题和文本、数值、日期、日期时间或布尔类型。`POST /api/reports/{reportId}/tables/{tableId}/export` 只读取已保存的 query、当前筛选、列头筛选与排序，同步生成单 Sheet `.xlsx`，默认最多 10 万行。未声明 `exportColumns`、Pivot 和构建中的草稿不可导出；前端不提交 SQL，也不决定可导出字段。
+
 Agent 通过 `GenBI_report` MCP Server 调用 `create_report(report)` 或 `update_report(report_id, report)`。MCP 只接受完整 Report 配置；创建或更新成功后分别投影 `genbi/report/created`、`genbi/report/updated` 事件。
 
 Report 不强制绑定会话。`turnId` 为空时只显示“新建会话”；有来源 Turn 时同时显示“回到会话”和“新建会话”。新建会话在用户首次发送问题时创建，并把当前 Report 作为 `initial_report` 引用上下文。

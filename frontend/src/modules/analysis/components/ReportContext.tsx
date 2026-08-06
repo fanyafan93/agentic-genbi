@@ -9,11 +9,16 @@ import {
   useState,
 } from "react";
 import type { ReactNode } from "react";
-import { executeReportQuery } from "../api/report-service";
+import {
+  executeReportBuildQuery,
+  executeReportQuery,
+} from "../api/report-service";
 import type {
+  ReportColumnFilters,
   Report,
   ReportFilterValue,
   ReportQueryResult,
+  ReportSort,
 } from "../types/report";
 
 export type QueryState = {
@@ -22,8 +27,15 @@ export type QueryState = {
   total: number;
   page: number;
   pageSize: number;
+  sort: ReportSort | null;
+  columnFilters: ReportColumnFilters;
   loading: boolean;
   error: string | null;
+};
+
+export type QueryControlUpdate = {
+  sort?: ReportSort | null;
+  columnFilters?: ReportColumnFilters;
 };
 
 type ReportRuntimeContext = {
@@ -38,6 +50,7 @@ type ReportRuntimeContext = {
     queryId: string,
     page?: number,
     pageSize?: number,
+    controls?: QueryControlUpdate,
   ): Promise<void>;
 };
 
@@ -82,6 +95,8 @@ export function ReportProvider({
       values: Record<string, ReportFilterValue>,
       page = 1,
       pageSize = 50,
+      sort: ReportSort | null = null,
+      columnFilters: ReportColumnFilters = {},
     ) => {
       setQueryStates((current) => ({
         ...current,
@@ -89,20 +104,37 @@ export function ReportProvider({
           ...(current[queryId] ?? emptyQueryState()),
           page,
           pageSize,
+          sort,
+          columnFilters,
           loading: true,
           error: null,
         },
       }));
       try {
-        const result = await executeReportQuery(
-          report.id,
-          queryId,
-          { filters: values, page, pageSize },
-        );
+        const request = {
+          filters: values,
+          page,
+          pageSize,
+          sort,
+          columnFilters,
+        };
+        const result = report.buildId
+          ? await executeReportBuildQuery(
+              report.buildId,
+              queryId,
+              request,
+            )
+          : await executeReportQuery(
+              report.id,
+              queryId,
+              request,
+            );
         setQueryStates((current) => ({
           ...current,
           [queryId]: {
             ...result,
+            sort,
+            columnFilters,
             loading: false,
             error: null,
           },
@@ -114,6 +146,8 @@ export function ReportProvider({
             ...(current[queryId] ?? emptyQueryState()),
             page,
             pageSize,
+            sort,
+            columnFilters,
             loading: false,
             error: error instanceof Error
               ? error.message
@@ -146,15 +180,25 @@ export function ReportProvider({
   ]);
 
   const executeQuery = useCallback(
-    async (queryId: string, page = 1, pageSize = 50) => {
+    async (
+      queryId: string,
+      page?: number,
+      pageSize?: number,
+      controls?: QueryControlUpdate,
+    ) => {
+      const current = queryStates[queryId] ?? emptyQueryState();
       await performQuery(
         queryId,
         filterValues,
-        page,
-        pageSize,
+        page ?? current.page,
+        pageSize ?? current.pageSize,
+        controls?.sort !== undefined
+          ? controls.sort
+          : current.sort,
+        controls?.columnFilters ?? current.columnFilters,
       );
     },
-    [filterValues, performQuery],
+    [filterValues, performQuery, queryStates],
   );
 
   const setFilterValue = useCallback(
@@ -167,7 +211,15 @@ export function ReportProvider({
           query?.parameters ?? {},
         ).some((parameter) => parameter.filterId === filterId);
         if (isBound) {
-          void performQuery(queryId, nextValues);
+          const current = queryStates[queryId] ?? emptyQueryState();
+          void performQuery(
+            queryId,
+            nextValues,
+            1,
+            current.pageSize,
+            current.sort,
+            current.columnFilters,
+          );
         }
       }
     },
@@ -176,6 +228,7 @@ export function ReportProvider({
       performQuery,
       referencedQueryIds,
       report.queries,
+      queryStates,
     ],
   );
 
@@ -220,6 +273,8 @@ function emptyQueryState(): QueryState {
     total: 0,
     page: 1,
     pageSize: 50,
+    sort: null,
+    columnFilters: {},
     loading: false,
     error: null,
   };

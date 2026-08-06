@@ -93,6 +93,13 @@ const systemMcpPanelSource = readFileSync(
   resolve(process.cwd(), "src/modules/system/components/SystemMcpPanel.tsx"),
   "utf8",
 );
+const systemModelConnectionsPanelSource = readFileSync(
+  resolve(
+    process.cwd(),
+    "src/modules/system/components/SystemModelConnectionsPanel.tsx",
+  ),
+  "utf8",
+);
 
 describe("analysis task product language", () => {
   test("frames the primary workspace as a unified analysis workspace", () => {
@@ -186,9 +193,17 @@ describe("analysis task product language", () => {
 
   test("adds a unified system management console with MCP controls", () => {
     expect(systemAdminPageSource).toContain("用户与权限");
+    expect(systemAdminPageSource).toContain("模型连接");
     expect(systemAdminPageSource).toContain("MCP 服务");
-    expect(systemAdminPageSource).toContain("系统提示词");
-    expect(systemAdminPageSource).toContain("模型与运行策略");
+    expect(systemAdminPageSource).toContain("上下文管理");
+    expect(systemAdminPageSource).toContain("运行策略");
+    expect(systemAdminPageSource).not.toContain("模型与运行策略");
+    expect(systemModelConnectionsPanelSource).toContain(
+      "listManagedModelConnections",
+    );
+    expect(systemModelConnectionsPanelSource).toContain(
+      "testManagedModelConnection",
+    );
     expect(systemMcpPanelSource).toContain("listManagedMcpServers");
     expect(systemMcpPanelSource).toContain("testManagedMcpServer");
     expect(systemMcpPanelSource).toContain("运行检查");
@@ -197,7 +212,7 @@ describe("analysis task product language", () => {
     expect(globalStylesSource).toContain(".system-tool-list");
   });
 
-  test("keeps analysis task inputs free of removed mode and data-egress controls", () => {
+  test("keeps analysis task execution contracts free of mode and data-egress fields", () => {
     expect(agentTypesSource).not.toContain("AnalysisMode");
     expect(agentTypesSource).not.toContain("analysisMode");
     expect(agentTypesSource).not.toContain("dataEgressAuthorized");

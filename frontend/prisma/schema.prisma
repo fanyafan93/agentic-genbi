@@ -93,3 +93,69 @@ model SystemAuditLog {
   @@index([createdAt])
   @@index([targetType, targetId])
 }
+
+model McpServer {
+  id               String    @id @default(cuid())
+  name             String    @unique
+  displayName      String
+  transport        String
+  config           Json
+  encryptedSecrets String    @db.Text
+  enabled          Boolean   @default(true)
+  createdById      String
+  updatedById      String
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  discoveredTools  Json      @default("[]")
+  lastTestedAt     DateTime?
+  lastTestStatus   String?
+  lastTestMessage  String?
+
+  @@index([enabled])
+}
+
+model ModelConnection {
+  id              String    @id @default(cuid())
+  name            String    @unique
+  displayName     String
+  providerType    String
+  model           String
+  baseUrl         String
+  encryptedApiKey String    @db.Text
+  enabled         Boolean   @default(true)
+  isDefault       Boolean   @default(false)
+  createdById     String
+  updatedById     String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  lastTestedAt    DateTime?
+  lastTestStatus  String?
+  lastTestMessage String?
+
+  @@index([enabled])
+  @@index([isDefault])
+}
+
+model ReportBuild {
+  id                 String   @id
+  ownerId            String   @map("owner_id")
+  sessionId          String   @map("session_id")
+  turnId             String   @map("turn_id")
+  targetReportId     String?  @map("target_report_id")
+  status             String
+  content            Json
+  validationErrors   Json     @default("[]") @map("validation_errors")
+  revision           BigInt   @default(0)
+  publishedReportId  String?  @map("published_report_id")
+  lastSuccessfulStep String?  @map("last_successful_step")
+  stepAttempts       Json     @default("{}") @map("step_attempts")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  expiresAt          DateTime @map("expires_at")
+
+  @@index([sessionId, updatedAt(sort: Desc)])
+  @@index([turnId])
+  @@index([ownerId, status, updatedAt(sort: Desc)])
+  @@index([expiresAt])
+  @@map("report_builds")
+}

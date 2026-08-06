@@ -53,6 +53,7 @@ class ReportStore:
             "turnId": _optional_text(turn_id),
             "createdAt": now,
             "updatedAt": now,
+            "isExample": False,
         }
         state["reports"].append(report)
         self._write_state(state)
@@ -76,6 +77,7 @@ class ReportStore:
                 for item in state["reports"]
                 if item.get("id") == identifier
                 and item.get("ownerId") == owner
+                and not item.get("deletedAt")
             ),
             None,
         )
@@ -92,6 +94,7 @@ class ReportStore:
             ),
             "createdAt": str(existing["createdAt"]),
             "updatedAt": _now(),
+            "isExample": bool(existing.get("isExample")),
         }
         state["reports"] = [
             updated if item.get("id") == identifier else item
@@ -110,6 +113,7 @@ class ReportStore:
         reports = [
             report_from_payload(item)
             for item in self._read_state()["reports"]
+            if not item.get("deletedAt")
         ]
         if owner_id:
             reports = [
@@ -131,6 +135,7 @@ class ReportStore:
                 item
                 for item in self._read_state()["reports"]
                 if item.get("id") == identifier
+                and not item.get("deletedAt")
             ),
             None,
         )
@@ -140,24 +145,48 @@ class ReportStore:
         identifier = _required_text(report_id, "report_id")
         owner = _required_text(owner_id, "owner_id")
         state = self._read_state()
-        before = len(state["reports"])
-        state["reports"] = [
-            item
-            for item in state["reports"]
-            if not (
-                item.get("id") == identifier
+        report = next(
+            (
+                item
+                for item in state["reports"]
+                if item.get("id") == identifier
                 and item.get("ownerId") == owner
-            )
-        ]
-        if len(state["reports"]) == before:
+            ),
+            None,
+        )
+        if report is None:
             return False
-        state["shares"] = [
-            share
-            for share in state["shares"]
-            if share.get("reportId") != identifier
-        ]
-        self._write_state(state)
+        if not report.get("deletedAt"):
+            report["deletedAt"] = _now()
+            self._write_state(state)
         return True
+
+    def set_report_example(
+        self,
+        report_id: str,
+        *,
+        owner_id: str,
+        is_example: bool,
+    ) -> ReportRecord | None:
+        identifier = _required_text(report_id, "report_id")
+        owner = _required_text(owner_id, "owner_id")
+        state = self._read_state()
+        report = next(
+            (
+                item
+                for item in state["reports"]
+                if item.get("id") == identifier
+                and item.get("ownerId") == owner
+                and not item.get("deletedAt")
+            ),
+            None,
+        )
+        if report is None:
+            return None
+        report["isExample"] = bool(is_example)
+        report["updatedAt"] = _now()
+        self._write_state(state)
+        return report_from_payload(report)
 
     def share_report(
         self,
@@ -182,6 +211,7 @@ class ReportStore:
                 for item in state["reports"]
                 if item.get("id") == identifier
                 and item.get("ownerId") == owner
+                and not item.get("deletedAt")
             ),
             None,
         )
@@ -225,6 +255,7 @@ class ReportStore:
                 for item in state["reports"]
                 if item.get("id") == identifier
                 and item.get("ownerId") == owner
+                and not item.get("deletedAt")
             ),
             None,
         )
@@ -255,22 +286,41 @@ class ReportStore:
         reports = {
             str(item["id"]): report_from_payload(item)
             for item in state["reports"]
+            if not item.get("deletedAt")
         }
         mine = sorted(
             (
                 report
                 for report in reports.values()
-                if report.ownerId == user
+                if report.ownerId == user and not report.isExample
             ),
             key=lambda report: report.updatedAt,
             reverse=True,
         )[:limit]
+        example_candidates = sorted(
+            (
+                report
+                for report in reports.values()
+                if report.isExample
+            ),
+            key=lambda report: report.updatedAt,
+            reverse=True,
+        )
+        example_titles: set[str] = set()
+        examples: list[ReportRecord] = []
+        for report in example_candidates:
+            if report.title in example_titles:
+                continue
+            example_titles.add(report.title)
+            examples.append(report)
+            if len(examples) >= limit:
+                break
         shared: list[dict[str, Any]] = []
         for item in state["shares"]:
             if item.get("recipientUserId") != user:
                 continue
             report = reports.get(str(item.get("reportId") or ""))
-            if report is None:
+            if report is None or report.isExample:
                 continue
             share = share_from_payload(item)
             shared.append(
@@ -289,6 +339,10 @@ class ReportStore:
                 for report in mine
             ],
             "sharedWithMe": shared[:limit],
+            "examples": [
+                {"report": report_to_payload(report)}
+                for report in examples
+            ],
         }
 
     def _read_state(self) -> dict[str, list[dict[str, Any]]]:

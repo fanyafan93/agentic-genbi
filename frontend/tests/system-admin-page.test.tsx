@@ -60,9 +60,30 @@ describe("system administration page", () => {
     expect(await screen.findByRole("heading", { name: "系统控制台" })).toBeTruthy();
     expect(screen.queryByRole("navigation", { name: "系统管理导航" })).toBeNull();
     expect(screen.getByRole("button", { name: /用户与权限/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /模型连接/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /MCP 服务/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /系统提示词/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /模型与运行策略/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /上下文管理/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /系统提示词/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /运行策略/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /模型与运行策略/ })).toBeNull();
     expect(container.textContent?.toLowerCase()).not.toContain("codex");
+  });
+
+  test("opens model connections from the system overview", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access: "administrator" }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ connections: [] }), { status: 200 }),
+      );
+
+    render(<SystemAdminPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /模型连接/ }));
+
+    expect(
+      await screen.findByRole("heading", { name: "模型连接" }),
+    ).toBeTruthy();
   });
 });

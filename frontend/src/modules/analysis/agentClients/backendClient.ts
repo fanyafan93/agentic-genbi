@@ -1,5 +1,6 @@
 import type { ArtifactKind } from "@/modules/analysis/types/artifact";
 import type { Report } from "@/modules/analysis/types/report";
+import { getReportBuild } from "../api/report-service";
 import type { FlowActivity, FlowNode } from "../hooks/use-flow";
 import type { AgentClient, AgentEvent, AgentInput } from "./types";
 
@@ -202,6 +203,64 @@ export class BackendAnalysisAgentClient implements AgentClient {
             };
             continue;
           }
+        }
+        if (backendEvent.type === "genbi/report/build_updated") {
+          const buildId = asString(
+            backendEvent.payload.buildId,
+          );
+          const expectedRevision = Number(
+            backendEvent.payload.revision,
+          );
+          const eventContext = getSystemContext(backendEvent);
+          const eventSessionId = (
+            asString(backendEvent.payload.sessionId)
+            || eventContext.threadId
+            || resolvedSessionId
+          );
+          try {
+            if (!buildId) {
+              throw new Error("report_build_id_missing");
+            }
+            const snapshot = await getReportBuild(
+              buildId,
+              this.apiBaseUrl,
+            );
+            const fetchedRevision = Number(
+              snapshot.report.buildRevision,
+            );
+            if (
+              Number.isFinite(expectedRevision)
+              && (
+                !Number.isFinite(fetchedRevision)
+                || fetchedRevision < expectedRevision
+              )
+            ) {
+              throw new Error("report_build_revision_stale");
+            }
+            yield {
+              type: "report",
+              report: snapshot.report,
+              ...eventContext,
+              threadId: (
+                snapshot.report.sourceSessionId
+                || eventSessionId
+                || undefined
+              ),
+              turnId: (
+                snapshot.report.turnId
+                || asString(backendEvent.payload.turnId)
+                || eventContext.turnId
+              ),
+            };
+          } catch {
+            yield {
+              type: "error",
+              message: "Report build refresh failed",
+              ...eventContext,
+              threadId: eventSessionId || undefined,
+            };
+          }
+          continue;
         }
         for (const event of mapBackendEvents([backendEvent], input.kind, mappingContext)) {
           for await (const displayEvent of smoothTokenEvent(event)) {

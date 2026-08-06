@@ -10,6 +10,14 @@ from backend.reports.models import report_to_payload
 from backend.reports.schema import ReportValidationError
 
 
+_BUILD_MUTATION_ACTIONS = {
+    "build_started",
+    "build_updated",
+    "build_failed",
+    "build_validated",
+}
+
+
 def _report_tool_result(value: Any) -> dict[str, Any] | None:
     if isinstance(value, str):
         try:
@@ -26,9 +34,17 @@ def _report_tool_result(value: Any) -> dict[str, Any] | None:
         return None
     if value.get("type") == "text":
         return _report_tool_result(value.get("text"))
-    if (
+    action = str(value.get("action") or "")
+    if action in {"create", "update"} and (
         value.get("ok") is True
-        and value.get("action") in {"create", "update"}
+        and isinstance(value.get("report"), dict)
+    ):
+        return value
+    if action in _BUILD_MUTATION_ACTIONS and value.get("buildId"):
+        return value
+    if action == "build_published" and (
+        value.get("ok") is True
+        and value.get("buildId")
         and isinstance(value.get("report"), dict)
     ):
         return value
@@ -67,8 +83,38 @@ class ReportProjector:
         if result is None:
             return None
 
-        report_id = str(result.get("reportId") or "").strip()
         action = str(result.get("action") or "").strip()
+        if action in _BUILD_MUTATION_ACTIONS:
+            return AgentEvent(
+                type="genbi/report/build_updated",
+                turn_id=turn_id,
+                payload={
+                    "eventSource": "genbi_projection",
+                    "buildId": str(result.get("buildId") or ""),
+                    "sessionId": session_id,
+                    "turnId": turn_id,
+                    "status": str(result.get("status") or ""),
+                    "revision": int(result.get("revision") or 0),
+                    "changedSection": str(
+                        result.get("changedSection") or ""
+                    ),
+                    "codex_item_id": payload.get("codex_item_id"),
+                },
+            )
+        if action == "build_published":
+            report = dict(result["report"])
+            return AgentEvent(
+                type="genbi/report/created",
+                turn_id=turn_id,
+                payload={
+                    **report,
+                    "sourceSessionId": session_id,
+                    "eventSource": "genbi_projection",
+                    "codex_item_id": payload.get("codex_item_id"),
+                },
+            )
+
+        report_id = str(result.get("reportId") or "").strip()
         report = dict(result["report"])
         try:
             if self._store is None:

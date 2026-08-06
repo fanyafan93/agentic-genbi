@@ -335,15 +335,46 @@ class CodexTurnRunner:
         turn_id: str,
         codex_session_id: str | None = None,
     ) -> dict[str, Any]:
+        session = (
+            self._catalog.get_session(session_id)
+            if session_id
+            else None
+        )
         if codex_session_id is None:
-            session = self._catalog.get_session(session_id) if session_id else None
             codex_session_id = session.codexSessionId if session else None
+        metadata = dict(request.metadata or {})
+        owner_id = (
+            _string_or_none(getattr(session, "userId", None))
+            or _string_or_none(request.user_id)
+            or "local-user"
+        )
+        tenant_id = (
+            _string_or_none(getattr(session, "tenantId", None))
+            or _string_or_none(metadata.get("tenant_id"))
+        )
+        workspace_id = (
+            _string_or_none(getattr(session, "workspaceId", None))
+            or _string_or_none(metadata.get("workspace_id"))
+        )
+        roles = [
+            str(role).strip().lower()
+            for role in (
+                metadata.get("roles")
+                if isinstance(metadata.get("roles"), (list, tuple))
+                else []
+            )
+            if str(role).strip()
+        ]
         context = {
             "genbi_thread_id": session_id,
             "genbi_turn_id": turn_id,
             "turn_id": turn_id,
             "codex_session_id": codex_session_id,
             "codex_thread_id": codex_session_id,
+            "report_tool_owner_id": owner_id,
+            "report_tool_tenant_id": tenant_id,
+            "report_tool_workspace_id": workspace_id,
+            "report_tool_roles": roles,
         }
         initial_report = request.metadata.get("initial_report")
         if isinstance(initial_report, dict):

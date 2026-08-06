@@ -39,7 +39,6 @@ export async function PUT(request: Request) {
         create: {
           key: "runtime.policy",
           value: {
-            model: policy.model,
             approval_mode: policy.approvalMode,
             sandbox: policy.sandbox,
             default_tools_enabled: policy.defaultToolsEnabled,
@@ -48,7 +47,6 @@ export async function PUT(request: Request) {
         },
         update: {
           value: {
-            model: policy.model,
             approval_mode: policy.approvalMode,
             sandbox: policy.sandbox,
             default_tools_enabled: policy.defaultToolsEnabled,

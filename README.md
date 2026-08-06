@@ -59,7 +59,7 @@ MiniMax、OpenAI-compatible 或其他模型只是 Codex 的 model adapter，不�
 ## 当前实现快照
 
 - 前端：Next.js + TypeScript。分析工作台提供左侧分析线程和右侧 Report；Puck 管布局、Ant Design 管筛选、ECharts 管图表、VTable 管表格。
-- 后端：FastAPI。Report 直接保存为当前单记录，不做版本管理；查询配置保存只读 SQL 和筛选参数绑定，数据由后端按需执行并分页返回。
+- 后端：FastAPI。Report 直接保存为当前单记录，不做版本管理；查询配置保存只读 SQL 和筛选参数绑定，数据由后端按需执行并分页返回。list 明细表可通过 `exportColumns` 显式开启同步 Excel 导出。
 - 登录：Auth.js + 飞书 OAuth + PostgreSQL session。
 - 运行：Docker Compose 启动 frontend、backend、postgres。
 - 待完成：完整业务语义库持久化、团队权限/RLS、生产数据源治理和更复杂的 Report 联动能力。
@@ -112,13 +112,10 @@ NEXT_PUBLIC_ANALYSIS_AGENT_RUNTIME=backend
 GENBI_PUBLIC_API_BASE_URL=http://192.168.101.12:8000
 
 GENBI_ANALYSIS_RUNTIME=codex
-GENBI_LLM_PROVIDER=minimax
-GENBI_ANALYSIS_MODEL=MiniMax-M3
-MINIMAX_BASE_URL=https://api.minimaxi.com/v1
-MINIMAX_API_KEY=...
-GENBI_CODEX_PROVIDER=minimax
-GENBI_CODEX_API_KEY=...
+GENBI_MCP_ENCRYPTION_KEY=replace-with-a-long-random-key
 ```
+
+模型连接和 API Key 由“系统管理 → 模型连接”维护并加密保存到 PostgreSQL。模型相关 env 仅用于首次引导或应急回退，数据库已有默认连接后可以移除；`GENBI_MCP_ENCRYPTION_KEY` 必须长期保持不变，否则已保存的模型与 MCP 密钥无法解密。
 
 修改 `.env` 后，`docker compose restart` 不一定重新注入变量；需要：
 
@@ -133,7 +130,7 @@ cd frontend
 npm.cmd test
 npm.cmd run build
 
-python -m unittest discover backend\tests -v
+python -m pytest backend/tests -q -p no:cacheprovider
 docker compose config
 ```
 

@@ -7,6 +7,7 @@ export const reportFixture: Report = {
   ownerId: "owner-1",
   turnId: "turn-1",
   sourceSessionId: "session-1",
+  isExample: false,
   layout: {
     root: { props: {} },
     content: [

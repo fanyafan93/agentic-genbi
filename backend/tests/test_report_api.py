@@ -3,7 +3,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Any
+from zipfile import ZipFile
+from io import BytesIO
 
+import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -142,6 +145,33 @@ def test_report_query_endpoint_loads_saved_sql_and_rejects_client_sql(
     assert executed.json()["total"] == 1
 
 
+def test_report_query_endpoint_accepts_declared_table_controls(
+    tmp_path: Path,
+) -> None:
+    client, report_store, _ = _client(tmp_path)
+    config = report_config()
+    config["queries"]["sales-query"]["pagination"] = True
+    config["queries"]["sales-query"]["controls"] = {
+        "sortableFields": ["amount"],
+        "filterableFields": ["region"],
+    }
+    report = report_store.create_report(config, owner_id="user-1")
+
+    response = client.post(
+        f"/api/reports/{report.id}/queries/sales-query",
+        json={
+            "filters": {"region": "华东"},
+            "page": 1,
+            "pageSize": 20,
+            "sort": {"field": "amount", "direction": "desc"},
+            "columnFilters": {"region": ["华东"]},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pageSize"] == 20
+
+
 def test_report_sharing_and_delete_use_direct_paths(tmp_path: Path) -> None:
     client, _, _ = _client(tmp_path)
     created = client.post(
@@ -162,19 +192,78 @@ def test_report_sharing_and_delete_use_direct_paths(tmp_path: Path) -> None:
         "/api/report-center",
         params={"user_id": "user-2"},
     )
-    deleted = client.delete(
+    other_owner_delete = client.delete(
+        f"/api/reports/{report_id}",
+        params={"owner_id": "owner-2"},
+    )
+    still_open = client.get(f"/api/reports/{report_id}")
+    first_delete = client.delete(
         f"/api/reports/{report_id}",
         params={"owner_id": "owner-1"},
     )
-    center_after_delete = client.get(
+    repeated_delete = client.delete(
+        f"/api/reports/{report_id}",
+        params={"owner_id": "owner-1"},
+    )
+    owner_center_after_delete = client.get(
+        "/api/report-center",
+        params={"user_id": "owner-1"},
+    )
+    recipient_center_after_delete = client.get(
         "/api/report-center",
         params={"user_id": "user-2"},
+    )
+    opened_after_delete = client.get(f"/api/reports/{report_id}")
+    queried_after_delete = client.post(
+        f"/api/reports/{report_id}/queries/sales-query",
+        json={"filters": {}},
     )
 
     assert shared.status_code == 200
     assert center.json()["sharedWithMe"][0]["report"]["id"] == report_id
-    assert deleted.status_code == 200
-    assert center_after_delete.json()["sharedWithMe"] == []
+    assert other_owner_delete.status_code == 404
+    assert still_open.status_code == 200
+    assert first_delete.status_code == 200
+    assert repeated_delete.status_code == 200
+    assert owner_center_after_delete.json()["mine"] == []
+    assert recipient_center_after_delete.json()["sharedWithMe"] == []
+    assert opened_after_delete.status_code == 404
+    assert queried_after_delete.status_code == 404
+
+
+def test_internal_example_marking_requires_system_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "GENBI_SYSTEM_API_TOKEN",
+        "system-secret",
+    )
+    client, _, _ = _client(tmp_path)
+    created = client.post(
+        "/api/reports",
+        json={"ownerId": "seed", **report_config("公开示例")},
+    ).json()["report"]
+    path = f"/api/internal/reports/{created['id']}/example"
+
+    denied = client.put(
+        path,
+        json={"ownerId": "seed", "isExample": True},
+    )
+    accepted = client.put(
+        path,
+        headers={"X-GenBI-System-Token": "system-secret"},
+        json={"ownerId": "seed", "isExample": True},
+    )
+    center = client.get(
+        "/api/report-center",
+        params={"user_id": "other-user"},
+    )
+
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json()["report"]["isExample"] is True
+    assert center.json()["examples"][0]["report"]["id"] == created["id"]
 
 
 def test_invalid_report_and_missing_query_use_contract_status_codes(
@@ -199,3 +288,57 @@ def test_invalid_report_and_missing_query_use_contract_status_codes(
     assert invalid_response.status_code == 422
     assert missing_query.status_code == 404
 
+
+def test_list_table_with_export_columns_downloads_xlsx(
+    tmp_path: Path,
+) -> None:
+    client, report_store, _ = _client(tmp_path)
+    config = report_config()
+    config["queries"]["sales-query"]["controls"] = {
+        "sortableFields": ["amount"],
+        "filterableFields": ["region"],
+    }
+    config["tables"]["sales-table"]["type"] = "list"
+    config["tables"]["sales-table"]["exportColumns"] = [
+        {"field": "region", "title": "区域", "type": "text"},
+        {"field": "amount", "title": "销售额", "type": "number"},
+    ]
+    report = report_store.create_report(config, owner_id="user-1")
+
+    response = client.post(
+        f"/api/reports/{report.id}/tables/sales-table/export",
+        headers={"Origin": "http://localhost:3000"},
+        json={
+            "filters": {"region": "华东"},
+            "sort": {"field": "amount", "direction": "desc"},
+            "columnFilters": {"region": ["华东"]},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert "attachment" in response.headers["content-disposition"]
+    assert response.headers["access-control-expose-headers"] == (
+        "Content-Disposition"
+    )
+    with ZipFile(BytesIO(response.content)) as workbook:
+        assert "xl/worksheets/sheet1.xml" in workbook.namelist()
+        worksheet = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        assert "区域" in worksheet
+        assert "华东" in worksheet
+
+
+def test_pivot_or_unconfigured_table_cannot_be_exported(
+    tmp_path: Path,
+) -> None:
+    client, report_store, _ = _client(tmp_path)
+    report = report_store.create_report(report_config(), owner_id="user-1")
+
+    response = client.post(
+        f"/api/reports/{report.id}/tables/sales-table/export",
+        json={"filters": {"region": "华东"}},
+    )
+
+    assert response.status_code == 404

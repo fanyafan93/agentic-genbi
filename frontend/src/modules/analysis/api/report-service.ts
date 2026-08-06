@@ -3,6 +3,8 @@ import type {
   ReportCenter,
   ReportQueryRequest,
   ReportQueryResult,
+  ReportTableExportFile,
+  ReportTableExportRequest,
   SavedReport,
 } from "../types/report";
 
@@ -18,6 +20,16 @@ type ReportConfigBody = Pick<
   | "tables"
   | "queries"
 > & { ownerId: string };
+
+export type ReportBuildResponse = {
+  build: Record<string, unknown>;
+  report: Report;
+};
+
+export type ActiveReportBuildResponse = {
+  build: Record<string, unknown> | null;
+  report: Report | null;
+};
 
 export function shouldUseBackendReports(): boolean {
   return (
@@ -61,6 +73,25 @@ export async function getReport(
 ): Promise<SavedReport> {
   return requestJson<SavedReport>(
     `/api/reports/${encodeURIComponent(reportId)}`,
+  );
+}
+
+export async function getReportBuild(
+  buildId: string,
+  apiBaseUrl?: string,
+): Promise<ReportBuildResponse> {
+  return requestJson<ReportBuildResponse>(
+    `/api/report-builds/${encodeURIComponent(buildId)}`,
+    undefined,
+    apiBaseUrl,
+  );
+}
+
+export async function getActiveReportBuild(
+  sessionId: string,
+): Promise<ActiveReportBuildResponse> {
+  return requestJson<ActiveReportBuildResponse>(
+    `/api/analysis/sessions/${encodeURIComponent(sessionId)}/report-builds/active`,
   );
 }
 
@@ -126,6 +157,51 @@ export async function executeReportQuery(
   );
 }
 
+export async function executeReportBuildQuery(
+  buildId: string,
+  queryId: string,
+  request: ReportQueryRequest,
+): Promise<ReportQueryResult> {
+  return requestJson<ReportQueryResult>(
+    `/api/report-builds/${encodeURIComponent(buildId)}/queries/${encodeURIComponent(queryId)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+export async function exportReportTable(
+  reportId: string,
+  tableId: string,
+  request: ReportTableExportRequest,
+): Promise<ReportTableExportFile> {
+  const apiBaseUrl = getReportApiBaseUrl();
+  if (!apiBaseUrl) {
+    throw new Error("Report API base URL is not configured.");
+  }
+  const response = await fetch(
+    `${apiBaseUrl}/api/reports/${encodeURIComponent(reportId)}`
+      + `/tables/${encodeURIComponent(tableId)}/export`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Report API returned ${response.status}`);
+  }
+  return {
+    blob: await response.blob(),
+    filename: responseFilename(
+      response.headers.get("Content-Disposition"),
+      `${tableId}.xlsx`,
+    ),
+  };
+}
+
 function toReportConfig(
   report: Report,
   ownerId: string,
@@ -145,8 +221,9 @@ function toReportConfig(
 async function requestJson<T = unknown>(
   path: string,
   init?: RequestInit,
+  apiBaseUrlOverride?: string,
 ): Promise<T> {
-  const apiBaseUrl = getReportApiBaseUrl();
+  const apiBaseUrl = apiBaseUrlOverride ?? getReportApiBaseUrl();
   if (!apiBaseUrl) {
     throw new Error("Report API base URL is not configured.");
   }
@@ -155,4 +232,23 @@ async function requestJson<T = unknown>(
     throw new Error(`Report API returned ${response.status}`);
   }
   return await response.json() as T;
+}
+
+function responseFilename(
+  contentDisposition: string | null,
+  fallback: string,
+): string {
+  if (!contentDisposition) return fallback;
+  const encoded = contentDisposition.match(
+    /filename\*=UTF-8''([^;]+)/i,
+  )?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return fallback;
+    }
+  }
+  return contentDisposition.match(/filename="?([^";]+)"?/i)?.[1]
+    ?? fallback;
 }

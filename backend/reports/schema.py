@@ -1,15 +1,32 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
+from backend.reports.build_models import ReportValidationIssue
 from backend.reports.query_service import (
+    PARAMETER_NAME,
     UnsafeReportQuery,
     query_parameter_names,
 )
 
 
 FILTER_TYPES = {"select", "multiSelect", "date", "dateRange"}
+REPORT_DATA_SOURCES = {"doris", "mysql"}
+EXPORT_COLUMN_TYPES = {
+    "text",
+    "number",
+    "date",
+    "datetime",
+    "boolean",
+}
+LAYOUT_BLOCK_TYPES = {
+    "FilterBlock",
+    "ChartBlock",
+    "TableBlock",
+    "SectionBlock",
+    "MarkdownBlock",
+}
 LEGACY_REPORT_FIELDS = {
     "artifactType",
     "renderer",
@@ -58,6 +75,104 @@ def validate_report_config(report: Mapping[str, Any]) -> None:
     _validate_layout(layout, filters, charts, tables)
 
 
+def collect_report_validation_errors(
+    report: Mapping[str, Any],
+) -> list[ReportValidationIssue]:
+    issues: list[ReportValidationIssue] = []
+    seen_paths: set[str] = set()
+
+    def collect(validation: Callable[[], None]) -> None:
+        try:
+            validation()
+        except ReportValidationError as exc:
+            if exc.path in seen_paths:
+                return
+            seen_paths.add(exc.path)
+            issues.append(
+                ReportValidationIssue(
+                    path=exc.path,
+                    code=_validation_issue_code(exc),
+                    message=exc.message,
+                )
+            )
+
+    if not isinstance(report, Mapping):
+        return [
+            ReportValidationIssue(
+                path="report",
+                code="invalid_type",
+                message="report must be an object.",
+            )
+        ]
+
+    for key in sorted(LEGACY_REPORT_FIELDS):
+        if key in report:
+            collect(
+                lambda key=key: _raise_validation_error(
+                    key,
+                    f"{key} is not part of the Report contract.",
+                )
+            )
+    for key in ("title", "subtitle"):
+        collect(lambda key=key: _require_text(report, key))
+
+    sections: dict[str, dict[str, Any]] = {}
+    for key in ("layout", "filters", "charts", "tables", "queries"):
+        value = report.get(key)
+        if not isinstance(value, dict):
+            collect(
+                lambda key=key: _raise_validation_error(
+                    key,
+                    f"{key} must be an object.",
+                )
+            )
+            sections[key] = {}
+        else:
+            sections[key] = value
+
+    filters = sections["filters"]
+    queries = sections["queries"]
+    charts = sections["charts"]
+    tables = sections["tables"]
+    layout = sections["layout"]
+
+    for filter_id in sorted(filters, key=str):
+        collect(
+            lambda filter_id=filter_id: _validate_filters(
+                {filter_id: filters[filter_id]}
+            )
+        )
+    for query_id in sorted(queries, key=str):
+        collect(
+            lambda query_id=query_id: _validate_queries(
+                {query_id: queries[query_id]},
+                filters,
+            )
+        )
+    for chart_id in sorted(charts, key=str):
+        collect(
+            lambda chart_id=chart_id: _validate_charts(
+                {chart_id: charts[chart_id]},
+                queries,
+            )
+        )
+    for table_id in sorted(tables, key=str):
+        collect(
+            lambda table_id=table_id: _validate_tables(
+                {table_id: tables[table_id]},
+                queries,
+            )
+        )
+    _collect_layout_validation_errors(
+        layout,
+        filters,
+        charts,
+        tables,
+        collect,
+    )
+    return issues
+
+
 def report_config_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     validate_report_config(report)
     return {
@@ -69,6 +184,82 @@ def report_config_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "tables": dict(report["tables"]),
         "queries": dict(report["queries"]),
     }
+
+
+def _collect_layout_validation_errors(
+    layout: dict[str, Any],
+    filters: dict[str, Any],
+    charts: dict[str, Any],
+    tables: dict[str, Any],
+    collect: Callable[[Callable[[], None]], None],
+) -> None:
+    content = layout.get("content")
+    zones = layout.get("zones", {})
+    if not isinstance(content, list):
+        collect(
+            lambda: _raise_validation_error(
+                "layout.content",
+                "layout content must be an array.",
+            )
+        )
+    else:
+        for index, block in enumerate(content):
+            collect(
+                lambda index=index, block=block: _validate_layout_block(
+                    block,
+                    f"layout.content.{index}",
+                    filters,
+                    charts,
+                    tables,
+                )
+            )
+    if not isinstance(zones, dict):
+        collect(
+            lambda: _raise_validation_error(
+                "layout.zones",
+                "layout zones must be an object.",
+            )
+        )
+        return
+    for zone_id in sorted(zones, key=str):
+        blocks = zones[zone_id]
+        zone_path = f"layout.zones.{zone_id}"
+        if not isinstance(blocks, list):
+            collect(
+                lambda zone_path=zone_path: _raise_validation_error(
+                    zone_path,
+                    "layout zone must be an array.",
+                )
+            )
+            continue
+        for index, block in enumerate(blocks):
+            collect(
+                lambda index=index, block=block, zone_path=zone_path:
+                    _validate_layout_block(
+                        block,
+                        f"{zone_path}.{index}",
+                        filters,
+                        charts,
+                        tables,
+                    )
+            )
+
+
+def _raise_validation_error(path: str, message: str) -> None:
+    raise ReportValidationError(path, message)
+
+
+def _validation_issue_code(error: ReportValidationError) -> str:
+    message = error.message.lower()
+    if "does not exist" in message:
+        return "invalid_reference"
+    if "required" in message:
+        return "required"
+    if "must be" in message:
+        return "invalid_type"
+    if "not part of" in message:
+        return "unsupported_field"
+    return "invalid_value"
 
 
 def _validate_filters(filters: dict[str, Any]) -> None:
@@ -117,6 +308,15 @@ def _validate_queries(
         if not isinstance(value, dict):
             raise ReportValidationError(path, "query must be an object.")
         _require_nested_text(value, "dataSource", path)
+        data_source = str(value["dataSource"]).strip().lower()
+        if data_source not in REPORT_DATA_SOURCES:
+            raise ReportValidationError(
+                f"{path}.dataSource",
+                (
+                    "query dataSource must be one of "
+                    f"{sorted(REPORT_DATA_SOURCES)}."
+                ),
+            )
         _require_nested_text(value, "sql", path)
         try:
             placeholder_names = query_parameter_names(str(value["sql"]))
@@ -142,6 +342,7 @@ def _validate_queries(
                 f"{path}.pagination",
                 "query pagination must be a boolean.",
             )
+        _validate_query_controls(value.get("controls"), path)
         for parameter_id, binding in parameters.items():
             binding_path = f"{path}.parameters.{parameter_id}"
             if not isinstance(binding, dict):
@@ -167,6 +368,34 @@ def _validate_queries(
             _require_nested_text(binding, "type", binding_path)
 
 
+def _validate_query_controls(controls: Any, path: str) -> None:
+    if controls is None:
+        return
+    controls_path = f"{path}.controls"
+    if not isinstance(controls, dict):
+        raise ReportValidationError(
+            controls_path,
+            "query controls must be an object.",
+        )
+    for key in ("sortableFields", "filterableFields"):
+        fields = controls.get(key, [])
+        fields_path = f"{controls_path}.{key}"
+        if not isinstance(fields, list):
+            raise ReportValidationError(
+                fields_path,
+                f"{key} must be an array.",
+            )
+        for index, field in enumerate(fields):
+            if (
+                not isinstance(field, str)
+                or not PARAMETER_NAME.fullmatch(field)
+            ):
+                raise ReportValidationError(
+                    f"{fields_path}.{index}",
+                    "query control field must be a safe SQL identifier.",
+                )
+
+
 def _validate_charts(
     charts: dict[str, Any],
     queries: dict[str, Any],
@@ -180,6 +409,11 @@ def _validate_charts(
             raise ReportValidationError(
                 f"{path}.option",
                 "ECharts option must be an object.",
+            )
+        if not isinstance(value["option"].get("series"), list):
+            raise ReportValidationError(
+                f"{path}.option.series",
+                "ECharts option series must be an array.",
             )
 
 
@@ -197,6 +431,54 @@ def _validate_tables(
                 f"{path}.options",
                 "VTable options must be an object.",
             )
+        if not isinstance(value["options"].get("columns"), list):
+            raise ReportValidationError(
+                f"{path}.options.columns",
+                "VTable columns must be an array.",
+            )
+        table_type = value.get("type", "list")
+        if table_type not in {"list", "pivot"}:
+            raise ReportValidationError(
+                f"{path}.type",
+                "table type must be list or pivot.",
+            )
+        export_columns = value.get("exportColumns")
+        if export_columns is None:
+            continue
+        if table_type != "list":
+            raise ReportValidationError(
+                f"{path}.exportColumns",
+                "exportColumns are only supported for list tables.",
+            )
+        if not isinstance(export_columns, list) or not export_columns:
+            raise ReportValidationError(
+                f"{path}.exportColumns",
+                "exportColumns must be a non-empty array.",
+            )
+        for index, column in enumerate(export_columns):
+            column_path = f"{path}.exportColumns.{index}"
+            if not isinstance(column, dict):
+                raise ReportValidationError(
+                    column_path,
+                    "export column must be an object.",
+                )
+            field = column.get("field")
+            if (
+                not isinstance(field, str)
+                or not PARAMETER_NAME.fullmatch(field)
+            ):
+                raise ReportValidationError(
+                    f"{column_path}.field",
+                    "export column field must be a safe SQL identifier.",
+                )
+            _require_nested_text(column, "title", column_path)
+            column_type = column.get("type", "text")
+            if column_type not in EXPORT_COLUMN_TYPES:
+                raise ReportValidationError(
+                    f"{column_path}.type",
+                    "export column type must be one of "
+                    f"{sorted(EXPORT_COLUMN_TYPES)}.",
+                )
 
 
 def _validate_layout(
@@ -255,11 +537,18 @@ def _validate_layout_block(
     props = block.get("props")
     if not isinstance(block_type, str) or not block_type:
         raise ReportValidationError(f"{path}.type", "block type is required.")
+    if block_type not in LAYOUT_BLOCK_TYPES:
+        raise ReportValidationError(
+            f"{path}.type",
+            "block type must be one of "
+            f"{sorted(LAYOUT_BLOCK_TYPES)}.",
+        )
     if not isinstance(props, dict):
         raise ReportValidationError(
             f"{path}.props",
             "block props must be an object.",
         )
+    _require_nested_text(props, "id", f"{path}.props")
     if block_type == "FilterBlock":
         filter_ids = props.get("filterIds")
         if not isinstance(filter_ids, list):
@@ -287,6 +576,10 @@ def _validate_layout_block(
             tables,
             f"{path}.props",
         )
+    elif block_type == "SectionBlock":
+        _require_nested_text(props, "title", f"{path}.props")
+    elif block_type == "MarkdownBlock":
+        _require_nested_text(props, "content", f"{path}.props")
 
 
 def _validate_query_reference(

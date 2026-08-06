@@ -14,6 +14,10 @@ from backend.harness.codex_mcp_config import (
     test_codex_mcp_server as run_codex_mcp_server_test,
     to_codex_config_overrides,
 )
+from backend.mcp_servers.genbi_report_build_tools import (
+    report_build_tool_schemas,
+)
+from backend.reports.build_service import REPORT_BUILD_TOOL_NAMES
 
 
 class LoadCodexMcpServersFromEnvTest(unittest.TestCase):
@@ -122,7 +126,7 @@ class LoadCodexMcpServersFromEnvTest(unittest.TestCase):
         self.assertEqual(server["permission"], "report.write")
         self.assertEqual(
             [tool["name"] for tool in server["tools"]],
-            ["create_report", "update_report"],
+            list(REPORT_BUILD_TOOL_NAMES),
         )
         self.assertTrue(
             all(
@@ -151,6 +155,29 @@ class ToCodexConfigOverridesTest(unittest.TestCase):
         server = CodexMcpServer(name="BI_doris", command="npx")
         overrides = to_codex_config_overrides([server])
         self.assertEqual(overrides, ['mcp_servers.BI_doris.command="npx"'])
+
+    def test_report_server_whitelists_turn_scoped_environment(
+        self,
+    ) -> None:
+        server = CodexMcpServer(
+            name="GenBI_report",
+            command="python",
+            args=[
+                "-m",
+                "backend.mcp_servers.genbi_report_server",
+            ],
+        )
+
+        overrides = to_codex_config_overrides([server])
+
+        self.assertIn(
+            (
+                "mcp_servers.GenBI_report.env_vars="
+                '["GENBI_REPORT_TOOL_ENDPOINT", '
+                '"GENBI_REPORT_TOOL_TOKEN"]'
+            ),
+            overrides,
+        )
 
     def test_server_with_args_and_env(self) -> None:
         server = CodexMcpServer(
@@ -185,6 +212,45 @@ class ToCodexConfigOverridesTest(unittest.TestCase):
         joined = "\n".join(overrides)
         self.assertIn(r"echo \"hello\"", joined)
         self.assertNotIn('echo "hello"', joined)
+
+    def test_streamable_http_server_uses_codex_native_fields(self) -> None:
+        server = CodexMcpServer(
+            name="external_api",
+            transport="streamable_http",
+            url="https://mcp.example.test/mcp",
+            bearer_token_env_var="GENBI_MCP_EXTERNAL_API_TOKEN",
+            oauth_client_id="genbi-client",
+            oauth_resource="https://mcp.example.test",
+            runtime_env={
+                "GENBI_MCP_EXTERNAL_API_TOKEN": "plain-http-token",
+            },
+        )
+
+        overrides = to_codex_config_overrides([server])
+
+        self.assertEqual(
+            overrides,
+            [
+                'mcp_servers.external_api.url="https://mcp.example.test/mcp"',
+                'mcp_servers.external_api.bearer_token_env_var="GENBI_MCP_EXTERNAL_API_TOKEN"',
+                'mcp_servers.external_api.oauth_client_id="genbi-client"',
+                'mcp_servers.external_api.oauth_resource="https://mcp.example.test"',
+            ],
+        )
+
+
+class ReportBuildToolSchemaTest(unittest.TestCase):
+    def test_query_data_source_is_limited_to_runtime_sources(self) -> None:
+        schemas = {
+            schema["name"]: schema
+            for schema in report_build_tool_schemas()
+        }
+
+        data_source = schemas["upsert_report_query"]["inputSchema"][
+            "properties"
+        ]["query"]["properties"]["dataSource"]
+
+        self.assertEqual(data_source["enum"], ["doris", "mysql"])
 
 
 class CodexSdkAnalysisRuntimeMcpIntegrationTest(unittest.TestCase):

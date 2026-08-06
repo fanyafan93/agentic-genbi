@@ -5,6 +5,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -16,7 +17,10 @@ from backend.business_semantics.finereport_reports import FineReportReportReposi
 from backend.harness.codex_sdk_runner import CodexSdkAnalysisRuntime
 from backend.harness.codex_mcp_config import codex_mcp_server_status_payload, test_codex_mcp_server
 from backend.harness.events import AgentEvent
-from backend.harness.minimax_codex_adapter import proxy_minimax_response
+from backend.harness.minimax_codex_adapter import (
+    proxy_minimax_response,
+    report_build_no_progress_response,
+)
 from backend.harness.session_catalog import SessionCatalog, SessionRecord, SessionView
 from backend.harness.codex_projection_store import (
     CodexItemProjectionRecord,
@@ -25,6 +29,7 @@ from backend.harness.codex_projection_store import (
 )
 from backend.persistence.postgres_stores import (
     build_postgres_analysis_asset_store,
+    build_postgres_report_build_store,
     build_postgres_report_store,
     build_postgres_stores,
     build_postgres_session_catalog,
@@ -32,8 +37,27 @@ from backend.persistence.postgres_stores import (
     postgres_persistence_enabled,
 )
 from backend.reports.models import report_to_payload, share_to_payload
+from backend.reports.excel_export import (
+    ReportTableNotExportable,
+    create_report_excel_export,
+    remove_export_file,
+)
+from backend.reports.build_context import (
+    ReportToolExecutionRegistry,
+    ReportToolTokenError,
+)
+from backend.reports.build_models import (
+    renderable_report_from_build,
+    report_build_to_payload,
+)
+from backend.reports.build_service import (
+    REPORT_BUILD_TOOL_NAMES,
+    ReportBuildService,
+)
+from backend.reports.build_store import ReportBuildStore
 from backend.reports.query_service import (
     MySqlQueryRunner,
+    ReportExportLimitExceeded,
     ReportFilterError,
     ReportQueryExecutionError,
     ReportQueryNotFound,
@@ -42,6 +66,23 @@ from backend.reports.query_service import (
 from backend.reports.schema import ReportValidationError
 from backend.reports.store import ReportStore
 from backend.system_management import runtime_policy_overrides
+from backend.system_management.context_status import list_installed_skills
+from backend.system_management.mcp_registry import (
+    McpRegistry,
+    McpRegistryConflict,
+    McpRegistryError,
+    McpRegistryNotFound,
+    build_mcp_registry,
+)
+from backend.system_management.settings_store import set_mcp_enabled_override
+from backend.system_management.mcp_probe import probe_mcp_server
+from backend.system_management.model_connections import (
+    ModelConnectionConflict,
+    ModelConnectionError,
+    ModelConnectionNotFound,
+    build_model_connection_registry,
+)
+from backend.system_management.model_probe import probe_model_connection
 from backend.business_semantics.knowledge_store import KnowledgeStore
 # P2-3: responsibility split.
 #
@@ -86,6 +127,10 @@ def create_app(
     analysis_runtime: CodexSdkAnalysisRuntime | None = None,
     analysis_asset_store: AnalysisAssetStore | None = None,
     report_store: Any | None = None,
+    report_build_store: Any | None = None,
+    report_tool_execution_registry: (
+        ReportToolExecutionRegistry | None
+    ) = None,
     report_query_service: ReportQueryService | None = None,
     session_catalog: SessionCatalog | None = None,
     codex_projection_store: CodexProjectionStore | None = None,
@@ -95,6 +140,8 @@ def create_app(
     # is recognised.
     thread_store: Any | None = None,
     finereport_repository: FineReportReportRepository | None = None,
+    mcp_registry: McpRegistry | None = None,
+    model_connection_registry: Any | None = None,
 ) -> Any:
     _enforce_single_worker_runtime()
     if thread_store is not None and (session_catalog is None or codex_projection_store is None):
@@ -104,8 +151,14 @@ def create_app(
     try:
         from fastapi import Body, FastAPI, HTTPException, Query, Request
         from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import Response, StreamingResponse
-        from pydantic import BaseModel, ConfigDict, Field
+        from fastapi.responses import FileResponse, Response, StreamingResponse
+        from starlette.background import BackgroundTask
+        from pydantic import (
+            BaseModel,
+            ConfigDict,
+            Field,
+            ValidationError as PydanticValidationError,
+        )
     except ImportError as exc:
         raise RuntimeError("Install FastAPI dependencies from backend/requirements.txt to start the API.") from exc
 
@@ -191,11 +244,68 @@ def create_app(
         recipientUserId: str = Field(min_length=1)
         permission: Literal["view", "view_and_reuse"]
 
+    class ReportExampleBody(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        ownerId: str = Field(min_length=1)
+        isExample: bool
+
+    class ReportSortBody(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        field: str = Field(min_length=1)
+        direction: Literal["asc", "desc"]
+
     class ReportQueryBody(BaseModel):
         model_config = ConfigDict(extra="forbid")
         filters: dict[str, Any] = Field(default_factory=dict)
         page: int = Field(default=1, ge=1)
         pageSize: int = Field(default=50, ge=1, le=500)
+        sort: ReportSortBody | None = None
+        columnFilters: dict[str, list[str]] = Field(default_factory=dict)
+
+    class ReportTableExportBody(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        filters: dict[str, Any] = Field(default_factory=dict)
+        sort: ReportSortBody | None = None
+        columnFilters: dict[str, list[str]] = Field(default_factory=dict)
+
+    class StartReportBuildBody(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        title: str = Field(min_length=1)
+        subtitle: str = Field(min_length=1)
+
+    class GetReportBuildBody(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        build_id: str = Field(min_length=1)
+
+    class SetReportFiltersBody(GetReportBuildBody):
+        filters: dict[str, Any]
+
+    class UpsertReportQueryBody(GetReportBuildBody):
+        query_id: str = Field(min_length=1)
+        query: dict[str, Any]
+
+    class UpsertReportChartBody(GetReportBuildBody):
+        chart_id: str = Field(min_length=1)
+        chart: dict[str, Any]
+
+    class UpsertReportTableBody(GetReportBuildBody):
+        table_id: str = Field(min_length=1)
+        table: dict[str, Any]
+
+    class SetReportLayoutBody(GetReportBuildBody):
+        layout: dict[str, Any]
+
+    report_build_body_models = {
+        "start_report_build": StartReportBuildBody,
+        "get_report_build": GetReportBuildBody,
+        "set_report_filters": SetReportFiltersBody,
+        "upsert_report_query": UpsertReportQueryBody,
+        "upsert_report_chart": UpsertReportChartBody,
+        "upsert_report_table": UpsertReportTableBody,
+        "set_report_layout": SetReportLayoutBody,
+        "validate_report_build": GetReportBuildBody,
+        "publish_report_build": GetReportBuildBody,
+    }
 
     class AnalysisSessionUpdateBody(BaseModel):
         """Request body for ``PATCH /api/analysis/sessions/{sessionId}``.
@@ -228,6 +338,66 @@ def create_app(
         actual = _header_text(request, "X-GenBI-System-Token") or ""
         if not hmac.compare_digest(actual, expected):
             raise HTTPException(status_code=401, detail="system_api_token_required")
+
+    def _require_model_management_token(request: Request) -> None:
+        expected = os.getenv("GENBI_SYSTEM_API_TOKEN", "").strip()
+        if not expected:
+            raise HTTPException(
+                status_code=503,
+                detail="system_api_token_not_configured",
+            )
+        actual = _header_text(request, "X-GenBI-System-Token") or ""
+        if not hmac.compare_digest(actual, expected):
+            raise HTTPException(
+                status_code=401,
+                detail="system_api_token_required",
+            )
+
+    def _managed_mcp_registry() -> McpRegistry:
+        if mcp_registry is not None:
+            return mcp_registry
+        try:
+            return build_mcp_registry()
+        except Exception as error:
+            LOGGER.error("mcp_registry_unavailable error=%s", error)
+            raise HTTPException(
+                status_code=503,
+                detail="mcp_registry_unavailable",
+            ) from error
+
+    def _mcp_actor_id(request: Request) -> str:
+        return _header_text(request, "X-GenBI-Actor-Id") or "system"
+
+    def _managed_model_connection_registry() -> Any:
+        if model_connection_registry is not None:
+            return model_connection_registry
+        try:
+            return build_model_connection_registry()
+        except Exception as error:
+            LOGGER.error(
+                "model_connection_registry_unavailable error=%s",
+                error,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="model_connection_registry_unavailable",
+            ) from error
+
+    def _raise_mcp_http_error(error: McpRegistryError) -> None:
+        if isinstance(error, McpRegistryNotFound):
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        if isinstance(error, McpRegistryConflict):
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    def _raise_model_connection_http_error(
+        error: ModelConnectionError,
+    ) -> None:
+        if isinstance(error, ModelConnectionNotFound):
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        if isinstance(error, ModelConnectionConflict):
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
     def _principal_from_request(request: Request) -> Principal | None:
         tenant_id = _header_text(request, "X-GenBI-Tenant-Id")
@@ -364,6 +534,7 @@ def create_app(
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
     )
     configured_knowledge_store = knowledge_store or _build_default_knowledge_store()
     configured_analysis_runtime = analysis_runtime or build_default_analysis_runtime()
@@ -378,6 +549,41 @@ def create_app(
     )
     configured_session_catalog = session_catalog or _build_default_session_catalog()
     configured_codex_projection_store = codex_projection_store or _build_default_codex_projection_store()
+    configured_report_build_store = (
+        report_build_store
+        or _build_default_report_build_store(
+            configured_report_store
+        )
+    )
+    configured_report_build_service = ReportBuildService(
+        configured_report_build_store
+    )
+    configured_report_tool_registry = (
+        report_tool_execution_registry
+        or ReportToolExecutionRegistry()
+    )
+    bind_active_build_resolver = getattr(
+        configured_report_tool_registry,
+        "bind_active_build_resolver",
+        None,
+    )
+    if callable(bind_active_build_resolver):
+        bind_active_build_resolver(
+            lambda owner_id, session_id: (
+                configured_report_build_store.get_active_for_session(
+                    session_id,
+                    owner_id=owner_id,
+                )
+                is not None
+            )
+        )
+    bind_report_registry = getattr(
+        configured_analysis_runtime,
+        "bind_report_tool_execution_registry",
+        None,
+    )
+    if callable(bind_report_registry):
+        bind_report_registry(configured_report_tool_registry)
     # P2-3: instantiate the service triad once per app. The rest of the
     # routes only touch the services, not the raw stores directly.
     configured_report_projector = ReportProjector(configured_report_store)
@@ -423,9 +629,213 @@ def create_app(
         metadata.setdefault("thread_root", True)
         return metadata
 
+    def _require_report_build(
+        build_id: str,
+        principal: Principal | None,
+    ) -> Any:
+        build = configured_report_build_store.get_build(build_id)
+        if build is None:
+            raise HTTPException(
+                status_code=404,
+                detail="report_build_not_found",
+            )
+        if (
+            principal is not None
+            and "admin" not in principal.roles
+            and build.ownerId != principal.user_id
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail="report_build_not_found",
+            )
+        return build
+
+    def _report_build_response(build: Any) -> dict[str, Any]:
+        return {
+            "build": report_build_to_payload(build),
+            "report": renderable_report_from_build(build),
+        }
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.post("/api/internal/report-build-tools/{tool_name}")
+    def invoke_internal_report_build_tool(
+        tool_name: str,
+        request: Request,
+        payload: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        if tool_name not in REPORT_BUILD_TOOL_NAMES:
+            raise HTTPException(
+                status_code=404,
+                detail="report_build_tool_not_found",
+            )
+        authorization = str(
+            request.headers.get("Authorization") or ""
+        )
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token.strip():
+            raise HTTPException(
+                status_code=401,
+                detail="report_tool_token_required",
+            )
+        try:
+            context = configured_report_tool_registry.resolve(
+                token.strip()
+            )
+        except ReportToolTokenError as error:
+            raise HTTPException(
+                status_code=401,
+                detail=str(error),
+            ) from error
+        model_type = report_build_body_models[tool_name]
+        try:
+            body = model_type.model_validate(payload)
+        except PydanticValidationError as error:
+            failed_result = (
+                configured_report_build_service
+                .record_argument_validation_failure(
+                    tool_name,
+                    payload,
+                    context,
+                    error.errors(),
+                )
+            )
+            if (
+                failed_result is not None
+                and isinstance(
+                    failed_result.get("revision"),
+                    int,
+                )
+            ):
+                configured_report_tool_registry.record_report_mutation_result(
+                    token.strip(),
+                    tool_name,
+                    retryable=bool(
+                        failed_result.get("retryable", True)
+                    ),
+                    failed=True,
+                )
+                return failed_result
+            raise HTTPException(
+                status_code=422,
+                detail=error.errors(),
+            ) from error
+        result = configured_report_build_service.invoke(
+            tool_name,
+            body.model_dump(),
+            context,
+        )
+        # Successful updates and retryable persisted validation failures
+        # advance the build revision and open a fresh correction window.
+        # A third failed attempt exhausts that window immediately;
+        # access/not-found errors have no revision and leave it unchanged.
+        if isinstance(result.get("revision"), int):
+            configured_report_tool_registry.record_report_mutation_result(
+                token.strip(),
+                tool_name,
+                retryable=bool(result.get("retryable", True)),
+                failed=result.get("ok") is False,
+            )
+        return result
+
+    @app.get("/api/report-builds/{build_id}")
+    def get_report_build(
+        build_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        return _report_build_response(
+            _require_report_build(
+                build_id,
+                _principal_from_request(request),
+            )
+        )
+
+    @app.get(
+        "/api/analysis/sessions/{session_id}/report-builds/active"
+    )
+    def get_active_report_build(
+        session_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        principal = _principal_from_request(request)
+        try:
+            view = _require_principal_view(session_id, principal)
+        except SessionNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="analysis_session_not_found",
+            )
+        owner_id = (
+            None
+            if principal is not None and "admin" in principal.roles
+            else (
+                principal.user_id
+                if principal is not None
+                else view.session.userId
+            )
+        )
+        build = configured_report_build_store.get_active_for_session(
+            view.session.id,
+            owner_id=owner_id,
+        )
+        if build is None:
+            return {"build": None, "report": None}
+        return _report_build_response(build)
+
+    @app.post(
+        "/api/report-builds/{build_id}/queries/{query_id}"
+    )
+    def execute_report_build_query(
+        build_id: str,
+        query_id: str,
+        request: Request,
+        body: ReportQueryBody = Body(...),
+    ) -> dict[str, Any]:
+        build = _require_report_build(
+            build_id,
+            _principal_from_request(request),
+        )
+        source = SimpleNamespace(
+            queries=build.content.get("queries", {})
+        )
+        try:
+            return configured_report_query_service.execute(
+                source,
+                query_id,
+                filters=body.filters,
+                page=body.page,
+                page_size=body.pageSize,
+                sort=(
+                    body.sort.model_dump()
+                    if body.sort is not None
+                    else None
+                ),
+                column_filters=body.columnFilters,
+            )
+        except ReportQueryNotFound as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="report_query_not_found",
+            ) from exc
+        except ReportFilterError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+            ) from exc
+        except ReportQueryExecutionError as exc:
+            LOGGER.exception(
+                "report_build_query_failed",
+                extra={
+                    "build_id": build_id,
+                    "query_id": query_id,
+                },
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="report_query_failed",
+            ) from exc
 
     @app.get("/api/runtime/status")
     def runtime_status() -> dict[str, Any]:
@@ -434,22 +844,252 @@ def create_app(
     @app.get("/api/system/mcp/servers")
     def list_mcp_servers(request: Request) -> dict[str, Any]:
         _require_system_api_token(request)
-        return codex_mcp_server_status_payload()
+        if mcp_registry is None:
+            try:
+                return {"servers": build_mcp_registry().list()}
+            except Exception:
+                return codex_mcp_server_status_payload()
+        return {"servers": mcp_registry.list()}
+
+    @app.post("/api/system/mcp/servers", status_code=201)
+    def create_mcp_server(
+        request: Request,
+        body: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        _require_system_api_token(request)
+        try:
+            server = _managed_mcp_registry().create(
+                body,
+                actor_id=_mcp_actor_id(request),
+            )
+        except McpRegistryError as error:
+            _raise_mcp_http_error(error)
+        return {"server": server}
+
+    @app.patch("/api/system/mcp/servers/{server_name}")
+    def update_mcp_server(
+        server_name: str,
+        request: Request,
+        body: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        _require_system_api_token(request)
+        registry = _managed_mcp_registry()
+        actor_id = _mcp_actor_id(request)
+        try:
+            if set(body.keys()) == {"enabled"}:
+                enabled = body.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise McpRegistryError("enabled must be a boolean.")
+                server = registry.set_enabled(
+                    server_name,
+                    enabled,
+                    actor_id=actor_id,
+                )
+                if server_name == "GenBI_report":
+                    set_mcp_enabled_override(
+                        server_name,
+                        enabled,
+                        actor_id=actor_id,
+                    )
+            else:
+                server = registry.update(
+                    server_name,
+                    body,
+                    actor_id=actor_id,
+                )
+        except McpRegistryError as error:
+            _raise_mcp_http_error(error)
+        return {"server": server}
+
+    @app.delete("/api/system/mcp/servers/{server_name}", status_code=204)
+    def delete_mcp_server(server_name: str, request: Request) -> Response:
+        _require_system_api_token(request)
+        try:
+            _managed_mcp_registry().delete(server_name)
+        except McpRegistryError as error:
+            _raise_mcp_http_error(error)
+        return Response(status_code=204)
+
+    @app.get("/api/system/mcp/servers/{server_name}/secrets")
+    def reveal_mcp_server_secrets(
+        server_name: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        _require_system_api_token(request)
+        try:
+            secrets = _managed_mcp_registry().reveal_secrets(server_name)
+        except McpRegistryError as error:
+            _raise_mcp_http_error(error)
+        return {"secrets": secrets}
 
     @app.post("/api/system/mcp/servers/{server_name}/test")
     def test_mcp_server(server_name: str, request: Request) -> dict[str, Any]:
         _require_system_api_token(request)
+        registry: McpRegistry | None = mcp_registry
+        if registry is None:
+            try:
+                registry = build_mcp_registry()
+            except Exception:
+                registry = None
+        if registry is not None:
+            try:
+                result = probe_mcp_server(registry.runtime_server(server_name))
+                registry.record_test_result(
+                    server_name,
+                    result,
+                    actor_id=_mcp_actor_id(request),
+                )
+                return result
+            except McpRegistryError as error:
+                _raise_mcp_http_error(error)
         return test_codex_mcp_server(server_name)
+
+    @app.get("/api/system/model-connections")
+    def list_model_connections(request: Request) -> dict[str, Any]:
+        _require_model_management_token(request)
+        return {"connections": _managed_model_connection_registry().list()}
+
+    @app.post("/api/system/model-connections", status_code=201)
+    def create_model_connection(
+        request: Request,
+        body: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        _require_model_management_token(request)
+        try:
+            connection = _managed_model_connection_registry().create(
+                body,
+                actor_id=_mcp_actor_id(request),
+            )
+        except ModelConnectionError as error:
+            _raise_model_connection_http_error(error)
+        return {"connection": connection}
+
+    @app.patch("/api/system/model-connections/{connection_name}")
+    def update_model_connection(
+        connection_name: str,
+        request: Request,
+        body: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        _require_model_management_token(request)
+        try:
+            connection = _managed_model_connection_registry().update(
+                connection_name,
+                body,
+                actor_id=_mcp_actor_id(request),
+            )
+        except ModelConnectionError as error:
+            _raise_model_connection_http_error(error)
+        return {"connection": connection}
+
+    @app.delete(
+        "/api/system/model-connections/{connection_name}",
+        status_code=204,
+    )
+    def delete_model_connection(
+        connection_name: str,
+        request: Request,
+    ) -> Response:
+        _require_model_management_token(request)
+        try:
+            _managed_model_connection_registry().delete(connection_name)
+        except ModelConnectionError as error:
+            _raise_model_connection_http_error(error)
+        return Response(status_code=204)
+
+    @app.get("/api/system/model-connections/{connection_name}/secret")
+    def reveal_model_connection_secret(
+        connection_name: str,
+        request: Request,
+    ) -> Response:
+        _require_model_management_token(request)
+        try:
+            api_key = _managed_model_connection_registry().reveal_secret(
+                connection_name
+            )
+        except ModelConnectionError as error:
+            _raise_model_connection_http_error(error)
+        return Response(
+            content=json.dumps({"apiKey": api_key}, ensure_ascii=False),
+            status_code=200,
+            media_type="application/json",
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+            },
+        )
+
+    @app.post("/api/system/model-connections/{connection_name}/test")
+    def test_model_connection(
+        connection_name: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        _require_model_management_token(request)
+        registry = _managed_model_connection_registry()
+        try:
+            result = probe_model_connection(
+                registry.runtime_connection(connection_name)
+            )
+            registry.record_test_result(
+                connection_name,
+                result,
+                actor_id=_mcp_actor_id(request),
+            )
+        except ModelConnectionError as error:
+            _raise_model_connection_http_error(error)
+        return result
+
+    @app.post("/api/system/model-connections/{connection_name}/default")
+    def set_default_model_connection(
+        connection_name: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        _require_model_management_token(request)
+        try:
+            connection = _managed_model_connection_registry().set_default(
+                connection_name,
+                actor_id=_mcp_actor_id(request),
+            )
+        except ModelConnectionError as error:
+            _raise_model_connection_http_error(error)
+        return {"connection": connection}
 
     @app.get("/api/system/runtime/policy")
     def system_runtime_policy(request: Request) -> dict[str, Any]:
         _require_system_api_token(request)
         managed = runtime_policy_overrides()
+        resolve_model_connection = getattr(
+            configured_analysis_runtime,
+            "_resolve_model_connection",
+            None,
+        )
+        try:
+            model_connection = (
+                resolve_model_connection()
+                if callable(resolve_model_connection)
+                else None
+            )
+        except Exception:
+            LOGGER.exception("runtime_model_connection_status_failed")
+            model_connection = None
         default_tools = os.getenv("GENBI_CODEX_DEFAULT_TOOLS_ENABLED", "true").strip().lower()
         return {
-            "provider": str(getattr(configured_analysis_runtime, "provider", "") or "local"),
+            "provider": str(
+                getattr(model_connection, "provider_type", "")
+                or getattr(configured_analysis_runtime, "provider", "")
+                or "local"
+            ),
             "enabled": bool(getattr(configured_analysis_runtime, "enabled", False)),
-            "model": str(managed.get("model") or getattr(configured_analysis_runtime, "model", "") or ""),
+            "model": str(
+                getattr(model_connection, "model", "")
+                or getattr(configured_analysis_runtime, "model", "")
+                or ""
+            ),
+            "connectionName": (
+                str(getattr(model_connection, "name", "") or "") or None
+            ),
+            "connectionSource": (
+                str(getattr(model_connection, "source", "") or "") or None
+            ),
             "approvalMode": (
                 "deny_all"
                 if managed.get("approval_mode") == "deny_all"
@@ -467,8 +1107,7 @@ def create_app(
             ),
         }
 
-    @app.post("/api/codex-minimax/v1/responses")
-    async def codex_minimax_responses(body: dict[str, Any] = Body(...)) -> Any:
+    def _codex_minimax_response(body: dict[str, Any]) -> Any:
         raw_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
         status, headers, payload = proxy_minimax_response(
             raw_body,
@@ -481,6 +1120,135 @@ def create_app(
             content=payload if isinstance(payload, bytes) else b"".join(payload),
             status_code=status,
             media_type=media_type,
+        )
+
+    @app.post(
+        "/api/codex-minimax/v1/executions/{execution_id}/responses"
+    )
+    async def scoped_codex_minimax_responses(
+        execution_id: str,
+        body: dict[str, Any] = Body(...),
+    ) -> Any:
+        if not configured_report_tool_registry.begin_model_round(
+            execution_id
+        ):
+            status, headers, payload = (
+                report_build_no_progress_response()
+            )
+            return Response(
+                content=payload,
+                status_code=status,
+                media_type=headers["content-type"],
+            )
+        return _codex_minimax_response(body)
+
+    @app.post("/api/codex-minimax/v1/responses")
+    async def codex_minimax_responses(
+        body: dict[str, Any] = Body(...),
+    ) -> Any:
+        return _codex_minimax_response(body)
+
+    def _managed_codex_minimax_response(
+        connection_name: str,
+        request: Request,
+        body: dict[str, Any],
+        *,
+        execution_id: str | None = None,
+    ) -> Any:
+        authorization = str(request.headers.get("authorization") or "")
+        scheme, _, supplied_api_key = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not supplied_api_key:
+            raise HTTPException(
+                status_code=401,
+                detail="model_connection_api_key_required",
+            )
+        try:
+            registry = _managed_model_connection_registry()
+            public_connection = registry.get(connection_name)
+            connection = registry.runtime_connection(connection_name)
+        except ModelConnectionError as error:
+            _raise_model_connection_http_error(error)
+        if (
+            connection.provider_type != "minimax"
+            or not bool(public_connection.get("enabled"))
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="model_connection_is_not_an_enabled_minimax_connection",
+            )
+        if not hmac.compare_digest(
+            supplied_api_key,
+            connection.api_key,
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="model_connection_api_key_invalid",
+            )
+        if (
+            execution_id is not None
+            and not configured_report_tool_registry.begin_model_round(
+                execution_id
+            )
+        ):
+            status, headers, payload = (
+                report_build_no_progress_response()
+            )
+            return Response(
+                content=payload,
+                status_code=status,
+                media_type=headers["content-type"],
+            )
+        raw_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        status, headers, payload = proxy_minimax_response(
+            raw_body,
+            stream=bool(body.get("stream")),
+            upstream_base_url=connection.base_url,
+            upstream_api_key=supplied_api_key,
+        )
+        media_type = headers.get("content-type", "application/json")
+        if bool(body.get("stream")) and not isinstance(payload, bytes):
+            return StreamingResponse(
+                payload,
+                status_code=status,
+                media_type=media_type,
+            )
+        return Response(
+            content=(
+                payload
+                if isinstance(payload, bytes)
+                else b"".join(payload)
+            ),
+            status_code=status,
+            media_type=media_type,
+        )
+
+    @app.post("/api/codex-minimax/{connection_name}/v1/responses")
+    async def managed_codex_minimax_responses(
+        connection_name: str,
+        request: Request,
+        body: dict[str, Any] = Body(...),
+    ) -> Any:
+        return _managed_codex_minimax_response(
+            connection_name,
+            request,
+            body,
+        )
+
+    @app.post(
+        "/api/codex-minimax/{connection_name}/v1/"
+        "executions/{execution_id}/responses"
+    )
+    async def scoped_managed_codex_minimax_responses(
+        connection_name: str,
+        execution_id: str,
+        request: Request,
+        body: dict[str, Any] = Body(...),
+    ) -> Any:
+        return _managed_codex_minimax_response(
+            connection_name,
+            request,
+            body,
+            execution_id=execution_id,
         )
 
     @app.get("/api/business-semantics/finereport/reports")
@@ -996,6 +1764,12 @@ def create_app(
             ]
         }
 
+    @app.get("/api/system/context/skills")
+    def system_context_skills(request: Request) -> dict[str, Any]:
+        _require_system_api_token(request)
+        codex_home = getattr(configured_analysis_runtime, "codex_home", None)
+        return {"skills": list_installed_skills(codex_home)}
+
     @app.get("/api/report-center")
     def list_report_center(
         user_id: str = Query(min_length=1),
@@ -1031,7 +1805,33 @@ def create_app(
                 }
                 for item in center["sharedWithMe"]
             ],
+            "examples": [
+                {
+                    "report": report_response_payload(
+                        configured_report_store.get_report(
+                            item["report"]["id"]
+                        )
+                    )
+                }
+                for item in center["examples"]
+            ],
         }
+
+    @app.put("/api/internal/reports/{report_id}/example")
+    def set_report_example(
+        report_id: str,
+        request: Request,
+        body: ReportExampleBody = Body(...),
+    ) -> dict[str, Any]:
+        _require_system_api_token(request)
+        report = configured_report_store.set_report_example(
+            report_id,
+            owner_id=body.ownerId,
+            is_example=body.isExample,
+        )
+        if report is None:
+            raise HTTPException(status_code=404, detail="report_not_found")
+        return {"report": report_response_payload(report)}
 
     @app.post("/api/reports", status_code=201)
     def create_report(
@@ -1139,6 +1939,8 @@ def create_app(
                 filters=body.filters,
                 page=body.page,
                 page_size=body.pageSize,
+                sort=body.sort.model_dump() if body.sort else None,
+                column_filters=body.columnFilters,
             )
         except ReportQueryNotFound as exc:
             raise HTTPException(
@@ -1156,6 +1958,60 @@ def create_app(
                 status_code=500,
                 detail="report_query_failed",
             ) from exc
+
+    @app.post("/api/reports/{report_id}/tables/{table_id}/export")
+    def export_report_table(
+        report_id: str,
+        table_id: str,
+        body: ReportTableExportBody = Body(...),
+    ) -> Any:
+        report = configured_report_store.get_report(report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="report_not_found")
+        try:
+            exported = create_report_excel_export(
+                report,
+                table_id,
+                configured_report_query_service,
+                filters=body.filters,
+                sort=body.sort.model_dump() if body.sort else None,
+                column_filters=body.columnFilters,
+            )
+        except ReportTableNotExportable as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="report_table_not_exportable",
+            ) from exc
+        except ReportQueryNotFound as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="report_query_not_found",
+            ) from exc
+        except ReportFilterError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ReportExportLimitExceeded as exc:
+            raise HTTPException(
+                status_code=413,
+                detail="report_export_too_large",
+            ) from exc
+        except ReportQueryExecutionError as exc:
+            LOGGER.exception(
+                "report_export_failed",
+                extra={"report_id": report_id, "table_id": table_id},
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="report_export_failed",
+            ) from exc
+        return FileResponse(
+            path=exported.path,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            filename=exported.filename,
+            background=BackgroundTask(remove_export_file, exported.path),
+        )
 
     @app.get("/api/knowledge")
     def list_knowledge(
@@ -1381,6 +2237,14 @@ def _build_default_report_store() -> Any:
     if postgres_persistence_enabled():
         return build_postgres_report_store()
     return ReportStore()
+
+
+def _build_default_report_build_store(
+    report_store: Any,
+) -> Any:
+    if postgres_persistence_enabled():
+        return build_postgres_report_build_store()
+    return ReportBuildStore(report_store=report_store)
 
 
 def main() -> None:

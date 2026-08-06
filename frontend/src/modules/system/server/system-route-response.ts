@@ -2,8 +2,12 @@ import { NextResponse } from "next/server";
 
 import { SystemPromptManagementError } from "./system-prompt-management";
 import { SystemUserManagementError } from "./system-user-management";
+import { SystemBackendError } from "./system-backend-client";
 
 export function systemRouteError(error: unknown): NextResponse {
+  if (error instanceof SystemBackendError) {
+    return NextResponse.json({ error: error.code }, { status: error.status });
+  }
   if (error instanceof SystemUserManagementError) {
     const status =
       error.code === "administrator_required"

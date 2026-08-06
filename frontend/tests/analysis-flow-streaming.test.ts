@@ -5,6 +5,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentEvent, AgentInput } from "../src/modules/analysis/agentClients/types";
+import { reportFixture } from "./fixtures/report";
 
 const { mockSend, mockCancel, mockCancelTurn } = vi.hoisted(() => ({
   mockSend: vi.fn(),
@@ -20,7 +21,11 @@ vi.mock("../src/modules/analysis/agentClients", () => ({
   }),
 }));
 
-import { useFlow, type FlowNode } from "../src/modules/analysis/hooks/use-flow";
+import {
+  applyReportRevision,
+  useFlow,
+  type FlowNode,
+} from "../src/modules/analysis/hooks/use-flow";
 
 const EMPTY_FLOW: FlowNode[] = [];
 
@@ -28,6 +33,30 @@ afterEach(() => {
   mockSend.mockReset();
   mockCancel.mockReset();
   mockCancelTurn.mockReset();
+});
+
+test("keeps newer build revisions and accepts the published Report", () => {
+  const current = {
+    ...reportFixture,
+    id: "build-1",
+    buildId: "build-1",
+    buildRevision: 5,
+    buildStatus: "building" as const,
+  };
+  const stale = {
+    ...current,
+    buildRevision: 4,
+  };
+  const published = {
+    ...reportFixture,
+    id: "report-1",
+    buildId: undefined,
+    buildRevision: undefined,
+    buildStatus: undefined,
+  };
+
+  expect(applyReportRevision(current, stale)).toBe(current);
+  expect(applyReportRevision(current, published)).toBe(published);
 });
 
 describe("analysis flow streaming", () => {

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 
 from backend.analysis.asset_store import AnalysisAssetStore
+from backend.reports.build_store import ReportBuildStore
 from backend.reports.store import ReportStore
 import backend.api.analysis_api as analysis_api
 from backend.api.analysis_api import create_app
@@ -424,18 +425,25 @@ class AnalysisApiTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"GENBI_PERSISTENCE": "postgres"}, clear=False):
             with patch.object(analysis_api, "build_postgres_session_catalog") as build_session_catalog, patch.object(
                 analysis_api, "build_postgres_codex_projection_store"
-            ) as build_codex_projection_store:
+            ) as build_codex_projection_store, patch.object(
+                analysis_api, "build_postgres_report_build_store"
+            ) as build_report_build_store:
                 with tempfile.TemporaryDirectory() as temp_dir:
                     session_catalog = SessionCatalog(path=Path(temp_dir) / "sessions.jsonl")
                     codex_projection_store = CodexProjectionStore(path=Path(temp_dir) / "projections.jsonl")
+                    report_store = ReportStore(Path(temp_dir) / "reports.json")
                     build_session_catalog.return_value = session_catalog
                     build_codex_projection_store.return_value = codex_projection_store
+                    build_report_build_store.return_value = ReportBuildStore(
+                        Path(temp_dir) / "report-builds.json",
+                        report_store=report_store,
+                    )
 
                     app = create_app(
                         knowledge_store=KnowledgeStore(),
                         analysis_runtime=CodexSdkAnalysisRuntime.disabled(),
                         analysis_asset_store=AnalysisAssetStore(Path("unused-assets.jsonl")),
-                        report_store=ReportStore(Path("unused-reports.json")),
+                        report_store=report_store,
                     )
 
                     self.assertIsNotNone(app)

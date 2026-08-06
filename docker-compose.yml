@@ -41,6 +41,7 @@ services:
       GENBI_PERSISTENCE: ${GENBI_PERSISTENCE:-postgres}
       GENBI_CODEX_HOME: ${GENBI_CODEX_HOME:-/app/.codex-home}
       GENBI_SYSTEM_API_TOKEN: ${GENBI_SYSTEM_API_TOKEN:-agentic-genbi-local-system-token-change-me}
+      GENBI_MCP_ENCRYPTION_KEY: ${GENBI_MCP_ENCRYPTION_KEY:-}
     ports:
       - "8000:8000"
     volumes:

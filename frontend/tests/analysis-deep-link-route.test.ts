@@ -61,6 +61,10 @@ vi.mock("../src/modules/analysis/api/report-service", () => ({
   shouldUseBackendReports: () => false,
   listReportCenter: () => Promise.resolve({ mine: [], sharedWithMe: [] }),
   listReportsBySession: () => Promise.resolve([]),
+  getActiveReportBuild: () => Promise.resolve({
+    build: null,
+    report: null,
+  }),
 }));
 
 const routePath = resolve(process.cwd(), "src/app/analysis/[sessionId]/page.tsx");
@@ -76,6 +80,49 @@ afterEach(() => {
 });
 
 describe("analysis deep-link route", () => {
+  test("starts with the task sidebar collapsed and gives the report most of the workspace", async () => {
+    render(createElement(AnalysisWorkspace, { initialSessionId: "new" }));
+
+    const shell = document.querySelector(".shell");
+    const workspace = document.querySelector<HTMLElement>(".workspace");
+    expect(shell?.classList.contains("collapsed")).toBe(true);
+    expect(workspace?.style.gridTemplateColumns).toBe("34% 7px minmax(0, 1fr)");
+
+    const primaryNavigation = screen.getByRole("navigation", { name: "主导航" });
+    fireEvent.click(within(primaryNavigation).getByRole("button", { name: "分析工作台" }));
+    expect(shell?.classList.contains("collapsed")).toBe(false);
+    expect(await screen.findByRole("button", { name: /Task A/ })).toBeTruthy();
+  });
+
+  test("keeps the undecided workbench completely empty", () => {
+    render(createElement(AnalysisWorkspace));
+
+    const primaryNavigation = screen.getByRole("navigation", { name: "主导航" });
+    fireEvent.click(within(primaryNavigation).getByRole("button", { name: "工作台" }));
+
+    const shell = document.querySelector(".shell");
+    const sidebar = screen.getByRole("complementary", { name: "侧栏" });
+    const workbench = screen.getByRole("region", { name: "工作台" });
+
+    expect(shell?.classList.contains("collapsed")).toBe(true);
+    expect(sidebar.textContent).toBe("");
+    expect(workbench.textContent).toBe("");
+    expect(screen.queryByText("这里聚合最近分析、待确认口径、常用资产和运行状态；真正开始分析时进入分析工作台。")).toBeNull();
+  });
+
+  test("represents the business semantic library with a knowledge graph glyph", () => {
+    render(createElement(AnalysisWorkspace));
+
+    const primaryNavigation = screen.getByRole("navigation", { name: "主导航" });
+    const semanticButton = within(primaryNavigation).getByRole("button", { name: "业务语义库" });
+    const semanticIcon = semanticButton.querySelector('svg[data-icon="businessSemantics"]');
+
+    expect(semanticIcon).toBeTruthy();
+    expect(semanticIcon?.querySelectorAll("circle")).toHaveLength(4);
+    expect(semanticIcon?.querySelectorAll("path")).toHaveLength(3);
+    expect(semanticIcon?.querySelector("ellipse")).toBeNull();
+  });
+
   test("allows selecting another task while the current Codex turn keeps running", async () => {
     window.history.replaceState({ analysisSessionId: "session-a" }, "", "/analysis/session-a");
     mockGetBackendAnalysisSession.mockImplementation((sessionId: string) => Promise.resolve({

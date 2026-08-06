@@ -2,16 +2,18 @@
  * @vitest-environment jsdom
  */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { AgentEvent, AgentInput } from "../src/modules/analysis/agentClients/types";
 import type { SavedReport } from "../src/modules/analysis/types/report";
 import { reportFixture } from "./fixtures/report";
 
 const {
   mockAgentSend,
+  mockGetActiveReportBuild,
   mockGetBackendAnalysisSession,
 } = vi.hoisted(() => ({
   mockAgentSend: vi.fn(),
+  mockGetActiveReportBuild: vi.fn(),
   mockGetBackendAnalysisSession: vi.fn(),
 }));
 
@@ -56,6 +58,14 @@ vi.mock("../src/modules/analysis/api/report-service", () => ({
   shouldUseBackendReports: () => true,
   listReportCenter: () => Promise.resolve({ mine: [savedReport], sharedWithMe: [] }),
   listReportsBySession: () => Promise.resolve([]),
+  getActiveReportBuild: mockGetActiveReportBuild,
+  executeReportBuildQuery: vi.fn().mockResolvedValue({
+    columns: [],
+    rows: [],
+    page: 1,
+    pageSize: 50,
+    total: 0,
+  }),
   executeReportQuery: vi.fn().mockResolvedValue({
     columns: [],
     rows: [],
@@ -75,10 +85,56 @@ vi.mock("@visactor/react-vtable", () => ({
 
 import { AnalysisWorkspace } from "../src/modules/analysis/components/AnalysisWorkspace";
 
+beforeEach(() => {
+  mockGetActiveReportBuild.mockResolvedValue({
+    build: null,
+    report: null,
+  });
+});
+
 afterEach(() => {
   mockAgentSend.mockReset();
+  mockGetActiveReportBuild.mockReset();
   mockGetBackendAnalysisSession.mockReset();
   window.history.replaceState({}, "", "/");
+});
+
+test("restores an active Report build when opening an existing session", async () => {
+  mockGetBackendAnalysisSession.mockResolvedValue({
+    session: {
+      id: "session-with-build",
+      title: "渠道销售分析",
+      status: "active",
+      createdAt: "2026-08-06T10:01:00.000Z",
+      updatedAt: "2026-08-06T10:01:00.000Z",
+      metadata: {},
+    },
+    turns: [],
+    codexItemProjections: [],
+  });
+  mockGetActiveReportBuild.mockResolvedValue({
+    build: { id: "build-1", revision: 3 },
+    report: {
+      ...reportFixture,
+      id: "build-1",
+      title: "渠道销售分析",
+      sourceSessionId: "session-with-build",
+      buildId: "build-1",
+      buildRevision: 3,
+      buildStatus: "building",
+    },
+  });
+
+  render(
+    <AnalysisWorkspace initialSessionId="session-with-build" />,
+  );
+
+  expect(
+    await screen.findByRole("heading", { name: "渠道销售分析" }),
+  ).toBeTruthy();
+  expect(mockGetActiveReportBuild).toHaveBeenCalledWith(
+    "session-with-build",
+  );
 });
 
 test("opens a report-backed draft and creates the Codex session with the first question", async () => {

@@ -67,11 +67,11 @@ export function AnalysisTaskThread({
   return (
     <div className={`thread ${mobileHidden ? "mobile-hidden" : ""}`}>
       <header className="thread-header">
-        <div>
+        <div className="thread-heading">
           {threadBadge && <span className="thread-id-badge">{threadBadge}</span>}
           <h1>{title}</h1>
-          {statusLabel ? <em>{statusLabel}</em> : null}
         </div>
+        {statusLabel ? <em className="thread-status" role="status">{statusLabel}</em> : null}
       </header>
       {assetNotice && <div className="asset-notice" role="status">{assetNotice}</div>}
       <div className="thread-scroll" ref={threadScrollRef}>

@@ -2,6 +2,8 @@
  * @vitest-environment jsdom
  */
 import { cleanup, render } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 vi.hoisted(() => {
@@ -40,11 +42,32 @@ describe("Report empty state", () => {
     expect(view.container.querySelector(".report-canvas")).toBeNull();
   });
 
-  test("keeps the live analysis status in the headerless report area", () => {
+  test("keeps the default report blueprint while analysis runs without a Report", () => {
     const view = render(<ReportPanel taskTitle="渠道销售占比分析" running />);
 
-    expect(view.container.textContent).toContain("分析进行中");
+    expect(view.container.textContent).toContain("你的下一次分析，在这里。");
+    expect(view.container.textContent).toContain("指标、图表和明细会随着分析结果在这里展开");
+    expect(view.container.textContent).not.toContain("分析进行中");
+    expect(view.container.textContent).not.toContain("指标、图表和明细将在分析完成后呈现");
     expect(view.container.querySelector(".result-panel-header")).toBeNull();
-    expect(view.container.querySelector(".report-awaiting-spinner")).not.toBeNull();
+    expect(view.container.querySelector(".report-awaiting-spinner")).toBeNull();
+    expect(view.container.querySelector(".report-empty-preview")).not.toBeNull();
+  });
+
+  test("keeps the idle report area visually continuous with the result pane", () => {
+    const styles = readFileSync(
+      resolve(process.cwd(), "src/app/globals.css"),
+      "utf8",
+    );
+
+    expect(styles).toMatch(
+      /\.report-awaiting-body\.is-idle\s*\{[^}]*background:\s*transparent/,
+    );
+    expect(styles).toMatch(
+      /\.report-awaiting-body\.is-idle::after\s*\{[^}]*display:\s*none/,
+    );
+    expect(styles).toMatch(
+      /\.report-panel\.report-awaiting\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\)/,
+    );
   });
 });
